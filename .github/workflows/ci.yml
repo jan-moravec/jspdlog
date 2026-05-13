@@ -1,0 +1,106 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 4
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} / ${{ matrix.cxx }} / C++${{ matrix.std }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, cc: gcc-11,   cxx: g++-11,     std: 17 }
+          - { os: ubuntu-latest, cc: gcc-13,   cxx: g++-13,     std: 20 }
+          - { os: ubuntu-latest, cc: clang-15, cxx: clang++-15, std: 17 }
+          - { os: ubuntu-latest, cc: clang-15, cxx: clang++-15, std: 20 }
+          - { os: macos-latest,  cc: clang,   cxx: clang++,    std: 17 }
+          - { os: macos-latest,  cc: clang,   cxx: clang++,    std: 20 }
+          - { os: windows-latest, cc: cl,      cxx: cl,         std: 17 }
+          - { os: windows-latest, cc: cl,      cxx: cl,         std: 20 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DCMAKE_CXX_STANDARD=${{ matrix.std }} \
+            -DCMAKE_BUILD_TYPE=Release
+        shell: bash
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure -C Release
+
+      - name: Run examples (smoke)
+        shell: bash
+        run: |
+          cd build/examples
+          for exe in example_01_console example_02_rotating_file example_03_properties \
+                     example_04_custom_sink example_05_async example_06_nlohmann_raw_json; do
+            # The Windows MSBuild generator puts binaries in build/examples/Release/.
+            for candidate in "./$exe" "./Release/$exe" "./$exe.exe" "./Release/$exe.exe"; do
+              if [ -x "$candidate" ]; then
+                echo "::group::$exe"
+                "$candidate" || exit 1
+                echo "::endgroup::"
+                break
+              fi
+            done
+          done
+
+  install-smoke:
+    name: install + find_package consumer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure & build jspdlog
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DJSPDLOG_BUILD_TESTS=OFF \
+            -DJSPDLOG_BUILD_EXAMPLES=OFF
+          cmake --build build
+
+      - name: Install to a temp prefix
+        run: cmake --install build --prefix "$RUNNER_TEMP/jspdlog-prefix"
+
+      - name: Build the install_smoke consumer
+        run: |
+          cmake -S tests/install_smoke -B build-smoke \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/jspdlog-prefix"
+          cmake --build build-smoke
+
+      - name: Run the install_smoke consumer
+        run: ./build-smoke/jspdlog_install_smoke
+
+  format-check:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format-17
+      - name: Run clang-format --dry-run -Werror
+        run: |
+          find include tests examples -type f \( -name "*.h" -o -name "*.cpp" \) \
+            | xargs clang-format-17 --dry-run -Werror
