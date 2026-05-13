@@ -22,19 +22,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, cc: gcc-11,   cxx: g++-11,     std: 17 }
-          - { os: ubuntu-latest, cc: gcc-13,   cxx: g++-13,     std: 20 }
-          - { os: ubuntu-latest, cc: clang-15, cxx: clang++-15, std: 17 }
-          - { os: ubuntu-latest, cc: clang-15, cxx: clang++-15, std: 20 }
-          - { os: macos-latest,  cc: clang,   cxx: clang++,    std: 17 }
-          - { os: macos-latest,  cc: clang,   cxx: clang++,    std: 20 }
-          - { os: windows-latest, cc: cl,      cxx: cl,         std: 17 }
-          - { os: windows-latest, cc: cl,      cxx: cl,         std: 20 }
+          # Ubuntu 22.04 ships gcc-11 and clang-15 in its default apt repos;
+          # ubuntu-latest has moved to 24.04 which has neither.
+          - { os: ubuntu-22.04,   cc: gcc-11,   cxx: g++-11,     std: 17 }
+          - { os: ubuntu-22.04,   cc: clang-15, cxx: clang++-15, std: 17 }
+          # Ubuntu 24.04 (the current ubuntu-latest) ships gcc-13 and clang-18.
+          - { os: ubuntu-latest,  cc: gcc-13,   cxx: g++-13,     std: 20 }
+          - { os: ubuntu-latest,  cc: clang-18, cxx: clang++-18, std: 20 }
+          - { os: macos-latest,   cc: clang,    cxx: clang++,    std: 17 }
+          - { os: macos-latest,   cc: clang,    cxx: clang++,    std: 20 }
+          # On Windows we let CMake auto-select MSVC via the VS generator
+          # rather than passing -DCMAKE_CXX_COMPILER=cl, which would require
+          # a Developer-Command-Prompt environment that the default shell
+          # doesn't set up.
+          - { os: windows-latest, cc: '',       cxx: '',         std: 17 }
+          - { os: windows-latest, cc: '',       cxx: '',         std: 20 }
     steps:
       - uses: actions/checkout@v4
 
-      # ubuntu-latest no longer ships gcc-11 / gcc-13 / clang-15 by default;
-      # install whatever the matrix entry asks for before configure.
       - name: Install toolchain (Ubuntu)
         if: startsWith(matrix.os, 'ubuntu')
         run: |
@@ -42,7 +47,8 @@ jobs:
           sudo apt-get install -y ${{ matrix.cc }} ${{ matrix.cxx }}
         shell: bash
 
-      - name: Configure
+      - name: Configure (Unix)
+        if: runner.os != 'Windows'
         run: |
           cmake -S . -B build \
             -DCMAKE_C_COMPILER=${{ matrix.cc }} \
@@ -50,6 +56,15 @@ jobs:
             -DCMAKE_CXX_STANDARD=${{ matrix.std }} \
             -DCMAKE_BUILD_TYPE=Release
         shell: bash
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake -S . -B build ^
+            -G "Visual Studio 17 2022" -A x64 ^
+            -DCMAKE_CXX_STANDARD=${{ matrix.std }} ^
+            -DCMAKE_BUILD_TYPE=Release
+        shell: cmd
 
       - name: Build
         run: cmake --build build --config Release

@@ -12,6 +12,9 @@ malformed JSON.
 {"timestamp":"2026-05-13T09:00:00.000+02:00","logger":"app","level":"info","process":1234,"thread":5678,"user_id":42,"message":"hello world"}
 ```
 
+(The timezone offset is emitted by spdlog's `%z` flag and may render as
+either `+02:00` or `+0200` depending on the platform.)
+
 ## Why
 
 Searching for a "JSON logging C++ library" turns up surprisingly little —
@@ -237,7 +240,11 @@ arrays, objects, numbers from another serializer, etc.
 **Does `with_properties()` allocate a new spdlog logger?**  
 No. The returned child shares the parent's `std::shared_ptr<spdlog::logger>`
 (and therefore its sinks, level, error handler). Only the bound property
-strings are copied.
+strings are copied. As a consequence, *bound properties are isolated per
+child*, but configuration changes are not: calling `set_level()`,
+`set_error_handler()`, or `flush_on()` on the child reconfigures the
+underlying spdlog logger and so affects every json_logger derived from the
+same root.
 
 **Is this header-only?**  
 Yes. No `.cpp` files, no `JSPDLOG_COMPILED_LIB` mode, no link step beyond

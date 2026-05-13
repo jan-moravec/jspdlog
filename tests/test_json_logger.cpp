@@ -220,6 +220,47 @@ TEST_CASE("json_logger: logger name with special characters stays valid JSON", "
     REQUIRE(oss.str().find(expected_name_field) != std::string::npos);
 }
 
+TEST_CASE("json_logger: logger name with percent signs stays valid JSON", "[json_logger]")
+{
+    // `%` is the spdlog pattern-flag prefix. Without an extra layer of escaping,
+    // a name like "50%off" would cause spdlog to interpret `%o` as a flag (or,
+    // worse, names containing `%v`/`%n` would splice the message/name right
+    // into the "logger" field and break the JSON structure).
+    SECTION("plain percent")
+    {
+        std::ostringstream oss;
+        auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+        jspdlog::json_logger logger("50%off", std::move(sink));
+        logger.info("hi");
+        REQUIRE(oss.str().find(R"("logger":"50%off")") != std::string::npos);
+        REQUIRE(oss.str().find(R"("message":"hi")") != std::string::npos);
+    }
+
+    SECTION("percent v does not splice the message")
+    {
+        std::ostringstream oss;
+        auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+        jspdlog::json_logger logger("svc-%v-edge", std::move(sink));
+        logger.info("payload");
+        REQUIRE(oss.str().find(R"("logger":"svc-%v-edge")") != std::string::npos);
+        // Exactly one occurrence of the message text -- not duplicated into
+        // the "logger" field by a spurious %v expansion.
+        const std::string out = oss.str();
+        const auto first = out.find("payload");
+        REQUIRE(first != std::string::npos);
+        REQUIRE(out.find("payload", first + 1) == std::string::npos);
+    }
+
+    SECTION("percent n does not splice the logger name")
+    {
+        std::ostringstream oss;
+        auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+        jspdlog::json_logger logger("a%nb", std::move(sink));
+        logger.info("ok");
+        REQUIRE(oss.str().find(R"("logger":"a%nb")") != std::string::npos);
+    }
+}
+
 TEST_CASE("json_logger: pattern is re-applied even when adopting an existing spdlog logger", "[json_logger]")
 {
     std::ostringstream oss;

@@ -20,6 +20,11 @@ public:
 protected:
     void sink_it_(const spdlog::details::log_msg &msg) override
     {
+        // `formatter_` is the spdlog::pattern_formatter installed on this
+        // sink. It is a protected member of base_sink and is only reachable
+        // because we inherit from it; this is the way spdlog expects custom
+        // sinks to render the active pattern (including jspdlog's pinned
+        // JSON pattern). Free-standing helpers can't reach it.
         spdlog::memory_buf_t formatted;
         base_sink<std::mutex>::formatter_->format(msg, formatted);
         lines.emplace_back(formatted.data(), formatted.size());

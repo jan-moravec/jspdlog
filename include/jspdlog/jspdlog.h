@@ -19,7 +19,8 @@
 //   logger.set_level(spdlog::level::trace);
 //   logger.info(jspdlog::json_properties{"user_id", 42}, "hello {}", "world");
 //
-// Example output:
+// Example output (the timezone offset uses spdlog's %z flag and may render
+// as either "+02:00" or "+0200" depending on the platform):
 //   {"timestamp":"2026-05-13T08:00:00.000+02:00","logger":"app",
 //    "level":"info","process":1234,"thread":5678,
 //    "user_id":42,"message":"hello world"}
@@ -114,12 +115,30 @@ inline void append_json_quoted(std::string &out, std::string_view s)
 // trailing %v is where json_logger writes the property fragment (and the
 // optional ,"message":"...") and the closing brace is part of the pattern
 // itself, which is what guarantees the line is always valid JSON.
+//
+// Two layers of escaping are needed for the logger name:
+//   1. JSON-escape the bytes so the resulting field value is valid JSON.
+//   2. Double every `%` so spdlog's pattern parser treats them as literals
+//      rather than format-flag prefixes (otherwise a name like "50%off"
+//      would inject whatever `%o` happens to expand to, breaking the
+//      structurally-valid-JSON guarantee).
 inline std::string make_json_pattern(std::string_view name)
 {
+    std::string quoted_name;
+    quoted_name.reserve(name.size() + 2);
+    append_json_quoted(quoted_name, name);
+
     std::string out;
-    out.reserve(120 + name.size());
+    out.reserve(120 + quoted_name.size());
     out += R"({"timestamp":"%Y-%m-%dT%H:%M:%S.%e%z","logger":)";
-    append_json_quoted(out, name);
+    for (char c : quoted_name)
+    {
+        out.push_back(c);
+        if (c == '%')
+        {
+            out.push_back('%');
+        }
+    }
     out += R"(,"level":"%l","process":%P,"thread":%t%v})";
     return out;
 }
@@ -156,17 +175,27 @@ class json_properties
 public:
     json_properties() = default;
 
+    // The default copy/move ops are correct; we spell them out so the move
+    // ops are visibly noexcept (which they are under any reasonable stdlib
+    // implementation with std::allocator and std::less) for callers that
+    // want to wrap json_properties in containers that care.
+    json_properties(const json_properties &) = default;
+    json_properties(json_properties &&) noexcept = default;
+    json_properties &operator=(const json_properties &) = default;
+    json_properties &operator=(json_properties &&) noexcept = default;
+    ~json_properties() = default;
+
     template <typename T>
-    json_properties(const std::string &key, const T &value)
+    json_properties(const std::string &key, T &&value)
     {
-        insert(key, value);
+        insert(key, std::forward<T>(value));
     }
 
     template <typename T, typename... Args>
-    json_properties(const std::string &key, const T &value, Args &&...args)
+    json_properties(const std::string &key, T &&value, Args &&...args)
     {
         static_assert(sizeof...(args) % 2 == 0, "json_properties requires key/value pairs");
-        insert(key, value);
+        insert(key, std::forward<T>(value));
         insert_pairs_(std::forward<Args>(args)...);
     }
 
@@ -292,12 +321,12 @@ public:
         // Take ownership of `other`'s storage first, then merge back anything
         // we already had under keys that don't collide. Duplicates keep
         // `other`'s value (which is now in `members_`), matching the
-        // copy-merge semantics above. Note that `other` ends in a partially
-        // emptied but valid state: keys whose values lost the collision stay
-        // behind in `other.members_`. This is harmless because the rvalue
-        // overload's caller is giving up the object anyway.
+        // copy-merge semantics above. std::map::merge leaves colliding
+        // entries behind in the source; clear them so the moved-from object
+        // is left in the conventional empty-but-valid state.
         std::swap(members_, other.members_);
         members_.merge(other.members_);
+        other.members_.clear();
     }
 
     // --- Inspection -----------------------------------------------------------
@@ -312,7 +341,17 @@ public:
     // `,"key1":1,"key2":"two"`.
     [[nodiscard]] std::string to_string() const
     {
+        // Pre-size: each entry contributes at least key.size() + value.size()
+        // + 4 chars (the comma, the two quotes around the key, and the colon).
+        // Keys that need JSON-escaping push the actual size higher, but for
+        // the common case this avoids re-allocating across the loop.
+        std::size_t expected = 0;
+        for (const auto &[key, value] : members_)
+        {
+            expected += key.size() + value.size() + 4;
+        }
         std::string out;
+        out.reserve(expected);
         for (const auto &[key, value] : members_)
         {
             out.push_back(',');
@@ -325,10 +364,10 @@ public:
 
 private:
     template <typename First, typename Second, typename... Rest>
-    void insert_pairs_(const First &first, const Second &second, Rest &&...rest)
+    void insert_pairs_(First &&first, Second &&second, Rest &&...rest)
     {
         static_assert(std::is_convertible_v<First, std::string>, "key must be convertible to std::string");
-        insert(first, second);
+        insert(std::forward<First>(first), std::forward<Second>(second));
         if constexpr (sizeof...(rest) > 0)
         {
             insert_pairs_(std::forward<Rest>(rest)...);
@@ -399,7 +438,10 @@ public:
     // with a custom error handler, registered in the spdlog registry, or
     // assembled by another framework). The JSON pattern is re-applied so the
     // result is still guaranteed-valid JSON, regardless of whatever pattern
-    // was previously set.
+    // was previously set. Note that set_pattern() resets spdlog's
+    // pattern-time mode to local time; if the adopted logger was previously
+    // configured for UTC, re-apply that mode on the returned logger via
+    // spdlog_logger() if needed.
     [[nodiscard]] static json_logger adopt(std::shared_ptr<spdlog::logger> logger)
     {
         return json_logger(std::move(logger));
@@ -416,6 +458,13 @@ public:
     // Returns a child logger that shares the underlying spdlog::logger (and
     // therefore its sinks, level, error handler), but carries an additional
     // set of bound properties. Existing keys are overridden by `props`.
+    //
+    // Sharing the spdlog::logger means *bound properties are isolated per
+    // child*, but configuration mutations are not: calling set_level(),
+    // set_error_handler(), flush(), or flush_on() on the child reaches
+    // through to the same underlying spdlog::logger as the parent and so
+    // affects every json_logger derived from the same root. If you need
+    // truly independent configuration, construct a new json_logger.
     [[nodiscard]] json_logger with_properties(json_properties props) const
     {
         json_logger copy = *this;
@@ -518,8 +567,9 @@ public:
     }
 
     // Escape hatch for any spdlog::logger configuration we don't expose
-    // directly (extra sinks, custom error handler, etc.). Do NOT call
-    // set_pattern() on this; doing so will break the JSON output.
+    // directly (extra sinks, custom error handler, etc.). The "structurally
+    // impossible to emit invalid JSON" guarantee assumes nobody calls
+    // set_pattern() on the returned logger -- doing so will break it.
     [[nodiscard]] const std::shared_ptr<spdlog::logger> &spdlog_logger() const noexcept
     {
         return logger_;
@@ -613,10 +663,11 @@ private:
 
     void log_message_(spdlog::level lvl, std::string msg)
     {
+        static constexpr std::string_view message_sep = R"(,"message":)";
         std::string out;
-        out.reserve(cached_properties_.size() + msg.size() + 16);
+        out.reserve(cached_properties_.size() + message_sep.size() + msg.size() + 2);
         out += cached_properties_;
-        out += R"(,"message":)";
+        out += message_sep;
         detail::append_json_quoted(out, msg);
         logger_->log(lvl, out);
     }
@@ -625,21 +676,31 @@ private:
     {
         // Mirrors the fast paths in log_(level, props): the merge-and-
         // serialize is only needed when both sides carry properties.
-        std::string out;
+        // We materialize the fragment first, then reserve once before
+        // appending the ",\"message\":..." tail.
+        static constexpr std::string_view message_sep = R"(,"message":)";
+
+        std::string fragment_storage;
+        std::string_view fragment;
         if (props.empty())
         {
-            out = cached_properties_;
+            fragment = cached_properties_;
         }
         else if (properties_.empty())
         {
-            out = props.to_string();
+            fragment_storage = props.to_string();
+            fragment = fragment_storage;
         }
         else
         {
-            out = (properties_ + props).to_string();
+            fragment_storage = (properties_ + props).to_string();
+            fragment = fragment_storage;
         }
-        out.reserve(out.size() + msg.size() + 16);
-        out += R"(,"message":)";
+
+        std::string out;
+        out.reserve(fragment.size() + message_sep.size() + msg.size() + 2);
+        out.append(fragment.data(), fragment.size());
+        out += message_sep;
         detail::append_json_quoted(out, msg);
         logger_->log(lvl, out);
     }
@@ -658,12 +719,26 @@ private:
 // is intentional: subsequent with_properties() calls on the original
 // destination do not affect the forwarder. Errors emitted by `source` after
 // this call surface as `destination.warn({"source", source.name()}, "{}", msg)`.
+//
+// Exceptions thrown from the destination's own logging path are swallowed.
+// An error handler that throws would re-enter spdlog's error machinery and
+// risk infinite recursion (or, depending on the sink, deadlocking against
+// the destination's own mutex). Silently dropping the secondary failure is
+// the conservative choice when the user has already opted into "best-effort
+// error reporting".
 inline void forward_errors_to(json_logger &source, json_logger destination)
 {
     auto name = source.name();
     source.set_error_handler(
         [name = std::move(name), dest = std::move(destination)](std::string_view msg) mutable {
-            dest.warn(json_properties{"source", name}, "{}", msg);
+            try
+            {
+                dest.warn(json_properties{"source", name}, "{}", msg);
+            }
+            catch (...)
+            {
+                // Intentionally swallowed; see comment above.
+            }
         });
 }
 
