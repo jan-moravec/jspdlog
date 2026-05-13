@@ -605,19 +605,25 @@ private:
         // Fast paths: avoid copying maps when we already have a precomputed
         // fragment (cached_properties_) or when one side is empty. Only the
         // both-non-empty branch needs the actual merge to honor "rhs wins"
-        // semantics on key collisions.
-        std::string fragment;
+        // semantics on key collisions. The `fragment_storage` / `fragment`
+        // split mirrors log_message_(level, props, msg) -- on the
+        // "bound-properties only" path we can hand cached_properties_ to
+        // spdlog as a view rather than copying it into a fresh std::string.
+        std::string fragment_storage;
+        std::string_view fragment;
         if (props.empty())
         {
             fragment = cached_properties_;
         }
         else if (properties_.empty())
         {
-            fragment = props.to_string();
+            fragment_storage = props.to_string();
+            fragment = fragment_storage;
         }
         else
         {
-            fragment = (properties_ + props).to_string();
+            fragment_storage = (properties_ + props).to_string();
+            fragment = fragment_storage;
         }
         logger_->log(lvl, fragment);
     }
