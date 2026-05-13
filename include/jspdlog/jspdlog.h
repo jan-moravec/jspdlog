@@ -30,6 +30,13 @@
 #include <spdlog/logger.h>
 #include <spdlog/sinks/sink.h>
 
+// fmt is required transitively by spdlog v2 (it always uses external fmt).
+// We include <fmt/format.h> directly because <spdlog/common.h> only pulls in
+// the base/xchar parts of fmt, not the full string-returning `fmt::format`
+// helpers we use below. All call sites route through `spdlog::fmt_lib`
+// (defined in spdlog/common.h as a namespace alias for `fmt`) so the
+// abstraction matches spdlog's own naming and adapts automatically if v2
+// ever grows a std::format mode.
 #include <fmt/format.h>
 
 #include <cmath>
@@ -215,11 +222,11 @@ public:
     // convention, non-finite floats are serialized as `null`.
     void insert(const std::string &key, float value)
     {
-        members_[key] = std::isfinite(value) ? fmt::format("{}", value) : "null";
+        members_[key] = std::isfinite(value) ? spdlog::fmt_lib::format("{}", value) : "null";
     }
     void insert(const std::string &key, double value)
     {
-        members_[key] = std::isfinite(value) ? fmt::format("{}", value) : "null";
+        members_[key] = std::isfinite(value) ? spdlog::fmt_lib::format("{}", value) : "null";
     }
 
     // Empty raw_json content would produce ",\"key\":" followed by `,` or `}`
@@ -528,7 +535,7 @@ private:
         {
             return;
         }
-        log_message_(lvl, fmt::format(fmt, std::forward<Args>(args)...));
+        log_message_(lvl, spdlog::fmt_lib::format(fmt, std::forward<Args>(args)...));
     }
 
     template <typename T>
@@ -538,7 +545,7 @@ private:
         {
             return;
         }
-        log_message_(lvl, fmt::format("{}", msg));
+        log_message_(lvl, spdlog::fmt_lib::format("{}", msg));
     }
 
     template <typename... Args>
@@ -549,7 +556,7 @@ private:
         {
             return;
         }
-        log_message_(lvl, props, fmt::format(fmt, std::forward<Args>(args)...));
+        log_message_(lvl, props, spdlog::fmt_lib::format(fmt, std::forward<Args>(args)...));
     }
 
     template <typename T>
@@ -559,7 +566,7 @@ private:
         {
             return;
         }
-        log_message_(lvl, props, fmt::format("{}", msg));
+        log_message_(lvl, props, spdlog::fmt_lib::format("{}", msg));
     }
 
     // --- log_ leaf functions (build the JSON fragment and hand to spdlog) ----
