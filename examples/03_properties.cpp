@@ -1,6 +1,7 @@
 // Bound properties on parent + per-call extras.
 
 #include <jspdlog/jspdlog.h>
+
 #include <spdlog/sinks/stdout_color_sinks.h>
 
 int main()

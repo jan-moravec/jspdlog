@@ -3,8 +3,10 @@
 // to jspdlog::raw_json. The library inserts it verbatim into the log line.
 
 #include <jspdlog/jspdlog.h>
-#include <nlohmann/json.hpp>
+
 #include <spdlog/sinks/stdout_color_sinks.h>
+
+#include <nlohmann/json.hpp>
 
 int main()
 {
@@ -14,7 +16,7 @@ int main()
     nlohmann::json items = {"alpha", "beta", "gamma"};
 
     logger.info(
-        {"features", jspdlog::raw_json{features.dump()}, "items", jspdlog::raw_json{items.dump()}},
-        "loaded config");
+        {"features", jspdlog::raw_json{features.dump()}, "items", jspdlog::raw_json{items.dump()}}, "loaded config"
+    );
     return 0;
 }

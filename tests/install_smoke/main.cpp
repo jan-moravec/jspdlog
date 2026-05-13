@@ -3,6 +3,7 @@
 // unit tests do that.
 
 #include <jspdlog/jspdlog.h>
+
 #include <spdlog/sinks/null_sink.h>
 
 int main()

@@ -25,24 +25,32 @@ TEST_CASE("json_properties: variadic constructor + addition operators", "[json_p
     const jspdlog::json_properties p3 = jspdlog::json_properties{"property4", 1.23} + p2;
     REQUIRE(p3.to_string() == R"(,"property1":"abcd","property2":true,"property3":123,"property4":1.23)");
 
-    const jspdlog::json_properties p4 = jspdlog::json_properties{"property1", 123} +
-                                        jspdlog::json_properties{"property2", 1.23};
+    const jspdlog::json_properties p4 =
+        jspdlog::json_properties{"property1", 123} + jspdlog::json_properties{"property2", 1.23};
     REQUIRE(p4.to_string() == R"(,"property1":123,"property2":1.23)");
 }
 
 TEST_CASE("json_properties: covers all scalar types and raw_json", "[json_properties]")
 {
     const jspdlog::json_properties properties{
-        "p1", std::string("abc"),
-        "p2", true,
-        "p3", 1.23,
-        "p4", 123,
-        "p5", -123,
-        "p6", nullptr,
-        "p7", jspdlog::raw_json{R"([1,true,"a"])"},
+        "p1",
+        std::string("abc"),
+        "p2",
+        true,
+        "p3",
+        1.23,
+        "p4",
+        123,
+        "p5",
+        -123,
+        "p6",
+        nullptr,
+        "p7",
+        jspdlog::raw_json{R"([1,true,"a"])"},
     };
-    REQUIRE(properties.to_string() ==
-            R"(,"p1":"abc","p2":true,"p3":1.23,"p4":123,"p5":-123,"p6":null,"p7":[1,true,"a"])");
+    REQUIRE(
+        properties.to_string() == R"(,"p1":"abc","p2":true,"p3":1.23,"p4":123,"p5":-123,"p6":null,"p7":[1,true,"a"])"
+    );
 }
 
 TEST_CASE("json_properties: null pointers become null", "[json_properties]")
@@ -138,8 +146,7 @@ TEST_CASE("json_properties: operator+ keeps rhs values on key collisions", "[jso
     }
     SECTION("rvalue + rvalue")
     {
-        REQUIRE((jspdlog::json_properties{"x", 1} + jspdlog::json_properties{"x", 2}).to_string() ==
-                R"(,"x":2)");
+        REQUIRE((jspdlog::json_properties{"x", 1} + jspdlog::json_properties{"x", 2}).to_string() == R"(,"x":2)");
     }
 }
 
@@ -166,15 +173,22 @@ TEST_CASE("json_properties: non-finite floats serialize as null", "[json_propert
 TEST_CASE("json_properties: accepts narrow and wide integer types", "[json_properties]")
 {
     const jspdlog::json_properties properties{
-        "i16",     static_cast<std::int16_t>(-32000),
-        "u16",     static_cast<std::uint16_t>(65000),
-        "schar",   static_cast<signed char>(-12),
-        "uchar",   static_cast<unsigned char>(200),
-        "short_v", static_cast<short>(-7),
-        "size",    static_cast<std::size_t>(1234567890ULL),
+        "i16",
+        static_cast<std::int16_t>(-32000),
+        "u16",
+        static_cast<std::uint16_t>(65000),
+        "schar",
+        static_cast<signed char>(-12),
+        "uchar",
+        static_cast<unsigned char>(200),
+        "short_v",
+        static_cast<short>(-7),
+        "size",
+        static_cast<std::size_t>(1234567890ULL),
     };
-    REQUIRE(properties.to_string() ==
-            R"(,"i16":-32000,"schar":-12,"short_v":-7,"size":1234567890,"u16":65000,"uchar":200)");
+    REQUIRE(
+        properties.to_string() == R"(,"i16":-32000,"schar":-12,"short_v":-7,"size":1234567890,"u16":65000,"uchar":200)"
+    );
 }
 
 TEST_CASE("json_properties: plain char is a one-character JSON string", "[json_properties]")
@@ -194,23 +208,29 @@ TEST_CASE("json_properties: signed char and unsigned char remain integers", "[js
     // signed char / unsigned char are the canonical int8_t / uint8_t types
     // so they're documented as integer-valued; the dedicated string-emitting
     // overload is reserved for plain `char`.
-    const jspdlog::json_properties properties{"sc", static_cast<signed char>(-5),
-                                                "uc", static_cast<unsigned char>(200)};
+    const jspdlog::json_properties properties{
+        "sc", static_cast<signed char>(-5), "uc", static_cast<unsigned char>(200)
+    };
     REQUIRE(properties.to_string() == R"(,"sc":-5,"uc":200)");
 }
 
 TEST_CASE("json_properties: empty raw_json serializes as null", "[json_properties]")
 {
     const jspdlog::json_properties properties{
-        "empty_lvalue", jspdlog::raw_json{""},
-        "empty_rvalue", jspdlog::raw_json{std::string{}},
-        "nonempty", jspdlog::raw_json{"[1]"},
+        "empty_lvalue",
+        jspdlog::raw_json{""},
+        "empty_rvalue",
+        jspdlog::raw_json{std::string{}},
+        "nonempty",
+        jspdlog::raw_json{"[1]"},
     };
     REQUIRE(properties.to_string() == R"(,"empty_lvalue":null,"empty_rvalue":null,"nonempty":[1])");
 }
 
-TEST_CASE("json_properties: append_merged_to matches operator+().to_string() and never appends to nothing",
-          "[json_properties]")
+TEST_CASE(
+    "json_properties: append_merged_to matches operator+().to_string() and never appends to nothing",
+    "[json_properties]"
+)
 {
     // append_merged_to is the hot-path equivalent of "(lhs + rhs).to_string()"
     // -- it walks both sorted maps in lockstep and emits straight into the

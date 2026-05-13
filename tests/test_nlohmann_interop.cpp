@@ -3,10 +3,11 @@
 // the raw_json wrapper.
 
 #include <jspdlog/jspdlog.h>
-#include <nlohmann/json.hpp>
+
+#include <spdlog/sinks/ostream_sink.h>
 
 #include <catch2/catch_test_macros.hpp>
-#include <spdlog/sinks/ostream_sink.h>
+#include <nlohmann/json.hpp>
 
 #include <limits>
 #include <sstream>
@@ -22,9 +23,12 @@ TEST_CASE("raw_json: nlohmann arrays and objects round-trip into the log line", 
     const nlohmann::json items = {1, true, "a"};
     const nlohmann::json features = {{"streaming", true}, {"limit", 10}};
 
-    logger.info(jspdlog::json_properties{"items", jspdlog::raw_json{items.dump()}, "features",
-                                          jspdlog::raw_json{features.dump()}},
-                "ok");
+    logger.info(
+        jspdlog::json_properties{
+            "items", jspdlog::raw_json{items.dump()}, "features", jspdlog::raw_json{features.dump()}
+        },
+        "ok"
+    );
 
     const std::string out = oss.str();
     REQUIRE(out.find(R"("items":[1,true,"a"])") != std::string::npos);
@@ -63,10 +67,13 @@ TEST_CASE("raw_json: pathological inputs still produce parseable JSON", "[intero
     const double nan = std::numeric_limits<double>::quiet_NaN();
     logger.info(
         jspdlog::json_properties{
-            "empty_payload", jspdlog::raw_json{""},
-            "nan_value",     nan,
+            "empty_payload",
+            jspdlog::raw_json{""},
+            "nan_value",
+            nan,
         },
-        "with control \x01 byte");
+        "with control \x01 byte"
+    );
 
     const std::string out = oss.str();
     const auto eol_pos = out.find_first_of("\r\n");

@@ -3,6 +3,7 @@
 // queued for the worker thread.
 
 #include <jspdlog/jspdlog.h>
+
 #include <spdlog/sinks/async_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 

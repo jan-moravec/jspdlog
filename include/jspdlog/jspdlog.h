@@ -209,10 +209,7 @@ public:
     // Each typed overload serializes the value into a small std::string. The
     // pointer template recurses through any depth of pointer-to-pointer.
 
-    void insert(const std::string &key, std::nullptr_t)
-    {
-        members_[key] = "null";
-    }
+    void insert(const std::string &key, std::nullptr_t) { members_[key] = "null"; }
 
     void insert(const std::string &key, const char *value)
     {
@@ -234,24 +231,15 @@ public:
         members_[key] = std::move(encoded);
     }
 
-    void insert(const std::string &key, const std::string &value)
-    {
-        insert(key, std::string_view{value});
-    }
+    void insert(const std::string &key, const std::string &value) { insert(key, std::string_view{value}); }
 
-    void insert(const std::string &key, bool value)
-    {
-        members_[key] = value ? "true" : "false";
-    }
+    void insert(const std::string &key, bool value) { members_[key] = value ? "true" : "false"; }
 
     // Plain `char` is treated as a single-character JSON string rather than
     // a small integer, which is what users almost always want. signed char
     // and unsigned char keep the integer behavior because they're the
     // canonical 8-bit integer types (int8_t, uint8_t).
-    void insert(const std::string &key, char value)
-    {
-        insert(key, std::string_view{&value, 1});
-    }
+    void insert(const std::string &key, char value) { insert(key, std::string_view{&value, 1}); }
 
     // Wide character types deliberately don't compile: encoding a single
     // wchar_t/char16_t/char32_t to UTF-8 requires a unicode encoder, which
@@ -265,9 +253,9 @@ public:
     // ones (short, signed/unsigned char, int16_t, ...) and the wide ones
     // (long long, std::size_t, ...). bool and char are excluded so their
     // dedicated overloads win on overload resolution.
-    template <typename T,
-              std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool> && !std::is_same_v<T, char>,
-                               int> = 0>
+    template <
+        typename T,
+        std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool> && !std::is_same_v<T, char>, int> = 0>
     void insert(const std::string &key, T value)
     {
         members_[key] = std::to_string(value);
@@ -337,10 +325,7 @@ public:
 
     // --- Inspection -----------------------------------------------------------
 
-    [[nodiscard]] bool empty() const noexcept
-    {
-        return members_.empty();
-    }
+    [[nodiscard]] bool empty() const noexcept { return members_.empty(); }
 
     // Returns the serialized fragment ready to be appended after the spdlog
     // header. Always begins with a comma when non-empty, e.g.
@@ -427,8 +412,9 @@ private:
         // be asking "is this reference type convertible to std::string?",
         // which only works by accident of array-to-pointer decay during
         // overload resolution. With std::decay_t the intent is explicit.
-        static_assert(std::is_convertible_v<std::decay_t<First>, std::string>,
-                      "key must be convertible to std::string");
+        static_assert(
+            std::is_convertible_v<std::decay_t<First>, std::string>, "key must be convertible to std::string"
+        );
         insert(std::forward<First>(first), std::forward<Second>(second));
         if constexpr (sizeof...(rest) > 0)
         {
@@ -560,8 +546,7 @@ public:
             logger_->set_error_handler({});
             return;
         }
-        logger_->set_error_handler(
-            [h = std::move(handler)](const std::string &msg) { h(msg); });
+        logger_->set_error_handler([h = std::move(handler)](const std::string &msg) { h(msg); });
     }
 
     // --- Logging API ----------------------------------------------------------
@@ -613,32 +598,17 @@ public:
 
     // --- spdlog passthroughs --------------------------------------------------
 
-    [[nodiscard]] const std::string &name() const noexcept
-    {
-        return logger_->name();
-    }
+    [[nodiscard]] const std::string &name() const noexcept { return logger_->name(); }
 
     // Named to match spdlog::logger::log_level() (and to avoid shadowing the
     // unqualified `spdlog::level` type inside the class body).
-    [[nodiscard]] spdlog::level log_level() const noexcept
-    {
-        return logger_->log_level();
-    }
+    [[nodiscard]] spdlog::level log_level() const noexcept { return logger_->log_level(); }
 
-    void set_level(spdlog::level lvl)
-    {
-        logger_->set_level(lvl);
-    }
+    void set_level(spdlog::level lvl) { logger_->set_level(lvl); }
 
-    void flush()
-    {
-        logger_->flush();
-    }
+    void flush() { logger_->flush(); }
 
-    void flush_on(spdlog::level lvl)
-    {
-        logger_->flush_on(lvl);
-    }
+    void flush_on(spdlog::level lvl) { logger_->flush_on(lvl); }
 
     // Switch between local and UTC timestamps without losing the pinned
     // JSON pattern. Internally this re-applies the same JSON pattern that
@@ -656,21 +626,16 @@ public:
     // directly (extra sinks, custom error handler, etc.). The "structurally
     // impossible to emit invalid JSON" guarantee assumes nobody calls
     // set_pattern() on the returned logger -- doing so will break it.
-    [[nodiscard]] const std::shared_ptr<spdlog::logger> &spdlog_logger() const noexcept
-    {
-        return logger_;
-    }
+    [[nodiscard]] const std::shared_ptr<spdlog::logger> &spdlog_logger() const noexcept { return logger_; }
 
 private:
-    explicit json_logger(std::shared_ptr<spdlog::logger> logger) : logger_(std::move(logger))
+    explicit json_logger(std::shared_ptr<spdlog::logger> logger)
+        : logger_(std::move(logger))
     {
         apply_pattern_();
     }
 
-    void apply_pattern_()
-    {
-        logger_->set_pattern(detail::make_json_pattern(logger_->name()));
-    }
+    void apply_pattern_() { logger_->set_pattern(detail::make_json_pattern(logger_->name())); }
 
     // --- log_ dispatch --------------------------------------------------------
 
@@ -734,8 +699,7 @@ private:
     }
 
     template <typename... Args>
-    void log_(spdlog::level lvl, const json_properties &props, spdlog::format_string_t<Args...> fmt,
-              Args &&...args)
+    void log_(spdlog::level lvl, const json_properties &props, spdlog::format_string_t<Args...> fmt, Args &&...args)
     {
         if (!logger_->should_log(lvl))
         {
@@ -834,24 +798,24 @@ inline void forward_errors_to(json_logger &source, json_logger destination)
 {
     auto name = source.name();
     auto in_handler = std::make_shared<std::atomic<bool>>(false);
-    source.set_error_handler(
-        [name = std::move(name), dest = std::move(destination),
-         in_handler = std::move(in_handler)](std::string_view msg) mutable {
-            bool expected = false;
-            if (!in_handler->compare_exchange_strong(expected, true))
-            {
-                return;
-            }
-            try
-            {
-                dest.warn(json_properties{"source", name}, "{}", msg);
-            }
-            catch (...)
-            {
-                // Intentionally swallowed; see comment above.
-            }
-            in_handler->store(false);
-        });
+    source.set_error_handler([name = std::move(name),
+                              dest = std::move(destination),
+                              in_handler = std::move(in_handler)](std::string_view msg) mutable {
+        bool expected = false;
+        if (!in_handler->compare_exchange_strong(expected, true))
+        {
+            return;
+        }
+        try
+        {
+            dest.warn(json_properties{"source", name}, "{}", msg);
+        }
+        catch (...)
+        {
+            // Intentionally swallowed; see comment above.
+        }
+        in_handler->store(false);
+    });
 }
 
 } // namespace jspdlog

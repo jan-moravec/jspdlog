@@ -2,6 +2,7 @@
 // lines into a std::vector for testing or in-memory inspection.
 
 #include <jspdlog/jspdlog.h>
+
 #include <spdlog/details/null_mutex.h>
 #include <spdlog/sinks/base_sink.h>
 
@@ -29,9 +30,7 @@ protected:
         base_sink<std::mutex>::formatter_->format(msg, formatted);
         lines.emplace_back(formatted.data(), formatted.size());
     }
-    void flush_() override
-    {
-    }
+    void flush_() override {}
 };
 
 int main()
