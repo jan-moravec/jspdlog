@@ -33,7 +33,7 @@ if(NOT spdlog_FOUND)
     FetchContent_Declare(
         spdlog
         GIT_REPOSITORY https://github.com/gabime/spdlog.git
-        GIT_TAG        b8944a4bcd478ee03375c9c50dc8d6c741f43f7b # tip of v2.x as of 2026-05
+        GIT_TAG        b8944a4bcd478ee03375c9c50dc8d6c741f43f7b # pinned commit on spdlog's v2.x branch
     )
     # Forward our install opt-in to spdlog so that `cmake --install` ships a
     # spdlog package alongside jspdlog when no system spdlog was found.

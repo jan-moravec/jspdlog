@@ -74,6 +74,19 @@ find_package(jspdlog CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE jspdlog::jspdlog)
 ```
 
+## Build options
+
+All options default to `ON` when jspdlog is the top-level CMake project and
+`OFF` when it's pulled in via `add_subdirectory` / `FetchContent`, so an
+embedding project gets a quiet build by default.
+
+| Option                          | Description                                                                 |
+|---------------------------------|-----------------------------------------------------------------------------|
+| `JSPDLOG_BUILD_TESTS`           | Build the Catch2 unit-test suite.                                           |
+| `JSPDLOG_BUILD_EXAMPLES`        | Build the standalone example programs under `examples/`.                    |
+| `JSPDLOG_INSTALL`               | Generate `install` rules for the header and CMake package config.           |
+| `JSPDLOG_TEST_NLOHMANN_INTEROP` | Build the optional `raw_json` ↔ nlohmann/json interop test (fetched).       |
+
 ## 30-second quickstart
 
 ```cpp
@@ -128,11 +141,17 @@ void info(const json_properties& props);                          // properties 
 
 // Property binding.
 json_logger with_properties(json_properties props) const;         // returns a child logger
-void set_internal_logger(json_logger internal);                   // forward spdlog errors
+
+// Error handling. Pass an empty std::function to restore the spdlog default.
+void set_error_handler(std::function<void(std::string_view)> handler);
+
+// Free helper: forward spdlog runtime errors from `source` to `destination`
+// as structured JSON warn lines tagged with the source logger's name.
+void jspdlog::forward_errors_to(json_logger& source, json_logger destination);
 
 // spdlog passthroughs.
-const std::string& name() const;
-spdlog::level level() const;
+const std::string& name() const noexcept;
+spdlog::level log_level() const noexcept;
 void set_level(spdlog::level level);
 void flush();
 void flush_on(spdlog::level level);
@@ -167,6 +186,11 @@ std::string to_string() const;                                    // serialized 
 
 `json_properties` overloads `operator+` for composition (`a + b` returns the
 merge with `b`'s values winning on collisions).
+
+Keys are emitted in **lexicographic order** rather than insertion order. This
+keeps the output deterministic for a given set of keys and makes log-line
+regression tests trivial to write, but it does mean callers should not rely
+on a specific field ordering when scanning by eye.
 
 ### `jspdlog::raw_json`
 

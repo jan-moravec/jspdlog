@@ -7,7 +7,7 @@ int main()
 {
     constexpr std::size_t bytes_per_megabyte = 1024 * 1024;
     auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-        "app.log", 10 * bytes_per_megabyte, /*max_files=*/5);
+        "example_02_rotating.log", 10 * bytes_per_megabyte, /*max_files=*/5);
 
     jspdlog::json_logger logger("app", std::move(sink));
     logger.flush_on(spdlog::level::warn);

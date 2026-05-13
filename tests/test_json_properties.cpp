@@ -177,6 +177,28 @@ TEST_CASE("json_properties: accepts narrow and wide integer types", "[json_prope
             R"(,"i16":-32000,"schar":-12,"short_v":-7,"size":1234567890,"u16":65000,"uchar":200)");
 }
 
+TEST_CASE("json_properties: plain char is a one-character JSON string", "[json_properties]")
+{
+    // `char` is the natural type of a single character literal (e.g. 'a'),
+    // and almost always meant to be a string-typed value rather than its
+    // numeric code point.
+    const jspdlog::json_properties properties{"c", 'a', "newline", '\n', "quote", '"'};
+    // Hoisted because MSVC mis-handles stringification of raw strings
+    // containing embedded quotes inside Catch2's REQUIRE.
+    const std::string expected = R"(,"c":"a","newline":"\n","quote":"\"")";
+    REQUIRE(properties.to_string() == expected);
+}
+
+TEST_CASE("json_properties: signed char and unsigned char remain integers", "[json_properties]")
+{
+    // signed char / unsigned char are the canonical int8_t / uint8_t types
+    // so they're documented as integer-valued; the dedicated string-emitting
+    // overload is reserved for plain `char`.
+    const jspdlog::json_properties properties{"sc", static_cast<signed char>(-5),
+                                                "uc", static_cast<unsigned char>(200)};
+    REQUIRE(properties.to_string() == R"(,"sc":-5,"uc":200)");
+}
+
 TEST_CASE("json_properties: empty raw_json serializes as null", "[json_properties]")
 {
     const jspdlog::json_properties properties{

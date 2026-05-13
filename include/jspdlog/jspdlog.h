@@ -40,6 +40,7 @@
 #include <fmt/format.h>
 
 #include <cmath>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -208,11 +209,30 @@ public:
         members_[key] = value ? "true" : "false";
     }
 
-    // One template covers every integral type that isn't bool, including the
-    // narrow ones (short, signed/unsigned char, int16_t, ...) and the wide
-    // ones (long long, std::size_t, ...). bool is excluded so its dedicated
-    // true/false overload still wins on overload resolution.
-    template <typename T, std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>, int> = 0>
+    // Plain `char` is treated as a single-character JSON string rather than
+    // a small integer, which is what users almost always want. signed char
+    // and unsigned char keep the integer behavior because they're the
+    // canonical 8-bit integer types (int8_t, uint8_t).
+    void insert(const std::string &key, char value)
+    {
+        insert(key, std::string_view{&value, 1});
+    }
+
+    // Wide character types deliberately don't compile: encoding a single
+    // wchar_t/char16_t/char32_t to UTF-8 requires a unicode encoder, which
+    // jspdlog intentionally doesn't bundle. Callers should convert to a
+    // UTF-8 std::string themselves and pass that.
+    void insert(const std::string &, wchar_t) = delete;
+    void insert(const std::string &, char16_t) = delete;
+    void insert(const std::string &, char32_t) = delete;
+
+    // One template covers every remaining integral type, including the narrow
+    // ones (short, signed/unsigned char, int16_t, ...) and the wide ones
+    // (long long, std::size_t, ...). bool and char are excluded so their
+    // dedicated overloads win on overload resolution.
+    template <typename T,
+              std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool> && !std::is_same_v<T, char>,
+                               int> = 0>
     void insert(const std::string &key, T value)
     {
         members_[key] = std::to_string(value);
@@ -272,7 +292,10 @@ public:
         // Take ownership of `other`'s storage first, then merge back anything
         // we already had under keys that don't collide. Duplicates keep
         // `other`'s value (which is now in `members_`), matching the
-        // copy-merge semantics above.
+        // copy-merge semantics above. Note that `other` ends in a partially
+        // emptied but valid state: keys whose values lost the collision stay
+        // behind in `other.members_`. This is harmless because the rvalue
+        // overload's caller is giving up the object anyway.
         std::swap(members_, other.members_);
         members_.merge(other.members_);
     }
@@ -372,8 +395,11 @@ public:
         apply_pattern_();
     }
 
-    // Escape hatch: take ownership of an existing spdlog::logger. The JSON
-    // pattern is re-applied so the result is still guaranteed-valid JSON.
+    // Wrap an already-built spdlog::logger (e.g. one configured elsewhere
+    // with a custom error handler, registered in the spdlog registry, or
+    // assembled by another framework). The JSON pattern is re-applied so the
+    // result is still guaranteed-valid JSON, regardless of whatever pattern
+    // was previously set.
     [[nodiscard]] static json_logger adopt(std::shared_ptr<spdlog::logger> logger)
     {
         return json_logger(std::move(logger));
@@ -398,25 +424,21 @@ public:
         return copy;
     }
 
-    // Forward spdlog runtime errors from this logger to another json_logger.
-    // The forwarded message is logged at warn level and tagged with a
-    // "source" property identifying which logger errored. Useful for
-    // capturing "failed to write to sink X" etc. as structured records.
-    void set_internal_logger(json_logger internal)
+    // Install a handler for spdlog runtime errors (e.g. a sink that throws
+    // while writing). Pass an empty std::function to restore spdlog's
+    // default handler. The handler runs on the thread that triggered the
+    // error and must be safe to call concurrently if the logger is shared
+    // across threads. For the common "log the error as a JSON warn line on
+    // another logger" pattern, see jspdlog::forward_errors_to below.
+    void set_error_handler(std::function<void(std::string_view)> handler)
     {
-        json_properties source_prop;
-        source_prop.insert("source", logger_->name());
-        internal.properties_.merge(std::move(source_prop));
-        internal.cached_properties_ = internal.properties_.to_string();
-
-        internal_logger_ = std::make_shared<json_logger>(std::move(internal));
-        std::weak_ptr<json_logger> weak = internal_logger_;
-        logger_->set_error_handler([weak](const std::string &msg) {
-            if (auto p = weak.lock())
-            {
-                p->warn("{}", msg);
-            }
-        });
+        if (!handler)
+        {
+            logger_->set_error_handler({});
+            return;
+        }
+        logger_->set_error_handler(
+            [h = std::move(handler)](const std::string &msg) { h(msg); });
     }
 
     // --- Logging API ----------------------------------------------------------
@@ -468,12 +490,14 @@ public:
 
     // --- spdlog passthroughs --------------------------------------------------
 
-    [[nodiscard]] const std::string &name() const
+    [[nodiscard]] const std::string &name() const noexcept
     {
         return logger_->name();
     }
 
-    [[nodiscard]] spdlog::level level() const
+    // Named to match spdlog::logger::log_level() (and to avoid shadowing the
+    // unqualified `spdlog::level` type inside the class body).
+    [[nodiscard]] spdlog::level log_level() const noexcept
     {
         return logger_->log_level();
     }
@@ -524,12 +548,23 @@ private:
         {
             return;
         }
-        // Fast path for the common "no bound properties" case: avoid copying
-        // properties_ and re-running the map merge just to produce the same
-        // fragment.
-        const std::string fragment = properties_.empty()
-                                         ? props.to_string()
-                                         : (properties_ + props).to_string();
+        // Fast paths: avoid copying maps when we already have a precomputed
+        // fragment (cached_properties_) or when one side is empty. Only the
+        // both-non-empty branch needs the actual merge to honor "rhs wins"
+        // semantics on key collisions.
+        std::string fragment;
+        if (props.empty())
+        {
+            fragment = cached_properties_;
+        }
+        else if (properties_.empty())
+        {
+            fragment = props.to_string();
+        }
+        else
+        {
+            fragment = (properties_ + props).to_string();
+        }
         logger_->log(lvl, fragment);
     }
 
@@ -588,11 +623,21 @@ private:
 
     void log_message_(spdlog::level lvl, const json_properties &props, std::string msg)
     {
-        // Same fast path as log_(level, props): if no properties are bound,
-        // concatenating the per-call fragment is sufficient.
-        std::string out = properties_.empty()
-                              ? props.to_string()
-                              : (properties_ + props).to_string();
+        // Mirrors the fast paths in log_(level, props): the merge-and-
+        // serialize is only needed when both sides carry properties.
+        std::string out;
+        if (props.empty())
+        {
+            out = cached_properties_;
+        }
+        else if (properties_.empty())
+        {
+            out = props.to_string();
+        }
+        else
+        {
+            out = (properties_ + props).to_string();
+        }
         out.reserve(out.size() + msg.size() + 16);
         out += R"(,"message":)";
         detail::append_json_quoted(out, msg);
@@ -602,7 +647,24 @@ private:
     std::shared_ptr<spdlog::logger> logger_;
     json_properties properties_;
     std::string cached_properties_;
-    std::shared_ptr<json_logger> internal_logger_;
 };
+
+// ============================================================================
+// forward_errors_to: convenience wrapper around set_error_handler that turns
+// spdlog runtime errors into structured warn lines on another json_logger.
+// ============================================================================
+//
+// Captures `source`'s name and a copy of `destination` at call time. The copy
+// is intentional: subsequent with_properties() calls on the original
+// destination do not affect the forwarder. Errors emitted by `source` after
+// this call surface as `destination.warn({"source", source.name()}, "{}", msg)`.
+inline void forward_errors_to(json_logger &source, json_logger destination)
+{
+    auto name = source.name();
+    source.set_error_handler(
+        [name = std::move(name), dest = std::move(destination)](std::string_view msg) mutable {
+            dest.warn(json_properties{"source", name}, "{}", msg);
+        });
+}
 
 } // namespace jspdlog

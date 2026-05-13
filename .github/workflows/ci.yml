@@ -61,18 +61,25 @@ jobs:
       - name: Run examples (smoke)
         shell: bash
         run: |
+          set -euo pipefail
           cd build/examples
           for exe in example_01_console example_02_rotating_file example_03_properties \
                      example_04_custom_sink example_05_async example_06_nlohmann_raw_json; do
             # The Windows MSBuild generator puts binaries in build/examples/Release/.
+            found=
             for candidate in "./$exe" "./Release/$exe" "./$exe.exe" "./Release/$exe.exe"; do
               if [ -x "$candidate" ]; then
-                echo "::group::$exe"
-                "$candidate" || exit 1
-                echo "::endgroup::"
+                found=$candidate
                 break
               fi
             done
+            if [ -z "$found" ]; then
+              echo "::error::no executable found for $exe (looked in . and ./Release)"
+              exit 1
+            fi
+            echo "::group::$exe"
+            "$found"
+            echo "::endgroup::"
           done
 
   install-smoke:
@@ -111,5 +118,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang-format-17
       - name: Run clang-format --dry-run -Werror
         run: |
-          find include tests examples -type f \( -name "*.h" -o -name "*.cpp" \) \
-            | xargs clang-format-17 --dry-run -Werror
+          set -euo pipefail
+          find include tests examples -type f \( -name "*.h" -o -name "*.cpp" \) -print0 \
+            | xargs -0 clang-format-17 --dry-run -Werror

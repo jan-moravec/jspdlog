@@ -12,6 +12,9 @@
 class memory_sink : public spdlog::sinks::base_sink<std::mutex>
 {
 public:
+    // For illustration only: production sinks should not expose unsynchronized
+    // state. Reading `lines` while another thread logs through this sink would
+    // race against the base_sink's internal mutex.
     std::vector<std::string> lines;
 
 protected:
