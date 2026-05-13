@@ -186,18 +186,23 @@ public:
     json_properties &operator=(json_properties &&) noexcept = default;
     ~json_properties() = default;
 
-    template <typename T>
-    json_properties(const std::string &key, T &&value)
+    // Single variadic constructor for both `{key, value}` and
+    // `{key1, value1, key2, value2, ...}`. Replaces the historical pair of
+    // (single-pair, variadic) overloads that relied on template partial-
+    // ordering to disambiguate the two-argument call site; with the rules
+    // collapsed there is no chance of an ambiguous selection on any
+    // conformant compiler. Keys are whatever the matching `insert`
+    // overload accepts (which today means anything implicitly convertible
+    // to `std::string`, e.g. string literals).
+    template <typename K, typename V, typename... Rest>
+    json_properties(K &&key, V &&value, Rest &&...rest)
     {
-        insert(key, std::forward<T>(value));
-    }
-
-    template <typename T, typename... Args>
-    json_properties(const std::string &key, T &&value, Args &&...args)
-    {
-        static_assert(sizeof...(args) % 2 == 0, "json_properties requires key/value pairs");
-        insert(key, std::forward<T>(value));
-        insert_pairs_(std::forward<Args>(args)...);
+        static_assert(sizeof...(rest) % 2 == 0, "json_properties requires key/value pairs");
+        insert(std::forward<K>(key), std::forward<V>(value));
+        if constexpr (sizeof...(rest) > 0)
+        {
+            insert_pairs_(std::forward<Rest>(rest)...);
+        }
     }
 
     // --- Insert overloads -----------------------------------------------------
@@ -417,7 +422,13 @@ private:
     template <typename First, typename Second, typename... Rest>
     void insert_pairs_(First &&first, Second &&second, Rest &&...rest)
     {
-        static_assert(std::is_convertible_v<First, std::string>, "key must be convertible to std::string");
+        // Decay before the convertibility check so a forwarding reference
+        // like `const char (&)[N]` reads as `const char *` -- otherwise we'd
+        // be asking "is this reference type convertible to std::string?",
+        // which only works by accident of array-to-pointer decay during
+        // overload resolution. With std::decay_t the intent is explicit.
+        static_assert(std::is_convertible_v<std::decay_t<First>, std::string>,
+                      "key must be convertible to std::string");
         insert(std::forward<First>(first), std::forward<Second>(second));
         if constexpr (sizeof...(rest) > 0)
         {
