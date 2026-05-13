@@ -1,5 +1,11 @@
 # jspdlog
 
+[![CI](https://github.com/hidglobal/jspdlog/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hidglobal/jspdlog/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/hidglobal/jspdlog/branch/main/graph/badge.svg)](https://codecov.io/gh/hidglobal/jspdlog)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)
+![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS-blue)
+[![License: MIT](https://img.shields.io/github/license/hidglobal/jspdlog.svg)](LICENSE)
+
 JSON-line logging on top of [spdlog](https://github.com/gabime/spdlog) v2.
 
 `jspdlog` is a tiny, single-header C++17 library that wraps any
@@ -83,12 +89,12 @@ All options default to `ON` when jspdlog is the top-level CMake project and
 `OFF` when it's pulled in via `add_subdirectory` / `FetchContent`, so an
 embedding project gets a quiet build by default.
 
-| Option                          | Description                                                                 |
-|---------------------------------|-----------------------------------------------------------------------------|
-| `JSPDLOG_BUILD_TESTS`           | Build the Catch2 unit-test suite.                                           |
-| `JSPDLOG_BUILD_EXAMPLES`        | Build the standalone example programs under `examples/`.                    |
-| `JSPDLOG_INSTALL`               | Generate `install` rules for the header and CMake package config.           |
-| `JSPDLOG_TEST_NLOHMANN_INTEROP` | Build the optional `raw_json` ↔ nlohmann/json interop test (fetched).       |
+| Option                          | Description                                                           |
+| ------------------------------- | --------------------------------------------------------------------- |
+| `JSPDLOG_BUILD_TESTS`           | Build the Catch2 unit-test suite.                                     |
+| `JSPDLOG_BUILD_EXAMPLES`        | Build the standalone example programs under `examples/`.              |
+| `JSPDLOG_INSTALL`               | Generate `install` rules for the header and CMake package config.     |
+| `JSPDLOG_TEST_NLOHMANN_INTEROP` | Build the optional `raw_json` ↔ nlohmann/json interop test (fetched). |
 
 ## 30-second quickstart
 
@@ -249,28 +255,28 @@ logger.info(
 
 ## How does it compare to plain spdlog?
 
-| | `spdlog::logger` directly | `jspdlog::json_logger` |
-|---|---|---|
-| Output format | Whatever pattern you set | Always one JSON object per line |
-| Pattern footgun | Easy to break with `set_pattern` | API forbids it |
-| Structured fields | Stringify into the message yourself | First-class `json_properties` + `raw_json` |
-| Sinks | Any | Any (delegates) |
-| Levels, async, formatters, error handlers | Yes | Yes (delegates) |
-| Source location capture | Yes | Not yet — open issue if you need it |
+|                                           | `spdlog::logger` directly           | `jspdlog::json_logger`                     |
+| ----------------------------------------- | ----------------------------------- | ------------------------------------------ |
+| Output format                             | Whatever pattern you set            | Always one JSON object per line            |
+| Pattern footgun                           | Easy to break with `set_pattern`    | API forbids it                             |
+| Structured fields                         | Stringify into the message yourself | First-class `json_properties` + `raw_json` |
+| Sinks                                     | Any                                 | Any (delegates)                            |
+| Levels, async, formatters, error handlers | Yes                                 | Yes (delegates)                            |
+| Source location capture                   | Yes                                 | Not yet — open issue if you need it        |
 
 ## FAQ
 
-**Can I set my own spdlog pattern?**  
+**Can I set my own spdlog pattern?**
 No. That's the entire point of the library: the JSON pattern is fixed so
 the output is guaranteed to be valid JSON. If you need a different
 pattern, use `spdlog::logger` directly.
 
-**Why does `jspdlog::raw_json` exist? Can't I just pass a `std::string`?**  
+**Why does `jspdlog::raw_json` exist? Can't I just pass a `std::string`?**
 A `std::string` value gets quoted and escaped (because it's a JSON string).
 `raw_json` is for inserting values that are *already* JSON-encoded —
 arrays, objects, numbers from another serializer, etc.
 
-**Does `with_properties()` allocate a new spdlog logger?**  
+**Does `with_properties()` allocate a new spdlog logger?**
 No. The returned child shares the parent's `std::shared_ptr<spdlog::logger>`
 (and therefore its sinks, level, error handler). Only the bound property
 strings are copied. As a consequence, *bound properties are isolated per
@@ -279,16 +285,22 @@ child*, but configuration changes are not: calling `set_level()`,
 underlying spdlog logger and so affects every json_logger derived from the
 same root.
 
-**Is this header-only?**  
+**Is this header-only?**
 Yes. No `.cpp` files, no `JSPDLOG_COMPILED_LIB` mode, no link step beyond
 what spdlog already requires.
 
-**Which C++ standard?**  
+**Which C++ standard?**
 C++17 minimum. Tested with C++17 and C++20 in CI.
 
-**Which spdlog version?**  
+**Which spdlog version?**
 spdlog v2.x. The v2 line is currently maintained on the `v2.x` branch and
 is not yet tagged; the bundled CMake config pins a known-good commit.
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the developer reference: prerequisites, [build instructions](CONTRIBUTING.md#building) with [CMake presets](CMakePresets.json), how to [run the test suite](CONTRIBUTING.md#running-tests), the [sanitizer and coverage workflows](CONTRIBUTING.md#sanitizers-and-coverage), the [code style and pre-commit](CONTRIBUTING.md#code-style-and-pre-commit) setup, the [pull-request workflow](CONTRIBUTING.md#pull-requests) and the [release process](CONTRIBUTING.md#release-process).
+
+For security disclosures, see [SECURITY.md](SECURITY.md).
 
 ## License
 
