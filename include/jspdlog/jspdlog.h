@@ -40,6 +40,7 @@
 // ever grows a std::format mode.
 #include <fmt/format.h>
 
+#include <atomic>
 #include <cmath>
 #include <functional>
 #include <map>
@@ -726,11 +727,26 @@ private:
 // the destination's own mutex). Silently dropping the secondary failure is
 // the conservative choice when the user has already opted into "best-effort
 // error reporting".
+//
+// A second protection covers the case where `destination` shares a sink with
+// `source` (or actually is `source`): if writing the forwarded warn line
+// triggers another sink failure, spdlog will catch that exception and re-
+// invoke this same error handler. The shared `in_handler` flag breaks the
+// recursion at the second entry without losing the first message. The flag
+// is per-handler (not global), so independent forwarder chains don't
+// interfere with each other.
 inline void forward_errors_to(json_logger &source, json_logger destination)
 {
     auto name = source.name();
+    auto in_handler = std::make_shared<std::atomic<bool>>(false);
     source.set_error_handler(
-        [name = std::move(name), dest = std::move(destination)](std::string_view msg) mutable {
+        [name = std::move(name), dest = std::move(destination),
+         in_handler = std::move(in_handler)](std::string_view msg) mutable {
+            bool expected = false;
+            if (!in_handler->compare_exchange_strong(expected, true))
+            {
+                return;
+            }
             try
             {
                 dest.warn(json_properties{"source", name}, "{}", msg);
@@ -739,6 +755,7 @@ inline void forward_errors_to(json_logger &source, json_logger destination)
             {
                 // Intentionally swallowed; see comment above.
             }
+            in_handler->store(false);
         });
 }
 

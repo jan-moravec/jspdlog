@@ -354,3 +354,24 @@ TEST_CASE("json_logger: forward_errors_to snapshots the destination at call time
     REQUIRE(out.find(R"("source":"Producer")") != std::string::npos);
     REQUIRE(out.find(R"("environment")") == std::string::npos);
 }
+
+TEST_CASE("json_logger: forward_errors_to does not infinite-loop when source and destination share a sink",
+          "[json_logger][error_handler]")
+{
+    // Reproduces the original footgun: if the destination uses the same
+    // always-throwing sink as the source, writing the forwarded warn line
+    // would trigger another sink exception, spdlog would catch it and
+    // re-enter the same error handler, and so on without bound. The
+    // re-entrancy guard in forward_errors_to bails out on the second entry,
+    // so this call must simply return.
+    auto throwing = std::make_shared<throwing_sink>("recursive boom");
+    jspdlog::json_logger source("Self", throwing);
+    jspdlog::json_logger destination("Self", throwing);
+
+    jspdlog::forward_errors_to(source, destination);
+
+    // The bug we're guarding against is infinite recursion; reaching the
+    // line after source.info() (under a default test timeout) is the
+    // assertion.
+    REQUIRE_NOTHROW(source.info("trigger"));
+}
