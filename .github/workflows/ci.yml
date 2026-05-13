@@ -122,7 +122,7 @@ jobs:
         run: ctest --preset clang-${{ matrix.mode }}
 
       - name: Merge coverage profiles + export lcov
-        # Drop _deps/ (FetchContent), build/ (generated), tests/, examples/
+        # Drop _deps/ (FetchContent), build/ (generated), test/, example/
         # so the report covers only the library header.
         if: matrix.mode == 'coverage'
         run: |
@@ -131,18 +131,18 @@ jobs:
             build/clang-coverage/profiles/*.profraw \
             -o build/clang-coverage/merged.profdata
           OBJECTS=(
-            "build/clang-coverage/tests/jspdlog_tests"
-            -object "build/clang-coverage/tests/jspdlog_nlohmann_interop_test"
+            "build/clang-coverage/test/jspdlog_tests"
+            -object "build/clang-coverage/test/jspdlog_nlohmann_interop_test"
           )
           llvm-cov-18 export -format=lcov \
             -instr-profile=build/clang-coverage/merged.profdata \
-            -ignore-filename-regex='(_deps|build|tests|examples)/' \
+            -ignore-filename-regex='(_deps|build|test|example)/' \
             "${OBJECTS[@]}" \
             > coverage.lcov
           echo "::group::Coverage summary (library header only)"
           llvm-cov-18 report \
             -instr-profile=build/clang-coverage/merged.profdata \
-            -ignore-filename-regex='(_deps|build|tests|examples)/' \
+            -ignore-filename-regex='(_deps|build|test|example)/' \
             "${OBJECTS[@]}"
           echo "::endgroup::"
 
@@ -224,10 +224,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd build/examples
+          cd build/example
           for exe in example_01_console example_02_rotating_file example_03_properties \
                      example_04_custom_sink example_05_async example_06_nlohmann_raw_json; do
-            # The Windows MSBuild generator puts binaries in build/examples/Release/.
+            # The Windows MSBuild generator puts binaries in build/example/Release/.
             found=
             for candidate in "./$exe" "./Release/$exe" "./$exe.exe" "./Release/$exe.exe"; do
               if [ -x "$candidate" ]; then
@@ -264,7 +264,7 @@ jobs:
 
       - name: Build the install_smoke consumer
         run: |
-          cmake -S tests/install_smoke -B build-smoke \
+          cmake -S test/install_smoke -B build-smoke \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/jspdlog-prefix"
           cmake --build build-smoke

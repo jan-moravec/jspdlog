@@ -19,7 +19,7 @@ endif()
 option(JSPDLOG_BUILD_TESTS "Build jspdlog unit tests" ${JSPDLOG_IS_TOP_LEVEL})
 option(JSPDLOG_BUILD_EXAMPLES "Build jspdlog examples" ${JSPDLOG_IS_TOP_LEVEL})
 option(JSPDLOG_INSTALL "Generate install rules for jspdlog" ${JSPDLOG_IS_TOP_LEVEL})
-# JSPDLOG_TEST_NLOHMANN_INTEROP is declared inside tests/CMakeLists.txt so its
+# JSPDLOG_TEST_NLOHMANN_INTEROP is declared inside test/CMakeLists.txt so its
 # default tracks the live value of JSPDLOG_BUILD_TESTS across reconfigures
 # (option()'s first-seen default would otherwise stick).
 

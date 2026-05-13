@@ -74,7 +74,7 @@ All options default to `ON` when jspdlog is the top-level CMake project and `OFF
 | Option                          | Description                                                           |
 | ------------------------------- | --------------------------------------------------------------------- |
 | `JSPDLOG_BUILD_TESTS`           | Build the Catch2 unit-test suite.                                     |
-| `JSPDLOG_BUILD_EXAMPLES`        | Build the standalone example programs under `examples/`.              |
+| `JSPDLOG_BUILD_EXAMPLES`        | Build the standalone example programs under `example/`.               |
 | `JSPDLOG_INSTALL`               | Generate `install` rules for the header and CMake package config.     |
 | `JSPDLOG_TEST_NLOHMANN_INTEROP` | Build the optional `raw_json` ↔ nlohmann/json interop test (fetched). |
 
@@ -94,13 +94,13 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The `tests/install_smoke/` subdirectory is a separate standalone project — it `find_package`s an *installed* jspdlog and is exercised by the `install-smoke` CI job. To run it locally:
+The `test/install_smoke/` subdirectory is a separate standalone project — it `find_package`s an *installed* jspdlog and is exercised by the `install-smoke` CI job. To run it locally:
 
 ```sh
 cmake --preset release -DJSPDLOG_BUILD_TESTS=OFF -DJSPDLOG_BUILD_EXAMPLES=OFF
 cmake --build --preset release
 cmake --install build/release --prefix "$PWD/_install"
-cmake -S tests/install_smoke -B build/install-smoke \
+cmake -S test/install_smoke -B build/install-smoke \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$PWD/_install"
 cmake --build build/install-smoke
@@ -132,16 +132,16 @@ llvm-profdata-18 merge -sparse build/clang-coverage/profiles/*.profraw \
   -o build/clang-coverage/merged.profdata
 llvm-cov-18 report \
   -instr-profile=build/clang-coverage/merged.profdata \
-  -ignore-filename-regex='(_deps|build|tests|examples)/' \
-  build/clang-coverage/tests/jspdlog_tests \
-  -object build/clang-coverage/tests/jspdlog_nlohmann_interop_test
+  -ignore-filename-regex='(_deps|build|test|example)/' \
+  build/clang-coverage/test/jspdlog_tests \
+  -object build/clang-coverage/test/jspdlog_nlohmann_interop_test
 ```
 
 CI does the same merge / export and uploads the resulting lcov to Codecov via tokenless OIDC.
 
 ## Code style and pre-commit
 
-The repository ships [`.clang-format`](.clang-format), [`.clang-tidy`](.clang-tidy) (plus a relaxed [`tests/.clang-tidy`](tests/.clang-tidy)), [`.gitattributes`](.gitattributes), [`.markdownlint-cli2.yaml`](.markdownlint-cli2.yaml) and [`.pre-commit-config.yaml`](.pre-commit-config.yaml). A few conventions worth calling out:
+The repository ships [`.clang-format`](.clang-format), [`.clang-tidy`](.clang-tidy) (plus a relaxed [`test/.clang-tidy`](test/.clang-tidy)), [`.gitattributes`](.gitattributes), [`.markdownlint-cli2.yaml`](.markdownlint-cli2.yaml) and [`.pre-commit-config.yaml`](.pre-commit-config.yaml). A few conventions worth calling out:
 
 - **snake_case API.** Every user-facing identifier — types, functions, members, locals — is `lower_case`. This mirrors `spdlog`'s API and is enforced by `.clang-tidy`'s `readability-identifier-naming` block. Template parameters keep `CamelCase` so they stand out. Private members carry a trailing underscore (Google-style) to avoid collisions with same-named getters/parameters.
 - **One JSON object per line.** That is the entire point of the library; the pinned spdlog pattern lives in `jspdlog::detail::pattern()` in [`include/jspdlog/jspdlog.h`](include/jspdlog/jspdlog.h) and there is intentionally no public API to override it.

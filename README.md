@@ -92,7 +92,7 @@ embedding project gets a quiet build by default.
 | Option                          | Description                                                           |
 | ------------------------------- | --------------------------------------------------------------------- |
 | `JSPDLOG_BUILD_TESTS`           | Build the Catch2 unit-test suite.                                     |
-| `JSPDLOG_BUILD_EXAMPLES`        | Build the standalone example programs under `examples/`.              |
+| `JSPDLOG_BUILD_EXAMPLES`        | Build the standalone example programs under `example/`.               |
 | `JSPDLOG_INSTALL`               | Generate `install` rules for the header and CMake package config.     |
 | `JSPDLOG_TEST_NLOHMANN_INTEROP` | Build the optional `raw_json` ↔ nlohmann/json interop test (fetched). |
 

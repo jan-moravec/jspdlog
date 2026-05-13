@@ -19,7 +19,7 @@ comment:
   require_changes: true
 
 ignore:
-  - "tests/**/*"
-  - "examples/**/*"
+  - "test/**/*"
+  - "example/**/*"
   - "**/_deps/**"
   - "build/**"
