@@ -524,7 +524,12 @@ private:
         {
             return;
         }
-        const std::string fragment = (properties_ + props).to_string();
+        // Fast path for the common "no bound properties" case: avoid copying
+        // properties_ and re-running the map merge just to produce the same
+        // fragment.
+        const std::string fragment = properties_.empty()
+                                         ? props.to_string()
+                                         : (properties_ + props).to_string();
         logger_->log(lvl, fragment);
     }
 
@@ -583,7 +588,11 @@ private:
 
     void log_message_(spdlog::level lvl, const json_properties &props, std::string msg)
     {
-        std::string out = (properties_ + props).to_string();
+        // Same fast path as log_(level, props): if no properties are bound,
+        // concatenating the per-call fragment is sufficient.
+        std::string out = properties_.empty()
+                              ? props.to_string()
+                              : (properties_ + props).to_string();
         out.reserve(out.size() + msg.size() + 16);
         out += R"(,"message":)";
         detail::append_json_quoted(out, msg);
