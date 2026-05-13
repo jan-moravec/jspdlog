@@ -34,9 +34,11 @@ jobs:
           # On Windows we let CMake auto-select MSVC via the VS generator
           # rather than passing -DCMAKE_CXX_COMPILER=cl, which would require
           # a Developer-Command-Prompt environment that the default shell
-          # doesn't set up.
-          - { os: windows-latest, cc: '',       cxx: '',         std: 17 }
-          - { os: windows-latest, cc: '',       cxx: '',         std: 20 }
+          # doesn't set up. The cc / cxx fields are labels used only for the
+          # job display name (and so for branch-protection matching); empty
+          # strings rendered as `windows-latest /  / C++17`, hence `msvc`.
+          - { os: windows-latest, cc: msvc,     cxx: msvc,       std: 17 }
+          - { os: windows-latest, cc: msvc,     cxx: msvc,       std: 20 }
     steps:
       - uses: actions/checkout@v4
 
