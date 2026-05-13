@@ -49,14 +49,6 @@ namespace jspdlog
 namespace detail
 {
 
-// The spdlog pattern that turns each log call into one self-contained JSON
-// object. The trailing %v is where json_logger writes a property fragment
-// (",\"key\":value,...") plus an optional ",\"message\":\"...\"". The closing
-// brace is part of the pattern itself, which is what guarantees the line is
-// always valid JSON and why json_logger enforces this pattern.
-inline constexpr const char json_pattern[] =
-    R"({"timestamp":"%Y-%m-%dT%H:%M:%S.%e%z","logger":"%n","level":"%l","process":%P,"thread":%t%v})";
-
 // Append a JSON-quoted, escaped form of `s` to `out`. Handles the seven
 // mandatory escapes plus \u00XX for other control bytes < 0x20. Bytes >= 0x20
 // pass through unchanged; jspdlog treats input as opaque UTF-8 and does not
@@ -105,6 +97,23 @@ inline void append_json_quoted(std::string &out, std::string_view s)
         }
     }
     out.push_back('"');
+}
+
+// Build the spdlog pattern that turns each log call into one JSON object.
+// The logger name is escaped and baked in at construction time rather than
+// interpolated via %n at format time, so names containing quotes, backslashes
+// or control characters still produce a structurally valid JSON line. The
+// trailing %v is where json_logger writes the property fragment (and the
+// optional ,"message":"...") and the closing brace is part of the pattern
+// itself, which is what guarantees the line is always valid JSON.
+inline std::string make_json_pattern(std::string_view name)
+{
+    std::string out;
+    out.reserve(120 + name.size());
+    out += R"({"timestamp":"%Y-%m-%dT%H:%M:%S.%e%z","logger":)";
+    append_json_quoted(out, name);
+    out += R"(,"level":"%l","process":%P,"thread":%t%v})";
+    return out;
 }
 
 } // namespace detail
@@ -493,7 +502,7 @@ private:
 
     void apply_pattern_()
     {
-        logger_->set_pattern(detail::json_pattern);
+        logger_->set_pattern(detail::make_json_pattern(logger_->name()));
     }
 
     // --- log_ dispatch --------------------------------------------------------

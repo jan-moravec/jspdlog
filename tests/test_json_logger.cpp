@@ -174,6 +174,22 @@ TEST_CASE("json_logger: a per-call property can override a bound property", "[js
                                 R"("process":[0-9]+,"thread":[0-9]+,"property":null,"message":"Test 3"\})")));
 }
 
+TEST_CASE("json_logger: logger name with special characters stays valid JSON", "[json_logger]")
+{
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+    // Name contains a literal quote, a backslash and a tab. These must be
+    // JSON-escaped where they appear in the pattern, not interpolated raw.
+    jspdlog::json_logger logger("weird\"name\\with\ttab", std::move(sink));
+    logger.info("hi");
+
+    // Hoist the expected fragment out of the REQUIRE macro: MSVC's stringifier
+    // mishandles raw string literals containing backslashes when stringified
+    // by the Catch2 expression-capture machinery.
+    const std::string expected_name_field = R"("logger":"weird\"name\\with\ttab")";
+    REQUIRE(oss.str().find(expected_name_field) != std::string::npos);
+}
+
 TEST_CASE("json_logger: pattern is re-applied even when adopting an existing spdlog logger", "[json_logger]")
 {
     std::ostringstream oss;
