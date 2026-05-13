@@ -475,11 +475,14 @@ public:
     }
 
     // Install a handler for spdlog runtime errors (e.g. a sink that throws
-    // while writing). Pass an empty std::function to restore spdlog's
-    // default handler. The handler runs on the thread that triggered the
-    // error and must be safe to call concurrently if the logger is shared
-    // across threads. For the common "log the error as a JSON warn line on
-    // another logger" pattern, see jspdlog::forward_errors_to below.
+    // while writing). Pass an empty std::function to clear the handler
+    // entirely; once cleared, subsequent runtime errors are dropped
+    // silently (spdlog v2 no-ops when the handler slot is empty rather
+    // than reinstating the built-in stderr writer). The handler runs on
+    // the thread that triggered the error and must be safe to call
+    // concurrently if the logger is shared across threads. For the common
+    // "log the error as a JSON warn line on another logger" pattern, see
+    // jspdlog::forward_errors_to below.
     void set_error_handler(std::function<void(std::string_view)> handler)
     {
         if (!handler)
