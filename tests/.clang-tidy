@@ -1,0 +1,20 @@
+# Test-level overrides.
+#
+# Magic numbers are common and acceptable in test code (expected values,
+# test data). `cert-err58-cpp` warns about Catch2's static `TEST_CASE`
+# registrations, which run global initializers that may theoretically
+# throw -- unavoidable with the framework. Public member variables are the
+# norm in Catch2 fixtures and the test-local sink helpers (e.g. the
+# `throwing_sink` struct). `cppcoreguidelines-owning-memory` fires on
+# direct `FILE *fp = std::fopen(...)` / manual `fclose` patterns that
+# show up in rotating-file fixtures.
+
+InheritParentConfig: true
+
+Checks: >
+  -cppcoreguidelines-avoid-magic-numbers,
+  -readability-magic-numbers,
+  -cert-err58-cpp,
+  -misc-non-private-member-variables-in-classes,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  -cppcoreguidelines-owning-memory
