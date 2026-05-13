@@ -33,6 +33,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ubuntu-latest no longer ships gcc-11 / gcc-13 / clang-15 by default;
+      # install whatever the matrix entry asks for before configure.
+      - name: Install toolchain (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.cc }} ${{ matrix.cxx }}
+        shell: bash
+
       - name: Configure
         run: |
           cmake -S . -B build \
