@@ -510,8 +510,9 @@ public:
     // result is still guaranteed-valid JSON, regardless of whatever pattern
     // was previously set. Note that set_pattern() resets spdlog's
     // pattern-time mode to local time; if the adopted logger was previously
-    // configured for UTC, re-apply that mode on the returned logger via
-    // spdlog_logger() if needed.
+    // configured for UTC, call set_pattern_time(spdlog::pattern_time_type::utc)
+    // on the returned json_logger to restore that mode without losing the
+    // pinned JSON pattern.
     [[nodiscard]] static json_logger adopt(std::shared_ptr<spdlog::logger> logger)
     {
         return json_logger(std::move(logger));
@@ -637,6 +638,18 @@ public:
     void flush_on(spdlog::level lvl)
     {
         logger_->flush_on(lvl);
+    }
+
+    // Switch between local and UTC timestamps without losing the pinned
+    // JSON pattern. Internally this re-applies the same JSON pattern that
+    // the constructor installs, but with the requested pattern_time_type;
+    // spdlog otherwise resets the time mode to local on every set_pattern()
+    // call, which is why exposing this separately from set_level() / flush()
+    // is necessary. The common use case is right after adopt(), to restore
+    // a UTC mode that the adopted logger originally had.
+    void set_pattern_time(spdlog::pattern_time_type time_type)
+    {
+        logger_->set_pattern(detail::make_json_pattern(logger_->name()), time_type);
     }
 
     // Escape hatch for any spdlog::logger configuration we don't expose

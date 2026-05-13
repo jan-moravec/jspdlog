@@ -279,6 +279,30 @@ TEST_CASE("json_logger: pattern is re-applied even when adopting an existing spd
                                 R"("process":[0-9]+,"thread":[0-9]+,"message":"after adopt"\})")));
 }
 
+TEST_CASE("json_logger: set_pattern_time keeps the JSON pattern intact when switching to UTC",
+          "[json_logger]")
+{
+    // spdlog's set_pattern() implicitly resets the time mode to local. After
+    // adopt() (which calls set_pattern internally) the adopted logger has
+    // therefore lost any UTC configuration it used to have. set_pattern_time
+    // exists to restore that mode without dropping the pinned JSON pattern,
+    // so the timestamp offset should now be `+00:00` or `+0000` (and we must
+    // not accidentally clobber the JSON structure while doing it).
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+    auto spdlog_logger = std::make_shared<spdlog::logger>("Utc", sink);
+    spdlog_logger->set_level(spdlog::level::trace);
+
+    auto logger = jspdlog::json_logger::adopt(std::move(spdlog_logger));
+    logger.set_pattern_time(spdlog::pattern_time_type::utc);
+    logger.info("zulu");
+
+    const std::string out = oss.str();
+    REQUIRE(matches(out,
+                    add_endline(R"(\{"timestamp":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}\+00:?00","logger":"Utc","level":"info",)"
+                                R"("process":[0-9]+,"thread":[0-9]+,"message":"zulu"\})")));
+}
+
 TEST_CASE("json_logger: set_error_handler invokes the user callback with the spdlog message",
           "[json_logger][error_handler]")
 {
