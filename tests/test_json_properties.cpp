@@ -8,6 +8,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
+#include <limits>
 #include <string>
 
 TEST_CASE("json_properties: variadic constructor + addition operators", "[json_properties]")
@@ -147,4 +149,24 @@ TEST_CASE("json_properties: empty has no entries", "[json_properties]")
 
     properties.insert("k", 1);
     REQUIRE_FALSE(properties.empty());
+}
+
+TEST_CASE("json_properties: non-finite floats serialize as null", "[json_properties]")
+{
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    const float fnan = std::numeric_limits<float>::quiet_NaN();
+
+    const jspdlog::json_properties properties{"nan", nan, "neg_inf", -inf, "pos_inf", inf, "fnan", fnan};
+    REQUIRE(properties.to_string() == R"(,"fnan":null,"nan":null,"neg_inf":null,"pos_inf":null)");
+}
+
+TEST_CASE("json_properties: empty raw_json serializes as null", "[json_properties]")
+{
+    const jspdlog::json_properties properties{
+        "empty_lvalue", jspdlog::raw_json{""},
+        "empty_rvalue", jspdlog::raw_json{std::string{}},
+        "nonempty", jspdlog::raw_json{"[1]"},
+    };
+    REQUIRE(properties.to_string() == R"(,"empty_lvalue":null,"empty_rvalue":null,"nonempty":[1])");
 }

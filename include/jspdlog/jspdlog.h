@@ -32,6 +32,7 @@
 
 #include <fmt/format.h>
 
+#include <cmath>
 #include <map>
 #include <memory>
 #include <string>
@@ -216,22 +217,27 @@ public:
         members_[key] = std::to_string(value);
     }
 
+    // JSON has no NaN/Infinity tokens. Following the JavaScript JSON.stringify
+    // convention, non-finite floats are serialized as `null`.
     void insert(const std::string &key, float value)
     {
-        members_[key] = fmt::format("{}", value);
+        members_[key] = std::isfinite(value) ? fmt::format("{}", value) : "null";
     }
     void insert(const std::string &key, double value)
     {
-        members_[key] = fmt::format("{}", value);
+        members_[key] = std::isfinite(value) ? fmt::format("{}", value) : "null";
     }
 
+    // Empty raw_json content would produce ",\"key\":" followed by `,` or `}`
+    // (invalid JSON). Fall back to `null` so the line stays parseable. The
+    // caller is still responsible for the validity of non-empty content.
     void insert(const std::string &key, const raw_json &value)
     {
-        members_[key] = value.value;
+        members_[key] = value.value.empty() ? "null" : value.value;
     }
     void insert(const std::string &key, raw_json &&value)
     {
-        members_[key] = std::move(value.value);
+        members_[key] = value.value.empty() ? "null" : std::move(value.value);
     }
 
     // Pointer overload: null pointers become "null"; otherwise dereference
