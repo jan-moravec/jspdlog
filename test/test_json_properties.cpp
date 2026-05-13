@@ -107,7 +107,7 @@ TEST_CASE("json_properties: pointer-to-pointer is recursively dereferenced", "[j
 TEST_CASE("json_properties: merge keeps the right-hand-side value for duplicate keys", "[json_properties]")
 {
     jspdlog::json_properties lhs{"a", 1, "b", 2};
-    jspdlog::json_properties rhs{"b", 99, "c", 3};
+    const jspdlog::json_properties rhs{"b", 99, "c", 3};
 
     lhs.merge(rhs);
     REQUIRE(lhs.to_string() == R"(,"a":1,"b":99,"c":3)");

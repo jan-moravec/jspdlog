@@ -46,7 +46,7 @@ bool matches(const std::string &actual, const std::string &pattern)
 // Regex fragment that matches the ISO-8601 timestamp jspdlog emits. The
 // timezone offset uses spdlog's %z, which renders as either `+02:00` or
 // `+0200` depending on the platform, so the optional colon stays.
-constexpr const char *kTimestampRe =
+constexpr const char *TIMESTAMP_RE =
     R"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}[+-][0-9]{2}:?[0-9]{2})";
 
 // Builds a regex matching one full JSON log line. `name` and `level` are
@@ -57,7 +57,7 @@ constexpr const char *kTimestampRe =
 std::string expected_line(const std::string &name, const std::string &level, const std::string &tail)
 {
     return add_endline(
-        std::string(R"(\{"timestamp":")") + kTimestampRe + R"(","logger":")" + name + R"(","level":")" + level +
+        std::string(R"(\{"timestamp":")") + TIMESTAMP_RE + R"(","logger":")" + name + R"(","level":")" + level +
         R"(","process":[0-9]+,"thread":[0-9]+)" + tail + R"(\})"
     );
 }
@@ -396,7 +396,7 @@ TEST_CASE(
     // so this call must simply return.
     auto throwing = std::make_shared<throwing_sink>("recursive boom");
     jspdlog::json_logger source("Self", throwing);
-    jspdlog::json_logger destination("Self", throwing);
+    const jspdlog::json_logger destination("Self", throwing);
 
     jspdlog::forward_errors_to(source, destination);
 

@@ -1,13 +1,18 @@
 # Test-level overrides.
 #
 # Magic numbers are common and acceptable in test code (expected values,
-# test data). `cert-err58-cpp` warns about Catch2's static `TEST_CASE`
-# registrations, which run global initializers that may theoretically
-# throw -- unavoidable with the framework. Public member variables are the
-# norm in Catch2 fixtures and the test-local sink helpers (e.g. the
-# `throwing_sink` struct). `cppcoreguidelines-owning-memory` fires on
-# direct `FILE *fp = std::fopen(...)` / manual `fclose` patterns that
-# show up in rotating-file fixtures.
+# test data). `cert-err58-cpp` and `bugprone-throwing-static-initialization`
+# both warn about Catch2's static `TEST_CASE`/`DummyUse` registrations,
+# which run global initializers that may theoretically throw -- unavoidable
+# with the framework. `misc-use-anonymous-namespace` fires because the
+# `TEST_CASE` macro expands to a `static` registrar function, and
+# `cppcoreguidelines-avoid-do-while` fires because `REQUIRE` expands to a
+# `do { ... } while(0)` block. Both are intrinsic to Catch2 and out of
+# our control. Public member variables are the norm in Catch2 fixtures
+# and the test-local sink helpers (e.g. the `throwing_sink` struct).
+# `cppcoreguidelines-owning-memory` fires on direct
+# `FILE *fp = std::fopen(...)` / manual `fclose` patterns that show up in
+# rotating-file fixtures.
 
 InheritParentConfig: true
 
@@ -15,6 +20,9 @@ Checks: >
   -cppcoreguidelines-avoid-magic-numbers,
   -readability-magic-numbers,
   -cert-err58-cpp,
+  -bugprone-throwing-static-initialization,
+  -misc-use-anonymous-namespace,
+  -cppcoreguidelines-avoid-do-while,
   -misc-non-private-member-variables-in-classes,
   -cppcoreguidelines-non-private-member-variables-in-classes,
   -cppcoreguidelines-owning-memory

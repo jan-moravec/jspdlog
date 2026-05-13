@@ -6,7 +6,7 @@
 
 int main()
 {
-    jspdlog::json_logger root("svc", std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
+    const jspdlog::json_logger root("svc", std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
 
     // with_properties() returns a child logger that shares the underlying
     // spdlog logger and sinks, but carries an extra set of bound properties.

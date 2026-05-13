@@ -12,8 +12,8 @@ int main()
 {
     jspdlog::json_logger logger("svc", std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
 
-    nlohmann::json features = {{"streaming", true}, {"limits", {10, 100, 1000}}};
-    nlohmann::json items = {"alpha", "beta", "gamma"};
+    const nlohmann::json features = {{"streaming", true}, {"limits", {10, 100, 1000}}};
+    const nlohmann::json items = {"alpha", "beta", "gamma"};
 
     logger.info(
         {"features", jspdlog::raw_json{features.dump()}, "items", jspdlog::raw_json{items.dump()}}, "loaded config"

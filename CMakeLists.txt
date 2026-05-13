@@ -92,9 +92,9 @@ endif()
 # --- Tests and examples -------------------------------------------------------
 if(JSPDLOG_BUILD_TESTS)
     enable_testing()
-    add_subdirectory(tests)
+    add_subdirectory(test)
 endif()
 
 if(JSPDLOG_BUILD_EXAMPLES)
-    add_subdirectory(examples)
+    add_subdirectory(example)
 endif()

@@ -10,6 +10,9 @@
 #include <mutex>
 #include <vector>
 
+namespace
+{
+
 class memory_sink : public spdlog::sinks::base_sink<std::mutex>
 {
 public:
@@ -32,6 +35,8 @@ protected:
     }
     void flush_() override {}
 };
+
+} // namespace
 
 int main()
 {
