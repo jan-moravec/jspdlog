@@ -355,12 +355,62 @@ public:
         out.reserve(expected);
         for (const auto &[key, value] : members_)
         {
-            out.push_back(',');
-            detail::append_json_quoted(out, key);
-            out.push_back(':');
-            out += value;
+            append_entry_(out, key, value);
         }
         return out;
+    }
+
+    // Hot-path helper: serialize the merge of `*this` and `rhs` directly into
+    // `out`, with rhs winning on key collisions, without materializing an
+    // intermediate `json_properties`. Walks the two already-sorted maps in
+    // lockstep, so the cost is one linear pass over each side rather than a
+    // full map copy plus a second pass to serialize. Used by `json_logger`
+    // when both bound and per-call properties are present; exposed publicly
+    // so it can be unit-tested independently of the logger.
+    void append_merged_to(std::string &out, const json_properties &rhs) const
+    {
+        std::size_t expected = 0;
+        for (const auto &[key, value] : members_)
+        {
+            expected += key.size() + value.size() + 4;
+        }
+        for (const auto &[key, value] : rhs.members_)
+        {
+            expected += key.size() + value.size() + 4;
+        }
+        out.reserve(out.size() + expected);
+
+        auto lit = members_.begin();
+        const auto lend = members_.end();
+        auto rit = rhs.members_.begin();
+        const auto rend = rhs.members_.end();
+        while (lit != lend && rit != rend)
+        {
+            if (lit->first < rit->first)
+            {
+                append_entry_(out, lit->first, lit->second);
+                ++lit;
+            }
+            else if (rit->first < lit->first)
+            {
+                append_entry_(out, rit->first, rit->second);
+                ++rit;
+            }
+            else
+            {
+                append_entry_(out, rit->first, rit->second);
+                ++lit;
+                ++rit;
+            }
+        }
+        for (; lit != lend; ++lit)
+        {
+            append_entry_(out, lit->first, lit->second);
+        }
+        for (; rit != rend; ++rit)
+        {
+            append_entry_(out, rit->first, rit->second);
+        }
     }
 
 private:
@@ -373,6 +423,14 @@ private:
         {
             insert_pairs_(std::forward<Rest>(rest)...);
         }
+    }
+
+    static void append_entry_(std::string &out, const std::string &key, const std::string &value)
+    {
+        out.push_back(',');
+        detail::append_json_quoted(out, key);
+        out.push_back(':');
+        out += value;
     }
 
     // Values are stored as already-serialized JSON fragments (no surrounding
@@ -605,7 +663,10 @@ private:
         // Fast paths: avoid copying maps when we already have a precomputed
         // fragment (cached_properties_) or when one side is empty. Only the
         // both-non-empty branch needs the actual merge to honor "rhs wins"
-        // semantics on key collisions. The `fragment_storage` / `fragment`
+        // semantics on key collisions; that branch routes through
+        // json_properties::append_merged_to so we never materialize an
+        // intermediate map -- it emits the merged JSON fragment straight
+        // into `fragment_storage`. The `fragment_storage` / `fragment`
         // split mirrors log_message_(level, props, msg) -- on the
         // "bound-properties only" path we can hand cached_properties_ to
         // spdlog as a view rather than copying it into a fresh std::string.
@@ -622,7 +683,7 @@ private:
         }
         else
         {
-            fragment_storage = (properties_ + props).to_string();
+            properties_.append_merged_to(fragment_storage, props);
             fragment = fragment_storage;
         }
         logger_->log(lvl, fragment);
@@ -685,9 +746,10 @@ private:
     void log_message_(spdlog::level lvl, const json_properties &props, std::string msg)
     {
         // Mirrors the fast paths in log_(level, props): the merge-and-
-        // serialize is only needed when both sides carry properties.
-        // We materialize the fragment first, then reserve once before
-        // appending the ",\"message\":..." tail.
+        // serialize is only needed when both sides carry properties, and
+        // even then we route through append_merged_to so no intermediate
+        // json_properties is materialized. We build the fragment first,
+        // then reserve once before appending the ",\"message\":..." tail.
         static constexpr std::string_view message_sep = R"(,"message":)";
 
         std::string fragment_storage;
@@ -703,7 +765,7 @@ private:
         }
         else
         {
-            fragment_storage = (properties_ + props).to_string();
+            properties_.append_merged_to(fragment_storage, props);
             fragment = fragment_storage;
         }
 

@@ -208,3 +208,62 @@ TEST_CASE("json_properties: empty raw_json serializes as null", "[json_propertie
     };
     REQUIRE(properties.to_string() == R"(,"empty_lvalue":null,"empty_rvalue":null,"nonempty":[1])");
 }
+
+TEST_CASE("json_properties: append_merged_to matches operator+().to_string() and never appends to nothing",
+          "[json_properties]")
+{
+    // append_merged_to is the hot-path equivalent of "(lhs + rhs).to_string()"
+    // -- it walks both sorted maps in lockstep and emits straight into the
+    // output buffer. The cases below pin the same semantics the operator+
+    // tests already cover (rhs wins on collisions, lexicographic key order)
+    // and additionally lock in the "appends to an existing string" contract
+    // the logger relies on.
+    SECTION("disjoint keys are interleaved in sorted order")
+    {
+        const jspdlog::json_properties lhs{"a", 1, "c", 3};
+        const jspdlog::json_properties rhs{"b", 2, "d", 4};
+        std::string out;
+        lhs.append_merged_to(out, rhs);
+        REQUIRE(out == R"(,"a":1,"b":2,"c":3,"d":4)");
+    }
+    SECTION("rhs wins on every key collision")
+    {
+        const jspdlog::json_properties lhs{"a", 1, "b", 2, "c", 3};
+        const jspdlog::json_properties rhs{"b", 99, "c", 100, "d", 4};
+        std::string out;
+        lhs.append_merged_to(out, rhs);
+        REQUIRE(out == R"(,"a":1,"b":99,"c":100,"d":4)");
+    }
+    SECTION("empty lhs emits rhs verbatim")
+    {
+        const jspdlog::json_properties lhs;
+        const jspdlog::json_properties rhs{"a", 1, "b", 2};
+        std::string out;
+        lhs.append_merged_to(out, rhs);
+        REQUIRE(out == R"(,"a":1,"b":2)");
+    }
+    SECTION("empty rhs emits lhs verbatim")
+    {
+        const jspdlog::json_properties lhs{"a", 1, "b", 2};
+        const jspdlog::json_properties rhs;
+        std::string out;
+        lhs.append_merged_to(out, rhs);
+        REQUIRE(out == R"(,"a":1,"b":2)");
+    }
+    SECTION("both empty leaves the output buffer untouched")
+    {
+        const jspdlog::json_properties lhs;
+        const jspdlog::json_properties rhs;
+        std::string out = "preexisting";
+        lhs.append_merged_to(out, rhs);
+        REQUIRE(out == "preexisting");
+    }
+    SECTION("appends after existing content rather than overwriting it")
+    {
+        const jspdlog::json_properties lhs{"a", 1};
+        const jspdlog::json_properties rhs{"b", 2};
+        std::string out = "HEAD";
+        lhs.append_merged_to(out, rhs);
+        REQUIRE(out == R"(HEAD,"a":1,"b":2)");
+    }
+}
