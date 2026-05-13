@@ -33,7 +33,8 @@ if(NOT spdlog_FOUND)
     FetchContent_Declare(
         spdlog
         GIT_REPOSITORY https://github.com/gabime/spdlog.git
-        GIT_TAG        b8944a4bcd478ee03375c9c50dc8d6c741f43f7b # pinned commit on spdlog's v2.x branch
+        GIT_TAG
+            b8944a4bcd478ee03375c9c50dc8d6c741f43f7b # pinned commit on spdlog's v2.x branch
     )
     # Forward our install opt-in to spdlog so that `cmake --install` ships a
     # spdlog package alongside jspdlog when no system spdlog was found.
@@ -46,9 +47,9 @@ add_library(jspdlog INTERFACE)
 add_library(jspdlog::jspdlog ALIAS jspdlog)
 
 target_compile_features(jspdlog INTERFACE cxx_std_17)
-target_include_directories(jspdlog INTERFACE
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
+target_include_directories(
+    jspdlog
+    INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(jspdlog INTERFACE spdlog::spdlog)
 
@@ -64,7 +65,8 @@ if(JSPDLOG_INSTALL)
     install(
         DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/jspdlog
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-        FILES_MATCHING PATTERN "*.h"
+        FILES_MATCHING
+        PATTERN "*.h"
     )
 
     set(JSPDLOG_INSTALL_CMAKEDIR ${CMAKE_INSTALL_LIBDIR}/cmake/jspdlog)
@@ -82,9 +84,7 @@ if(JSPDLOG_INSTALL)
     )
 
     install(
-        FILES
-            ${CMAKE_CURRENT_BINARY_DIR}/jspdlogConfig.cmake
-            ${CMAKE_CURRENT_BINARY_DIR}/jspdlogConfigVersion.cmake
+        FILES ${CMAKE_CURRENT_BINARY_DIR}/jspdlogConfig.cmake ${CMAKE_CURRENT_BINARY_DIR}/jspdlogConfigVersion.cmake
         DESTINATION ${JSPDLOG_INSTALL_CMAKEDIR}
     )
 endif()

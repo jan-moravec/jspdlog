@@ -7,6 +7,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.1.0] - 2026-05-13
 
 ### Added
+
 - Initial single-header release.
 - `jspdlog::json_logger` wraps any `spdlog::logger` and always emits one JSON
   object per log call.

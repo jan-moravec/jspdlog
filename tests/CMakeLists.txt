@@ -2,30 +2,18 @@ include(FetchContent)
 
 # Declared here (rather than in the top-level CMakeLists) so the default
 # tracks the current value of JSPDLOG_BUILD_TESTS even across reconfigures.
-option(JSPDLOG_TEST_NLOHMANN_INTEROP
-    "Build the nlohmann/json <-> raw_json interop test (fetches nlohmann/json)"
-    ON
-)
+option(JSPDLOG_TEST_NLOHMANN_INTEROP "Build the nlohmann/json <-> raw_json interop test (fetches nlohmann/json)" ON)
 
 find_package(Catch2 3 CONFIG QUIET)
 if(NOT Catch2_FOUND)
-    FetchContent_Declare(
-        Catch2
-        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-        GIT_TAG        v3.5.4
-        GIT_SHALLOW    TRUE
-    )
+    FetchContent_Declare(Catch2 GIT_REPOSITORY https://github.com/catchorg/Catch2.git GIT_TAG v3.5.4 GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(Catch2)
     list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 endif()
 
 include(Catch)
 
-add_executable(
-    jspdlog_tests
-    test_json_logger.cpp
-    test_json_properties.cpp
-)
+add_executable(jspdlog_tests test_json_logger.cpp test_json_properties.cpp)
 target_link_libraries(jspdlog_tests PRIVATE jspdlog::jspdlog Catch2::Catch2WithMain)
 
 catch_discover_tests(jspdlog_tests)
@@ -36,8 +24,8 @@ if(JSPDLOG_TEST_NLOHMANN_INTEROP)
         FetchContent_Declare(
             nlohmann_json
             GIT_REPOSITORY https://github.com/nlohmann/json.git
-            GIT_TAG        v3.11.3
-            GIT_SHALLOW    TRUE
+            GIT_TAG v3.11.3
+            GIT_SHALLOW TRUE
         )
         FetchContent_MakeAvailable(nlohmann_json)
     endif()
