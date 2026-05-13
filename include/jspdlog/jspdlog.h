@@ -313,49 +313,24 @@ private:
 };
 
 // --- json_properties operators (composition) ---------------------------------
+//
+// The four corner cases of lvalue/rvalue lhs/rhs all collapse to "merge rhs
+// into lhs", so rhs values always win on key collisions. By-value lhs lets
+// the compiler reuse the caller's storage when lhs is an rvalue and is also
+// unambiguous in overload resolution on MSVC (which previously needed a
+// templated workaround).
 
-inline json_properties operator+(const json_properties &lhs, const json_properties &rhs)
-{
-    json_properties result = lhs;
-    result.merge(rhs);
-    return result;
-}
-
-inline json_properties operator+(json_properties &&lhs, const json_properties &rhs)
+inline json_properties operator+(json_properties lhs, const json_properties &rhs)
 {
     lhs.merge(rhs);
-    return std::move(lhs);
+    return lhs;
 }
 
-#ifndef _MSC_VER
-inline json_properties operator+(const json_properties &lhs, json_properties &&rhs)
-{
-    rhs.merge(lhs);
-    return std::move(rhs);
-}
-
-inline json_properties operator+(json_properties &&lhs, json_properties &&rhs)
+inline json_properties operator+(json_properties lhs, json_properties &&rhs)
 {
     lhs.merge(std::move(rhs));
-    return std::move(lhs);
+    return lhs;
 }
-#else
-// MSVC trips over the four-overload set in some calling contexts where it
-// confuses these with fmt's operator+ specializations. The two templates
-// below cover the rvalue-rhs cases without ambiguity.
-template <typename Rhs, typename = std::enable_if_t<std::is_same_v<json_properties, std::decay_t<Rhs>>>>
-inline json_properties operator+(const json_properties &lhs, Rhs &&rhs)
-{
-    rhs.merge(lhs);
-    return std::move(rhs);
-}
-template <typename Rhs, typename = std::enable_if_t<std::is_same_v<json_properties, std::decay_t<Rhs>>>>
-inline json_properties operator+(json_properties &&lhs, Rhs &&rhs)
-{
-    lhs.merge(std::move(rhs));
-    return std::move(lhs);
-}
-#endif
 
 // ============================================================================
 // json_logger: thin wrapper around spdlog::logger that pins the JSON pattern.

@@ -105,7 +105,38 @@ TEST_CASE("json_properties: insert escapes strings and keys", "[json_properties]
 {
     jspdlog::json_properties properties;
     properties.insert("key\"with\\quote", "value\nwith\tcontrol");
-    REQUIRE(properties.to_string() == R"(,"key\"with\\quote":"value\nwith\tcontrol")");
+    // The raw string literal is hoisted into a local because MSVC mis-handles
+    // stringification of raw strings inside Catch2's REQUIRE macro.
+    const std::string expected = R"(,"key\"with\\quote":"value\nwith\tcontrol")";
+    REQUIRE(properties.to_string() == expected);
+}
+
+TEST_CASE("json_properties: operator+ keeps rhs values on key collisions", "[json_properties]")
+{
+    // Cover every lvalue/rvalue combination of operator+ to guard against
+    // the historical inconsistency where the (const&, &&) overload made lhs
+    // win instead of rhs.
+    SECTION("lvalue + lvalue")
+    {
+        const jspdlog::json_properties a{"x", 1};
+        const jspdlog::json_properties b{"x", 2};
+        REQUIRE((a + b).to_string() == R"(,"x":2)");
+    }
+    SECTION("rvalue + lvalue")
+    {
+        const jspdlog::json_properties b{"x", 2};
+        REQUIRE((jspdlog::json_properties{"x", 1} + b).to_string() == R"(,"x":2)");
+    }
+    SECTION("lvalue + rvalue")
+    {
+        const jspdlog::json_properties a{"x", 1};
+        REQUIRE((a + jspdlog::json_properties{"x", 2}).to_string() == R"(,"x":2)");
+    }
+    SECTION("rvalue + rvalue")
+    {
+        REQUIRE((jspdlog::json_properties{"x", 1} + jspdlog::json_properties{"x", 2}).to_string() ==
+                R"(,"x":2)");
+    }
 }
 
 TEST_CASE("json_properties: empty has no entries", "[json_properties]")
