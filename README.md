@@ -151,9 +151,10 @@ json_properties(key1, value1, key2, value2, ...);                 // variadic ke
 void insert(const std::string& key, std::nullptr_t);
 void insert(const std::string& key, std::string_view value);
 void insert(const std::string& key, bool value);
-void insert(const std::string& key, int|long|long long|unsigned... value);
-void insert(const std::string& key, float|double value);
-void insert(const std::string& key, const raw_json& value);
+template <typename T, std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>, int> = 0>
+void insert(const std::string& key, T value);                     // any integral type (short, int, char, size_t, ...)
+void insert(const std::string& key, float|double value);          // NaN / Inf serialize as null
+void insert(const std::string& key, const raw_json& value);       // empty -> null
 template <typename T>
 void insert(const std::string& key, const T* value);              // null -> null, otherwise *value
 

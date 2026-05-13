@@ -9,6 +9,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <string>
 
@@ -159,6 +161,20 @@ TEST_CASE("json_properties: non-finite floats serialize as null", "[json_propert
 
     const jspdlog::json_properties properties{"nan", nan, "neg_inf", -inf, "pos_inf", inf, "fnan", fnan};
     REQUIRE(properties.to_string() == R"(,"fnan":null,"nan":null,"neg_inf":null,"pos_inf":null)");
+}
+
+TEST_CASE("json_properties: accepts narrow and wide integer types", "[json_properties]")
+{
+    const jspdlog::json_properties properties{
+        "i16",     static_cast<std::int16_t>(-32000),
+        "u16",     static_cast<std::uint16_t>(65000),
+        "schar",   static_cast<signed char>(-12),
+        "uchar",   static_cast<unsigned char>(200),
+        "short_v", static_cast<short>(-7),
+        "size",    static_cast<std::size_t>(1234567890ULL),
+    };
+    REQUIRE(properties.to_string() ==
+            R"(,"i16":-32000,"schar":-12,"short_v":-7,"size":1234567890,"u16":65000,"uchar":200)");
 }
 
 TEST_CASE("json_properties: empty raw_json serializes as null", "[json_properties]")

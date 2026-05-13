@@ -192,27 +192,12 @@ public:
         members_[key] = value ? "true" : "false";
     }
 
-    void insert(const std::string &key, int value)
-    {
-        members_[key] = std::to_string(value);
-    }
-    void insert(const std::string &key, long value)
-    {
-        members_[key] = std::to_string(value);
-    }
-    void insert(const std::string &key, long long value)
-    {
-        members_[key] = std::to_string(value);
-    }
-    void insert(const std::string &key, unsigned int value)
-    {
-        members_[key] = std::to_string(value);
-    }
-    void insert(const std::string &key, unsigned long value)
-    {
-        members_[key] = std::to_string(value);
-    }
-    void insert(const std::string &key, unsigned long long value)
+    // One template covers every integral type that isn't bool, including the
+    // narrow ones (short, signed/unsigned char, int16_t, ...) and the wide
+    // ones (long long, std::size_t, ...). bool is excluded so its dedicated
+    // true/false overload still wins on overload resolution.
+    template <typename T, std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>, int> = 0>
+    void insert(const std::string &key, T value)
     {
         members_[key] = std::to_string(value);
     }
