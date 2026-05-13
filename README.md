@@ -131,7 +131,8 @@ json_logger(std::string name, spdlog::sinks_init_list sinks);
 template <typename It>
 json_logger(std::string name, It sinks_begin, It sinks_end);
 
-// Adopt an existing spdlog::logger (the JSON pattern is re-applied).
+// Adopt an existing spdlog::logger (the JSON pattern is re-applied;
+// set_pattern_time() restores UTC mode if the adopted logger had it).
 static json_logger adopt(std::shared_ptr<spdlog::logger> logger);
 
 // Logging - same overload set for trace/debug/info/warn/error/critical.
@@ -145,11 +146,14 @@ void info(const json_properties& props);                          // properties 
 // Property binding.
 json_logger with_properties(json_properties props) const;         // returns a child logger
 
-// Error handling. Pass an empty std::function to restore the spdlog default.
+// Error handling. Pass an empty std::function to clear the handler entirely
+// (subsequent runtime errors are then dropped silently).
 void set_error_handler(std::function<void(std::string_view)> handler);
 
 // Free helper: forward spdlog runtime errors from `source` to `destination`
-// as structured JSON warn lines tagged with the source logger's name.
+// as structured JSON warn lines tagged with the source logger's name. The
+// handler is guarded against re-entrancy, so it's safe to call even when
+// `destination` shares a (failing) sink with `source`.
 void jspdlog::forward_errors_to(json_logger& source, json_logger destination);
 
 // spdlog passthroughs.
@@ -158,6 +162,7 @@ spdlog::level log_level() const noexcept;
 void set_level(spdlog::level level);
 void flush();
 void flush_on(spdlog::level level);
+void set_pattern_time(spdlog::pattern_time_type time_type);       // local <-> utc
 
 // Escape hatch. Do NOT call set_pattern() on this.
 const std::shared_ptr<spdlog::logger>& spdlog_logger() const;
@@ -169,22 +174,45 @@ const std::shared_ptr<spdlog::logger>& spdlog_logger() const;
 json_properties();
 json_properties(key1, value1, key2, value2, ...);                 // variadic key/value pairs
 
-// Typed inserts (one per scalar type).
-void insert(const std::string& key, std::nullptr_t);
+// Typed inserts. The set is exhaustive: every supported scalar gets a
+// dedicated overload so values are serialized once, at insert time, with
+// no surprise routing through fmt or to_string().
+void insert(const std::string& key, std::nullptr_t);              // -> null
 void insert(const std::string& key, std::string_view value);
+void insert(const std::string& key, const std::string& value);
+void insert(const std::string& key, const char* value);           // null -> null
 void insert(const std::string& key, bool value);
-template <typename T, std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>, int> = 0>
-void insert(const std::string& key, T value);                     // any integral type (short, int, char, size_t, ...)
-void insert(const std::string& key, float|double value);          // NaN / Inf serialize as null
+void insert(const std::string& key, char value);                  // one-character JSON string
+template <typename T,
+          std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>
+                                                 && !std::is_same_v<T, char>, int> = 0>
+void insert(const std::string& key, T value);                     // every integral type except bool and char:
+                                                                  //   signed/unsigned char, short, int, long,
+                                                                  //   long long, size_t, int8_t..int64_t, ...
+void insert(const std::string& key, float value);                 // NaN / Inf serialize as null
+void insert(const std::string& key, double value);                // NaN / Inf serialize as null
 void insert(const std::string& key, const raw_json& value);       // empty -> null
+void insert(const std::string& key, raw_json&& value);
 template <typename T>
 void insert(const std::string& key, const T* value);              // null -> null, otherwise *value
+                                                                  //                (recurses through pointer chains)
+
+// Wide-character types are deliberately deleted: encoding a single
+// wchar_t / char16_t / char32_t to UTF-8 needs a unicode encoder the
+// library doesn't bundle. Convert to a UTF-8 std::string first.
+void insert(const std::string&, wchar_t)  = delete;
+void insert(const std::string&, char16_t) = delete;
+void insert(const std::string&, char32_t) = delete;
 
 void merge(const json_properties& other);                         // other overrides this
 void merge(json_properties&& other);
 
 bool empty() const;
 std::string to_string() const;                                    // serialized fragment, leading ','
+void append_merged_to(std::string& out,                           // hot-path: walks two
+                      const json_properties& rhs) const;          // sorted maps in lockstep,
+                                                                  // appends merged result to `out`
+                                                                  // (rhs wins on collisions)
 ```
 
 `json_properties` overloads `operator+` for composition (`a + b` returns the
@@ -194,6 +222,11 @@ Keys are emitted in **lexicographic order** rather than insertion order. This
 keeps the output deterministic for a given set of keys and makes log-line
 regression tests trivial to write, but it does mean callers should not rely
 on a specific field ordering when scanning by eye.
+
+Note that plain `char` is serialized as a one-character JSON string (so
+`{"c", 'a'}` produces `"c":"a"`, not `"c":97`). `signed char` and
+`unsigned char` keep integer behavior because they're the canonical
+`int8_t` / `uint8_t` types.
 
 ### `jspdlog::raw_json`
 
