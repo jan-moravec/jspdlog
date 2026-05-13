@@ -1,0 +1,19 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(spdlog 2 CONFIG)
+
+# jspdlog is a single-header library, so the imported target is hand-rolled
+# here instead of going through install(EXPORT). This makes it work whether
+# spdlog was provided by find_package() or pulled via FetchContent at build
+# time.
+if(NOT TARGET jspdlog::jspdlog)
+    add_library(jspdlog::jspdlog INTERFACE IMPORTED)
+    set_target_properties(jspdlog::jspdlog PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@"
+        INTERFACE_LINK_LIBRARIES "spdlog::spdlog"
+        INTERFACE_COMPILE_FEATURES "cxx_std_17"
+    )
+endif()
+
+check_required_components(jspdlog)
