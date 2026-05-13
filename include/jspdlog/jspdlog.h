@@ -478,9 +478,9 @@ public:
         return logger_->log_level();
     }
 
-    void set_level(spdlog::level level)
+    void set_level(spdlog::level lvl)
     {
-        logger_->set_level(level);
+        logger_->set_level(lvl);
     }
 
     void flush()
@@ -488,9 +488,9 @@ public:
         logger_->flush();
     }
 
-    void flush_on(spdlog::level level)
+    void flush_on(spdlog::level lvl)
     {
-        logger_->flush_on(level);
+        logger_->flush_on(lvl);
     }
 
     // Escape hatch for any spdlog::logger configuration we don't expose
