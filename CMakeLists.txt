@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.23)
+cmake_minimum_required(VERSION 3.16)
 
 project(
     jspdlog
@@ -18,11 +18,10 @@ endif()
 
 option(JSPDLOG_BUILD_TESTS "Build jspdlog unit tests" ${JSPDLOG_IS_TOP_LEVEL})
 option(JSPDLOG_BUILD_EXAMPLES "Build jspdlog examples" ${JSPDLOG_IS_TOP_LEVEL})
-option(JSPDLOG_TEST_NLOHMANN_INTEROP
-    "Build the nlohmann/json <-> raw_json interop test (fetches nlohmann/json)"
-    ${JSPDLOG_BUILD_TESTS}
-)
 option(JSPDLOG_INSTALL "Generate install rules for jspdlog" ${JSPDLOG_IS_TOP_LEVEL})
+# JSPDLOG_TEST_NLOHMANN_INTEROP is declared inside tests/CMakeLists.txt so its
+# default tracks the live value of JSPDLOG_BUILD_TESTS across reconfigures
+# (option()'s first-seen default would otherwise stick).
 
 # --- Find spdlog --------------------------------------------------------------
 # Required: the only runtime dependency. fmt comes transitively. spdlog v2

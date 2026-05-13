@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.23)
+cmake_minimum_required(VERSION 3.16)
 project(jspdlog_install_smoke LANGUAGES CXX)
 
 # Consume jspdlog from the install tree. Typical CI usage:

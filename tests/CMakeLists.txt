@@ -1,5 +1,12 @@
 include(FetchContent)
 
+# Declared here (rather than in the top-level CMakeLists) so the default
+# tracks the current value of JSPDLOG_BUILD_TESTS even across reconfigures.
+option(JSPDLOG_TEST_NLOHMANN_INTEROP
+    "Build the nlohmann/json <-> raw_json interop test (fetches nlohmann/json)"
+    ON
+)
+
 find_package(Catch2 3 CONFIG QUIET)
 if(NOT Catch2_FOUND)
     FetchContent_Declare(
@@ -43,9 +50,7 @@ if(JSPDLOG_TEST_NLOHMANN_INTEROP)
     catch_discover_tests(jspdlog_nlohmann_interop_test)
 endif()
 
-# Smoke test for the install + find_package() flow. Configured and built only
-# when explicitly enabled, since it requires a prior `cmake --install`.
-option(JSPDLOG_TEST_INSTALL "Build the install_smoke consumer project" OFF)
-if(JSPDLOG_TEST_INSTALL)
-    add_subdirectory(install_smoke)
-endif()
+# install_smoke is a separate standalone project (see install_smoke/CMakeLists.txt)
+# that has to find_package() jspdlog from an installed tree. It is driven from
+# CI as a top-level configure, not added as a subdirectory here, because the
+# find_package would otherwise fail before jspdlog is installed.
