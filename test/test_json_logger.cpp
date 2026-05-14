@@ -302,36 +302,72 @@ TEST_CASE("json_logger: set_pattern_time keeps the JSON pattern intact when swit
     ));
 }
 
+TEST_CASE("json_logger: adopt accepts a pattern_time_type up front", "[json_logger]")
+{
+    // The optional time_type argument on adopt() is the one-call equivalent
+    // of "adopt then set_pattern_time(utc)" -- callers shouldn't have to
+    // remember the second call to keep a UTC-configured logger UTC. Same
+    // offset assertion as the set_pattern_time test above.
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+    auto spdlog_logger = std::make_shared<spdlog::logger>("AdoptUtc", sink);
+    spdlog_logger->set_level(spdlog::level::trace);
+
+    auto logger = jspdlog::json_logger::adopt(std::move(spdlog_logger), spdlog::pattern_time_type::utc);
+    logger.info("zulu");
+
+    const std::string out = oss.str();
+    REQUIRE(matches(
+        out,
+        add_endline(
+            R"(\{"timestamp":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}\+00:?00","logger":"AdoptUtc","level":"info",)"
+            R"("process":[0-9]+,"thread":[0-9]+,"message":"zulu"\})"
+        )
+    ));
+}
+
+TEST_CASE("json_logger: with_properties && mutates an rvalue logger in place", "[json_logger]")
+{
+    // The rvalue-qualified with_properties() is a chained-construction
+    // optimization: composing properties onto a freshly-constructed logger
+    // should observably attach them without involving the lvalue-overload's
+    // copy step. We can't directly observe the absence of a copy, but we
+    // can pin the user-visible contract: a chained call produces a logger
+    // that emits both bound properties on every log line.
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+
+    auto chained =
+        jspdlog::json_logger("Chained", sink).with_properties({"a", 1}).with_properties({"b", 2});
+    chained.set_level(spdlog::level::trace);
+    chained.info("hi");
+
+    REQUIRE(matches(oss.str(), expected_line("Chained", "info", R"(,"a":1,"b":2,"message":"hi")")));
+}
+
 TEST_CASE(
-    "json_logger: set_error_handler invokes the user callback with the spdlog message", "[json_logger][error_handler]"
+    "json_logger: silence_errors disables a previously installed forwarder", "[json_logger][error_handler]"
 )
 {
-    auto sink = std::make_shared<throwing_sink>("disk full");
-    jspdlog::json_logger logger("ErrHandler", std::move(sink));
-    logger.set_level(spdlog::level::trace);
+    // The only public way to install an error handler is forward_errors_to;
+    // silence_errors() is the documented way to disconnect it again. We use
+    // the two together to verify both halves: errors land on the destination
+    // before silence_errors(), and stop landing after.
+    auto throwing = std::make_shared<throwing_sink>("disk full");
+    jspdlog::json_logger source("ErrHandler", std::move(throwing));
+    source.set_level(spdlog::level::trace);
 
-    std::string captured;
-    int call_count = 0;
-    logger.set_error_handler([&](std::string_view msg) {
-        captured.assign(msg.data(), msg.size());
-        ++call_count;
-    });
+    std::ostringstream dest_oss;
+    auto dest = make_stream_logger("Captor", dest_oss);
+    jspdlog::forward_errors_to(source, dest);
 
-    // spdlog catches the throw inside the sink, formats a brief error and
-    // hands it to the error handler. Throttling means we expect exactly one
-    // call for a single log attempt.
-    logger.info("trigger");
-    REQUIRE(call_count == 1);
-    REQUIRE(captured.find("disk full") != std::string::npos);
+    source.info("first");
+    const std::string after_first = dest_oss.str();
+    REQUIRE(after_first.find("disk full") != std::string::npos);
 
-    // Passing an empty std::function clears the handler entirely; subsequent
-    // errors are dropped silently. We verify that by checking that another
-    // log call (which still triggers the throwing sink) no longer reaches
-    // our (now-disconnected) lambda.
-    logger.set_error_handler({});
-    captured.clear();
-    logger.info("trigger again");
-    REQUIRE(captured.empty());
+    source.silence_errors();
+    source.info("second");
+    REQUIRE(dest_oss.str() == after_first);
 }
 
 TEST_CASE(

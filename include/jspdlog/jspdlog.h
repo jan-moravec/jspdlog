@@ -43,6 +43,7 @@
 #include <atomic>
 #include <cmath>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <string>
@@ -191,14 +192,16 @@ public:
     // (single-pair, variadic) overloads that relied on template partial-
     // ordering to disambiguate the two-argument call site; with the rules
     // collapsed there is no chance of an ambiguous selection on any
-    // conformant compiler. Keys are whatever the matching `insert`
-    // overload accepts (which today means anything implicitly convertible
-    // to `std::string`, e.g. string literals).
+    // conformant compiler. Keys are anything implicitly convertible to
+    // either `std::string` (string literals, `std::string`, ...) or
+    // `std::string_view`; the latter is converted with an explicit
+    // `std::string{view}` step so callers can pass a `string_view` here
+    // without first wrapping it themselves.
     template <typename K, typename V, typename... Rest>
     json_properties(K &&key, V &&value, Rest &&...rest)
     {
         static_assert(sizeof...(rest) % 2 == 0, "json_properties requires key/value pairs");
-        insert(std::forward<K>(key), std::forward<V>(value));
+        insert(make_key_(std::forward<K>(key)), std::forward<V>(value));
         if constexpr (sizeof...(rest) > 0)
         {
             insert_pairs_(std::forward<Rest>(rest)...);
@@ -208,46 +211,54 @@ public:
     // --- Insert overloads -----------------------------------------------------
     // Each typed overload serializes the value into a small std::string. The
     // pointer template recurses through any depth of pointer-to-pointer.
+    //
+    // The key is taken by value so the temporary `std::string` that callers
+    // typically pass (constructed implicitly from a string literal) can be
+    // moved straight into `members_` instead of being copied through a const
+    // reference.
 
-    void insert(const std::string &key, std::nullptr_t) { members_[key] = "null"; }
+    void insert(std::string key, std::nullptr_t) { members_.insert_or_assign(std::move(key), "null"); }
 
-    void insert(const std::string &key, const char *value)
+    void insert(std::string key, const char *value)
     {
         if (value != nullptr)
         {
-            insert(key, std::string_view{value});
+            insert(std::move(key), std::string_view{value});
         }
         else
         {
-            members_[key] = "null";
+            members_.insert_or_assign(std::move(key), "null");
         }
     }
 
-    void insert(const std::string &key, std::string_view value)
+    void insert(std::string key, std::string_view value)
     {
         std::string encoded;
         encoded.reserve(value.size() + 2);
         detail::append_json_quoted(encoded, value);
-        members_[key] = std::move(encoded);
+        members_.insert_or_assign(std::move(key), std::move(encoded));
     }
 
-    void insert(const std::string &key, const std::string &value) { insert(key, std::string_view{value}); }
+    void insert(std::string key, const std::string &value) { insert(std::move(key), std::string_view{value}); }
 
-    void insert(const std::string &key, bool value) { members_[key] = value ? "true" : "false"; }
+    void insert(std::string key, bool value)
+    {
+        members_.insert_or_assign(std::move(key), value ? "true" : "false");
+    }
 
     // Plain `char` is treated as a single-character JSON string rather than
     // a small integer, which is what users almost always want. signed char
     // and unsigned char keep the integer behavior because they're the
     // canonical 8-bit integer types (int8_t, uint8_t).
-    void insert(const std::string &key, char value) { insert(key, std::string_view{&value, 1}); }
+    void insert(std::string key, char value) { insert(std::move(key), std::string_view{&value, 1}); }
 
     // Wide character types deliberately don't compile: encoding a single
     // wchar_t/char16_t/char32_t to UTF-8 requires a unicode encoder, which
     // jspdlog intentionally doesn't bundle. Callers should convert to a
     // UTF-8 std::string themselves and pass that.
-    void insert(const std::string &, wchar_t) = delete;
-    void insert(const std::string &, char16_t) = delete;
-    void insert(const std::string &, char32_t) = delete;
+    void insert(std::string, wchar_t) = delete;
+    void insert(std::string, char16_t) = delete;
+    void insert(std::string, char32_t) = delete;
 
     // One template covers every remaining integral type, including the narrow
     // ones (short, signed/unsigned char, int16_t, ...) and the wide ones
@@ -256,47 +267,56 @@ public:
     template <
         typename T,
         std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool> && !std::is_same_v<T, char>, int> = 0>
-    void insert(const std::string &key, T value)
+    void insert(std::string key, T value)
     {
-        members_[key] = std::to_string(value);
+        members_.insert_or_assign(std::move(key), std::to_string(value));
     }
 
     // JSON has no NaN/Infinity tokens. Following the JavaScript JSON.stringify
     // convention, non-finite floats are serialized as `null`.
-    void insert(const std::string &key, float value)
+    //
+    // For finite values we route through `format_finite_float_` so that integer-
+    // valued floats like `1.0` still serialize with a trailing `.0`. fmt's
+    // shortest-round-trip default would otherwise emit them as `1`, which most
+    // JSON consumers then parse as an integer -- giving the producer's choice
+    // of `float`/`double` no observable effect downstream. Forcing the decimal
+    // point keeps the JSON type stable across the range of float values.
+    void insert(std::string key, float value)
     {
-        members_[key] = std::isfinite(value) ? spdlog::fmt_lib::format("{}", value) : "null";
+        members_.insert_or_assign(std::move(key), std::isfinite(value) ? format_finite_float_(value) : "null");
     }
-    void insert(const std::string &key, double value)
+    void insert(std::string key, double value)
     {
-        members_[key] = std::isfinite(value) ? spdlog::fmt_lib::format("{}", value) : "null";
+        members_.insert_or_assign(std::move(key), std::isfinite(value) ? format_finite_float_(value) : "null");
     }
 
     // Empty raw_json content would produce ",\"key\":" followed by `,` or `}`
     // (invalid JSON). Fall back to `null` so the line stays parseable. The
     // caller is still responsible for the validity of non-empty content.
-    void insert(const std::string &key, const raw_json &value)
+    void insert(std::string key, const raw_json &value)
     {
-        members_[key] = value.value.empty() ? "null" : value.value;
+        members_.insert_or_assign(std::move(key), value.value.empty() ? std::string{"null"} : value.value);
     }
-    void insert(const std::string &key, raw_json &&value)
+    void insert(std::string key, raw_json &&value)
     {
-        members_[key] = value.value.empty() ? "null" : std::move(value.value);
+        members_.insert_or_assign(
+            std::move(key), value.value.empty() ? std::string{"null"} : std::move(value.value)
+        );
     }
 
     // Pointer overload: null pointers become "null"; otherwise dereference
     // and dispatch to the matching typed overload. Recurses through
     // pointer-to-pointer chains of any depth.
     template <typename T>
-    void insert(const std::string &key, const T *value)
+    void insert(std::string key, const T *value)
     {
         if (value != nullptr)
         {
-            insert(key, *value);
+            insert(std::move(key), *value);
         }
         else
         {
-            members_[key] = "null";
+            members_.insert_or_assign(std::move(key), "null");
         }
     }
 
@@ -312,12 +332,15 @@ public:
 
     void merge(json_properties &&other)
     {
-        // Take ownership of `other`'s storage first, then merge back anything
-        // we already had under keys that don't collide. Duplicates keep
-        // `other`'s value (which is now in `members_`), matching the
-        // copy-merge semantics above. std::map::merge leaves colliding
-        // entries behind in the source; clear them so the moved-from object
-        // is left in the conventional empty-but-valid state.
+        // The swap puts `other`'s incoming entries into `members_` and leaves
+        // our previous entries in `other.members_` -- i.e. `members_` now
+        // holds the side that should win on collisions. We then merge our
+        // previous entries back in: std::map::merge leaves colliding entries
+        // behind in the source, so any of "our" keys that already exist in
+        // `members_` (where `other`'s value lives) stay in `other.members_`
+        // and are quietly dropped, which is exactly the rhs-wins semantics.
+        // Finally we clear the leftovers so the moved-from object is left in
+        // the conventional empty-but-valid state.
         std::swap(members_, other.members_);
         members_.merge(other.members_);
         other.members_.clear();
@@ -333,9 +356,10 @@ public:
     [[nodiscard]] std::string to_string() const
     {
         // Pre-size: each entry contributes at least key.size() + value.size()
-        // + 4 chars (the comma, the two quotes around the key, and the colon).
-        // Keys that need JSON-escaping push the actual size higher, but for
-        // the common case this avoids re-allocating across the loop.
+        // + 4 chars (the leading comma, the two quotes around the key, and
+        // the colon -- i.e. `,"":`). Keys that need JSON-escaping push the
+        // actual size higher, but for the common ASCII-only case this avoids
+        // re-allocating across the loop.
         std::size_t expected = 0;
         for (const auto &[key, value] : members_)
         {
@@ -359,6 +383,10 @@ public:
     // so it can be unit-tested independently of the logger.
     void append_merged_to(std::string &out, const json_properties &rhs) const
     {
+        // Same +4 reasoning as `to_string()`: `,"":` per entry, exact for
+        // ASCII keys that don't need escaping. We over-reserve slightly when
+        // the two sides have colliding keys (the rhs entry is emitted once,
+        // not twice) which is harmless.
         std::size_t expected = 0;
         for (const auto &[key, value] : members_)
         {
@@ -407,19 +435,53 @@ private:
     template <typename First, typename Second, typename... Rest>
     void insert_pairs_(First &&first, Second &&second, Rest &&...rest)
     {
-        // Decay before the convertibility check so a forwarding reference
-        // like `const char (&)[N]` reads as `const char *` -- otherwise we'd
-        // be asking "is this reference type convertible to std::string?",
-        // which only works by accident of array-to-pointer decay during
-        // overload resolution. With std::decay_t the intent is explicit.
-        static_assert(
-            std::is_convertible_v<std::decay_t<First>, std::string>, "key must be convertible to std::string"
-        );
-        insert(std::forward<First>(first), std::forward<Second>(second));
+        insert(make_key_(std::forward<First>(first)), std::forward<Second>(second));
         if constexpr (sizeof...(rest) > 0)
         {
             insert_pairs_(std::forward<Rest>(rest)...);
         }
+    }
+
+    // Converts any string-like key to `std::string`. Accepts both implicit
+    // `std::string` conversions (string literals, `std::string`) and
+    // `std::string_view` conversions (which are not implicit to `std::string`
+    // and would otherwise hit the `insert` overload set as an
+    // unconvertible-key error). Decays the input so a forwarding reference
+    // such as `const char (&)[N]` is checked as `const char *`.
+    template <typename K>
+    static std::string make_key_(K &&key)
+    {
+        using DK = std::decay_t<K>;
+        if constexpr (std::is_convertible_v<DK, std::string>)
+        {
+            return std::string(std::forward<K>(key));
+        }
+        else
+        {
+            static_assert(
+                std::is_convertible_v<DK, std::string_view>,
+                "json_properties key must be convertible to std::string or std::string_view"
+            );
+            return std::string{std::string_view{std::forward<K>(key)}};
+        }
+    }
+
+    // Forces a trailing decimal point on integer-valued floats so JSON
+    // consumers see a stable number type for the field. fmt's `{}` format
+    // emits the shortest round-trip representation, so `1.0` would otherwise
+    // serialize as `1`, which most parsers then read back as an integer.
+    template <typename Float>
+    static std::string format_finite_float_(Float value)
+    {
+        std::string s = spdlog::fmt_lib::format("{}", value);
+        // If fmt already emitted a fractional or exponent marker the value is
+        // already unambiguously a float; otherwise append `.0` to make it so.
+        const bool has_float_marker = s.find_first_of(".eE") != std::string::npos;
+        if (!has_float_marker)
+        {
+            s += ".0";
+        }
+        return s;
     }
 
     static void append_entry_(std::string &out, const std::string &key, const std::string &value)
@@ -483,7 +545,15 @@ public:
         apply_pattern_();
     }
 
-    template <typename It>
+    // Constrains the iterator template so a stray call with an iterator over
+    // some unrelated type fails at the constructor signature with a clear
+    // message, rather than producing a confusing instantiation error inside
+    // spdlog's own constructor body.
+    template <
+        typename It,
+        std::enable_if_t<
+            std::is_constructible_v<spdlog::sink_ptr, typename std::iterator_traits<It>::reference>,
+            int> = 0>
     json_logger(std::string name, It sinks_begin, It sinks_end)
         : logger_(std::make_shared<spdlog::logger>(std::move(name), sinks_begin, sinks_end))
     {
@@ -494,14 +564,20 @@ public:
     // with a custom error handler, registered in the spdlog registry, or
     // assembled by another framework). The JSON pattern is re-applied so the
     // result is still guaranteed-valid JSON, regardless of whatever pattern
-    // was previously set. Note that set_pattern() resets spdlog's
-    // pattern-time mode to local time; if the adopted logger was previously
-    // configured for UTC, call set_pattern_time(spdlog::pattern_time_type::utc)
-    // on the returned json_logger to restore that mode without losing the
-    // pinned JSON pattern.
-    [[nodiscard]] static json_logger adopt(std::shared_ptr<spdlog::logger> logger)
+    // was previously set.
+    //
+    // The optional `time_type` lets callers preserve the adopted logger's
+    // timestamp mode through pattern re-application: spdlog implicitly resets
+    // the pattern-time mode to `local` on every `set_pattern()` call, so an
+    // adopted logger configured for UTC would otherwise silently switch to
+    // local. Passing `spdlog::pattern_time_type::utc` here is equivalent to
+    // calling `set_pattern_time(utc)` on the returned logger immediately.
+    [[nodiscard]] static json_logger adopt(
+        std::shared_ptr<spdlog::logger> logger,
+        spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local
+    )
     {
-        return json_logger(std::move(logger));
+        return json_logger(std::move(logger), time_type);
     }
 
     json_logger(const json_logger &) = default;
@@ -518,11 +594,17 @@ public:
     //
     // Sharing the spdlog::logger means *bound properties are isolated per
     // child*, but configuration mutations are not: calling set_level(),
-    // set_error_handler(), flush(), or flush_on() on the child reaches
-    // through to the same underlying spdlog::logger as the parent and so
-    // affects every json_logger derived from the same root. If you need
-    // truly independent configuration, construct a new json_logger.
-    [[nodiscard]] json_logger with_properties(json_properties props) const
+    // flush(), or flush_on() on the child reaches through to the same
+    // underlying spdlog::logger as the parent and so affects every
+    // json_logger derived from the same root. If you need truly independent
+    // configuration, construct a new json_logger.
+    //
+    // Two ref-qualified overloads: the lvalue version copies *this so the
+    // caller's logger is unchanged; the rvalue version mutates *this in
+    // place and returns it by move, which keeps chained construction like
+    // `make_logger().with_properties(...).with_properties(...)` allocation-
+    // light (no second copy of `properties_`).
+    [[nodiscard]] json_logger with_properties(json_properties props) const &
     {
         json_logger copy = *this;
         copy.properties_.merge(std::move(props));
@@ -530,24 +612,31 @@ public:
         return copy;
     }
 
-    // Install a handler for spdlog runtime errors (e.g. a sink that throws
-    // while writing). Pass an empty std::function to clear the handler
-    // entirely; once cleared, subsequent runtime errors are dropped
-    // silently (spdlog v2 no-ops when the handler slot is empty rather
-    // than reinstating the built-in stderr writer). The handler runs on
-    // the thread that triggered the error and must be safe to call
-    // concurrently if the logger is shared across threads. For the common
-    // "log the error as a JSON warn line on another logger" pattern, see
-    // jspdlog::forward_errors_to below.
-    void set_error_handler(std::function<void(std::string_view)> handler)
+    [[nodiscard]] json_logger with_properties(json_properties props) &&
     {
-        if (!handler)
-        {
-            logger_->set_error_handler({});
-            return;
-        }
-        logger_->set_error_handler([h = std::move(handler)](const std::string &msg) { h(msg); });
+        properties_.merge(std::move(props));
+        cached_properties_ = properties_.to_string();
+        return std::move(*this);
     }
+
+    // --- Error handling -------------------------------------------------------
+    //
+    // Two public entry points are intentionally enough:
+    //   * `silence_errors()` drops spdlog runtime errors entirely.
+    //   * the free function `forward_errors_to(source, destination)` (below)
+    //     surfaces them as JSON warn lines on another logger.
+    // Lower-level installation of a raw callback is intentionally not part
+    // of the public API; callers that need it can reach through
+    // `spdlog_logger()->set_error_handler(...)` directly.
+
+    // Replace the spdlog runtime-error handler with a no-op. Subsequent
+    // runtime errors from sinks (e.g. a disk-full exception caught by
+    // spdlog) are dropped silently. spdlog v2 no-ops when the handler slot
+    // is empty rather than reinstating the built-in stderr writer, so this
+    // really is a permanent silence until `forward_errors_to()` (or an
+    // escape-hatch `spdlog_logger()->set_error_handler(...)` call) replaces
+    // the handler again.
+    void silence_errors() { logger_->set_error_handler({}); }
 
     // --- Logging API ----------------------------------------------------------
     //
@@ -629,13 +718,53 @@ public:
     [[nodiscard]] const std::shared_ptr<spdlog::logger> &spdlog_logger() const noexcept { return logger_; }
 
 private:
-    explicit json_logger(std::shared_ptr<spdlog::logger> logger)
+    // Used by `adopt()`. The time_type defaults to `local` so the public
+    // sink/sinks_init_list/iterator constructors -- which delegate to
+    // `apply_pattern_()` with no argument -- stay on spdlog's default time
+    // mode, while `adopt()` can opt into UTC up front.
+    explicit json_logger(
+        std::shared_ptr<spdlog::logger> logger,
+        spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local
+    )
         : logger_(std::move(logger))
     {
-        apply_pattern_();
+        apply_pattern_(time_type);
     }
 
-    void apply_pattern_() { logger_->set_pattern(detail::make_json_pattern(logger_->name())); }
+    // Installs the pinned JSON pattern on the underlying spdlog logger.
+    // Note: spdlog's `set_pattern()` implicitly resets the pattern-time mode
+    // to whatever is passed (defaulting to local), which is why both
+    // `adopt(logger, time_type)` and `set_pattern_time()` thread an explicit
+    // mode through this function -- without that, a caller switching to UTC
+    // would silently revert on the next pattern reapplication.
+    void apply_pattern_(spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local)
+    {
+        logger_->set_pattern(detail::make_json_pattern(logger_->name()), time_type);
+    }
+
+    // Install a handler for spdlog runtime errors. Pass an empty
+    // std::function to clear the handler entirely; once cleared, subsequent
+    // runtime errors are dropped silently (spdlog v2 no-ops when the handler
+    // slot is empty rather than reinstating the built-in stderr writer).
+    // The handler runs on the thread that triggered the error and must be
+    // safe to call concurrently if the logger is shared across threads.
+    //
+    // This is the implementation primitive behind `silence_errors()` and the
+    // free function `forward_errors_to()`; it's intentionally private so
+    // those two named helpers remain the only public way to configure error
+    // handling. Code that genuinely needs a raw callback can still install
+    // one through `spdlog_logger()->set_error_handler(...)`.
+    void set_error_handler_(std::function<void(std::string_view)> handler)
+    {
+        if (!handler)
+        {
+            logger_->set_error_handler({});
+            return;
+        }
+        logger_->set_error_handler([h = std::move(handler)](const std::string &msg) { h(msg); });
+    }
+
+    friend void forward_errors_to(json_logger &source, json_logger destination);
 
     // --- log_ dispatch --------------------------------------------------------
 
@@ -771,14 +900,15 @@ private:
 };
 
 // ============================================================================
-// forward_errors_to: convenience wrapper around set_error_handler that turns
-// spdlog runtime errors into structured warn lines on another json_logger.
+// forward_errors_to: turn spdlog runtime errors into structured warn lines on
+// another json_logger. The primary public way to react to sink failures.
 // ============================================================================
 //
 // Captures `source`'s name and a copy of `destination` at call time. The copy
 // is intentional: subsequent with_properties() calls on the original
 // destination do not affect the forwarder. Errors emitted by `source` after
-// this call surface as `destination.warn({"source", source.name()}, "{}", msg)`.
+// this call surface as
+//   destination.warn(json_properties{"source", source.name()}, "{}", msg)
 //
 // Exceptions thrown from the destination's own logging path are swallowed.
 // An error handler that throws would re-enter spdlog's error machinery and
@@ -798,9 +928,9 @@ inline void forward_errors_to(json_logger &source, json_logger destination)
 {
     auto name = source.name();
     auto in_handler = std::make_shared<std::atomic<bool>>(false);
-    source.set_error_handler([name = std::move(name),
-                              dest = std::move(destination),
-                              in_handler = std::move(in_handler)](std::string_view msg) mutable {
+    source.set_error_handler_([name = std::move(name),
+                               dest = std::move(destination),
+                               in_handler = std::move(in_handler)](std::string_view msg) mutable {
         bool expected = false;
         if (!in_handler->compare_exchange_strong(expected, true))
         {

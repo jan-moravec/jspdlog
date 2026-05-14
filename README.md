@@ -34,8 +34,10 @@ machinery, and ecosystem.
 - **Single header.** `#include <jspdlog/jspdlog.h>` and you're done.
 - **Cannot emit invalid JSON.** The spdlog pattern is set internally and
   there is no public API to change it.
-- **Works with every spdlog sink.** Rotating file, daily, async, syslog,
-  Windows event log, custom sinks — any `spdlog::sink_ptr` is accepted.
+- **Works with every spdlog sink.** Rotating file, daily, syslog, Windows
+  event log, custom sinks — any `spdlog::sink_ptr` is accepted. Async
+  loggers are supported via `json_logger::adopt(...)`, since the public
+  constructors always build a synchronous `spdlog::logger`.
 - **Typed structured properties.** Bind key/value pairs to a logger, or
   attach them per call; the wire format is built once at insert time, not
   reparsed on every log.
@@ -137,9 +139,12 @@ json_logger(std::string name, spdlog::sinks_init_list sinks);
 template <typename It>
 json_logger(std::string name, It sinks_begin, It sinks_end);
 
-// Adopt an existing spdlog::logger (the JSON pattern is re-applied;
-// set_pattern_time() restores UTC mode if the adopted logger had it).
-static json_logger adopt(std::shared_ptr<spdlog::logger> logger);
+// Adopt an existing spdlog::logger (the JSON pattern is re-applied). The
+// optional time_type preserves a UTC-configured adopted logger through the
+// pattern reapplication; it defaults to local.
+static json_logger adopt(std::shared_ptr<spdlog::logger> logger,
+                         spdlog::pattern_time_type time_type
+                             = spdlog::pattern_time_type::local);
 
 // Logging - same overload set for trace/debug/info/warn/error/critical.
 void info(spdlog::format_string_t<Args...> fmt, Args&&... args);  // formatted message
@@ -149,17 +154,23 @@ void info(const json_properties& props,
 void info(const json_properties& props, const T& msg);            // props + value
 void info(const json_properties& props);                          // properties only, no message
 
-// Property binding.
-json_logger with_properties(json_properties props) const;         // returns a child logger
+// Property binding. The rvalue overload mutates *this in place so chained
+// `make().with_properties(a).with_properties(b)` avoids a second copy.
+json_logger with_properties(json_properties props) const&;
+json_logger with_properties(json_properties props) &&;
 
-// Error handling. Pass an empty std::function to clear the handler entirely
-// (subsequent runtime errors are then dropped silently).
-void set_error_handler(std::function<void(std::string_view)> handler);
+// Error handling. Two helpers cover the supported use cases:
+//   * silence_errors()           - drop spdlog runtime errors entirely.
+//   * forward_errors_to(...)     - surface them as JSON warn lines on
+//                                  another logger (free function below).
+// Lower-level callbacks are not part of the public API; reach through
+// spdlog_logger()->set_error_handler(...) if you really need one.
+void silence_errors();
 
-// Free helper: forward spdlog runtime errors from `source` to `destination`
-// as structured JSON warn lines tagged with the source logger's name. The
-// handler is guarded against re-entrancy, so it's safe to call even when
-// `destination` shares a (failing) sink with `source`.
+// Forward spdlog runtime errors from `source` to `destination` as structured
+// JSON warn lines tagged with the source logger's name. The handler is
+// guarded against re-entrancy, so it's safe to call even when `destination`
+// shares a (failing) sink with `source`.
 void jspdlog::forward_errors_to(json_logger& source, json_logger destination);
 
 // spdlog passthroughs.
@@ -195,8 +206,10 @@ template <typename T,
 void insert(const std::string& key, T value);                     // every integral type except bool and char:
                                                                   //   signed/unsigned char, short, int, long,
                                                                   //   long long, size_t, int8_t..int64_t, ...
-void insert(const std::string& key, float value);                 // NaN / Inf serialize as null
-void insert(const std::string& key, double value);                // NaN / Inf serialize as null
+void insert(const std::string& key, float value);                 // NaN / Inf serialize as null,
+void insert(const std::string& key, double value);                // integer-valued floats keep a
+                                                                  // trailing `.0` so downstream
+                                                                  // JSON parsers see a stable type
 void insert(const std::string& key, const raw_json& value);       // empty -> null
 void insert(const std::string& key, raw_json&& value);
 template <typename T>
@@ -281,7 +294,7 @@ No. The returned child shares the parent's `std::shared_ptr<spdlog::logger>`
 (and therefore its sinks, level, error handler). Only the bound property
 strings are copied. As a consequence, *bound properties are isolated per
 child*, but configuration changes are not: calling `set_level()`,
-`set_error_handler()`, or `flush_on()` on the child reconfigures the
+`silence_errors()`, or `flush_on()` on the child reconfigures the
 underlying spdlog logger and so affects every json_logger derived from the
 same root.
 

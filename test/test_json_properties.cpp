@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <string_view>
 
 TEST_CASE("json_properties: variadic constructor + addition operators", "[json_properties]")
 {
@@ -168,6 +169,41 @@ TEST_CASE("json_properties: non-finite floats serialize as null", "[json_propert
 
     const jspdlog::json_properties properties{"nan", nan, "neg_inf", -inf, "pos_inf", inf, "fnan", fnan};
     REQUIRE(properties.to_string() == R"(,"fnan":null,"nan":null,"neg_inf":null,"pos_inf":null)");
+}
+
+TEST_CASE("json_properties: integer-valued floats keep a trailing decimal", "[json_properties]")
+{
+    // fmt's default float format emits the shortest round-trip
+    // representation, so `1.0` would serialize as `1` and a JSON consumer
+    // would then read it back as an integer -- making the producer's choice
+    // of float-vs-int invisible downstream. json_properties forces a
+    // trailing `.0` so the JSON type stays stable for any finite float.
+    const jspdlog::json_properties properties{
+        "zero_d",
+        0.0,
+        "one_d",
+        1.0,
+        "neg_d",
+        -3.0,
+        "one_f",
+        1.0f,
+        "fraction",
+        1.5,
+    };
+    REQUIRE(
+        properties.to_string() ==
+        R"(,"fraction":1.5,"neg_d":-3.0,"one_d":1.0,"one_f":1.0,"zero_d":0.0)"
+    );
+}
+
+TEST_CASE("json_properties: keys accept std::string_view", "[json_properties]")
+{
+    // std::string_view doesn't implicitly convert to std::string, but the
+    // variadic constructor opts back in by converting through an explicit
+    // std::string{view}. Callers can therefore mix and match key types.
+    using namespace std::string_view_literals;
+    const jspdlog::json_properties properties{"plain", 1, "from_view"sv, 2};
+    REQUIRE(properties.to_string() == R"(,"from_view":2,"plain":1)");
 }
 
 TEST_CASE("json_properties: accepts narrow and wide integer types", "[json_properties]")
