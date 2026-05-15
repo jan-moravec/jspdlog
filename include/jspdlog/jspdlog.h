@@ -46,6 +46,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -55,7 +56,47 @@ namespace jspdlog
 {
 
 // ============================================================================
-// detail: internal helpers (pattern constant + JSON string escaper).
+// json_pattern_options: choose which fixed header fields to emit and rename
+// them.
+// ============================================================================
+//
+// Each std::optional in this struct controls one entry of the JSON header
+// emitted by every json_logger:
+//   * a string value -- include the field with that key name;
+//   * std::nullopt   -- omit the field entirely.
+//
+// The defaults reproduce the pre-customization output exactly:
+//   {"timestamp":"...","logger":"...","level":"...","process":...,"thread":...}
+// so call sites that don't pass options are unaffected. Field order is fixed
+// (timestamp, logger, level, process, thread) regardless of which subset is
+// selected.
+//
+// Only the *keys* are configurable; the value formats are not -- timestamps
+// stay ISO-8601 (with the spdlog `%z` offset that may render as "+02:00" or
+// "+0200" depending on platform), levels stay spdlog's level name strings,
+// and process/thread stay numeric. Keys are JSON-escaped and spdlog-pattern-
+// escaped exactly like the logger name, so any byte (including quotes,
+// backslashes, control chars and `%`) is safe.
+//
+// Omitting *every* fixed field produces `{<properties-or-message>}` lines, or
+// literally `{}` for an empty properties-only call -- still valid JSON.
+//
+// Example:
+//   jspdlog::json_pattern_options opts;
+//   opts.timestamp = "ts";          // rename
+//   opts.process = std::nullopt;    // omit
+//   jspdlog::json_logger logger("app", sink, opts);
+struct json_pattern_options
+{
+    std::optional<std::string> timestamp = std::string{"timestamp"};
+    std::optional<std::string> logger = std::string{"logger"};
+    std::optional<std::string> level = std::string{"level"};
+    std::optional<std::string> process = std::string{"process"};
+    std::optional<std::string> thread = std::string{"thread"};
+};
+
+// ============================================================================
+// detail: internal helpers (pattern builder + JSON string escaper).
 // ============================================================================
 namespace detail
 {
@@ -110,30 +151,23 @@ inline void append_json_quoted(std::string &out, std::string_view s)
     out.push_back('"');
 }
 
-// Build the spdlog pattern that turns each log call into one JSON object.
-// The logger name is escaped and baked in at construction time rather than
-// interpolated via %n at format time, so names containing quotes, backslashes
-// or control characters still produce a structurally valid JSON line. The
-// trailing %v is where json_logger writes the property fragment (and the
-// optional ,"message":"...") and the closing brace is part of the pattern
-// itself, which is what guarantees the line is always valid JSON.
-//
-// Two layers of escaping are needed for the logger name:
-//   1. JSON-escape the bytes so the resulting field value is valid JSON.
+// Append `s` to `out` so that the result is safe to embed as a literal piece
+// of JSON inside an spdlog pattern. Two layers of escaping are needed:
+//   1. JSON-escape the bytes so the resulting field is valid JSON.
 //   2. Double every `%` so spdlog's pattern parser treats them as literals
-//      rather than format-flag prefixes (otherwise a name like "50%off"
-//      would inject whatever `%o` happens to expand to, breaking the
+//      rather than format-flag prefixes (otherwise a literal like "50%off"
+//      would expand whatever `%o` produces, or worse a `%v` would splice
+//      the message into the wrong place and break the
 //      structurally-valid-JSON guarantee).
-inline std::string make_json_pattern(std::string_view name)
+// Used for the logger name (a JSON value) and for every json_pattern_options
+// key (a JSON key); both have the same "user-supplied literal goes through
+// spdlog's pattern parser" risk profile.
+inline void append_pattern_safe_quoted(std::string &out, std::string_view s)
 {
-    std::string quoted_name;
-    quoted_name.reserve(name.size() + 2);
-    append_json_quoted(quoted_name, name);
-
-    std::string out;
-    out.reserve(120 + quoted_name.size());
-    out += R"({"timestamp":"%Y-%m-%dT%H:%M:%S.%e%z","logger":)";
-    for (char c : quoted_name)
+    std::string quoted;
+    quoted.reserve(s.size() + 2);
+    append_json_quoted(quoted, s);
+    for (char c : quoted)
     {
         out.push_back(c);
         if (c == '%')
@@ -141,8 +175,79 @@ inline std::string make_json_pattern(std::string_view name)
             out.push_back('%');
         }
     }
-    out += R"(,"level":"%l","process":%P,"thread":%t%v})";
-    return out;
+}
+
+// Result of building the pinned spdlog pattern. The bool reports whether the
+// pattern emits at least one fixed field; when it does, the trailing `%v`
+// fragment is preceded by the last field's value and so must begin with a
+// comma. When no fixed fields are emitted (pattern is `{%v}`), the fragment
+// must NOT begin with a comma -- json_logger uses this flag to strip the
+// leading comma it would otherwise produce.
+struct json_pattern_build
+{
+    std::string pattern;
+    bool fragment_starts_with_comma;
+};
+
+// Build the spdlog pattern that turns each log call into one JSON object.
+// The logger name is escaped and baked in at construction time rather than
+// interpolated via %n at format time, so names containing quotes, backslashes
+// or control characters still produce a structurally valid JSON line. The
+// trailing `%v` is where json_logger writes the property fragment (and the
+// optional ,"message":"...") and the closing brace is part of the pattern
+// itself, which is what guarantees the line is always valid JSON.
+inline json_pattern_build make_json_pattern(std::string_view name, const json_pattern_options &opts)
+{
+    std::string out;
+    out.reserve(160 + name.size());
+    out.push_back('{');
+
+    bool any_field = false;
+    auto emit_separator = [&]() {
+        if (any_field)
+        {
+            out.push_back(',');
+        }
+    };
+
+    if (opts.timestamp.has_value())
+    {
+        emit_separator();
+        append_pattern_safe_quoted(out, *opts.timestamp);
+        out += R"(:"%Y-%m-%dT%H:%M:%S.%e%z")";
+        any_field = true;
+    }
+    if (opts.logger.has_value())
+    {
+        emit_separator();
+        append_pattern_safe_quoted(out, *opts.logger);
+        out.push_back(':');
+        append_pattern_safe_quoted(out, name);
+        any_field = true;
+    }
+    if (opts.level.has_value())
+    {
+        emit_separator();
+        append_pattern_safe_quoted(out, *opts.level);
+        out += R"(:"%l")";
+        any_field = true;
+    }
+    if (opts.process.has_value())
+    {
+        emit_separator();
+        append_pattern_safe_quoted(out, *opts.process);
+        out += ":%P";
+        any_field = true;
+    }
+    if (opts.thread.has_value())
+    {
+        emit_separator();
+        append_pattern_safe_quoted(out, *opts.thread);
+        out += ":%t";
+        any_field = true;
+    }
+    out += "%v}";
+    return {std::move(out), any_field};
 }
 
 } // namespace detail
@@ -533,14 +638,16 @@ public:
     // The user supplies a name and any spdlog sink(s). jspdlog builds and
     // owns the spdlog::logger, applying the pinned JSON pattern.
 
-    json_logger(std::string name, spdlog::sink_ptr sink)
+    json_logger(std::string name, spdlog::sink_ptr sink, json_pattern_options options = {})
         : logger_(std::make_shared<spdlog::logger>(std::move(name), std::move(sink)))
+        , pattern_options_(std::move(options))
     {
         apply_pattern_();
     }
 
-    json_logger(std::string name, spdlog::sinks_init_list sinks)
+    json_logger(std::string name, spdlog::sinks_init_list sinks, json_pattern_options options = {})
         : logger_(std::make_shared<spdlog::logger>(std::move(name), sinks))
+        , pattern_options_(std::move(options))
     {
         apply_pattern_();
     }
@@ -554,8 +661,9 @@ public:
         std::enable_if_t<
             std::is_constructible_v<spdlog::sink_ptr, typename std::iterator_traits<It>::reference>,
             int> = 0>
-    json_logger(std::string name, It sinks_begin, It sinks_end)
+    json_logger(std::string name, It sinks_begin, It sinks_end, json_pattern_options options = {})
         : logger_(std::make_shared<spdlog::logger>(std::move(name), sinks_begin, sinks_end))
+        , pattern_options_(std::move(options))
     {
         apply_pattern_();
     }
@@ -577,7 +685,21 @@ public:
         spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local
     )
     {
-        return json_logger(std::move(logger), time_type);
+        return json_logger(std::move(logger), json_pattern_options{}, time_type);
+    }
+
+    // Same as the two-argument adopt(), but also threads a json_pattern_options
+    // through. Spelled as a separate overload (rather than an extra default
+    // argument) so existing call sites like `adopt(logger, utc)` continue to
+    // resolve unambiguously, and so callers passing only options don't have
+    // to spell out the pattern_time_type.
+    [[nodiscard]] static json_logger adopt(
+        std::shared_ptr<spdlog::logger> logger,
+        json_pattern_options options,
+        spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local
+    )
+    {
+        return json_logger(std::move(logger), std::move(options), time_type);
     }
 
     json_logger(const json_logger &) = default;
@@ -706,10 +828,7 @@ public:
     // call, which is why exposing this separately from set_level() / flush()
     // is necessary. The common use case is right after adopt(), to restore
     // a UTC mode that the adopted logger originally had.
-    void set_pattern_time(spdlog::pattern_time_type time_type)
-    {
-        logger_->set_pattern(detail::make_json_pattern(logger_->name()), time_type);
-    }
+    void set_pattern_time(spdlog::pattern_time_type time_type) { apply_pattern_(time_type); }
 
     // Escape hatch for any spdlog::logger configuration we don't expose
     // directly (extra sinks, custom error handler, etc.). The "structurally
@@ -724,14 +843,17 @@ private:
     // mode, while `adopt()` can opt into UTC up front.
     explicit json_logger(
         std::shared_ptr<spdlog::logger> logger,
+        json_pattern_options options,
         spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local
     )
         : logger_(std::move(logger))
+        , pattern_options_(std::move(options))
     {
         apply_pattern_(time_type);
     }
 
-    // Installs the pinned JSON pattern on the underlying spdlog logger.
+    // Installs the pinned JSON pattern on the underlying spdlog logger and
+    // refreshes the cached "does the %v fragment need a leading comma?" flag.
     // Note: spdlog's `set_pattern()` implicitly resets the pattern-time mode
     // to whatever is passed (defaulting to local), which is why both
     // `adopt(logger, time_type)` and `set_pattern_time()` thread an explicit
@@ -739,7 +861,23 @@ private:
     // would silently revert on the next pattern reapplication.
     void apply_pattern_(spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local)
     {
-        logger_->set_pattern(detail::make_json_pattern(logger_->name()), time_type);
+        auto built = detail::make_json_pattern(logger_->name(), pattern_options_);
+        fragment_starts_with_comma_ = built.fragment_starts_with_comma;
+        logger_->set_pattern(std::move(built.pattern), time_type);
+    }
+
+    // Strip the leading comma from `fragment` when the pinned pattern emits
+    // no fixed fields (i.e. it is just `{%v}`). With at least one fixed
+    // field present, `%v` is preceded by the last field's value and the
+    // fragment must begin with `,` to separate them; with none present, an
+    // unstripped fragment would produce a line starting with `{,...`.
+    [[nodiscard]] std::string_view trim_leading_comma_(std::string_view fragment) const noexcept
+    {
+        if (!fragment_starts_with_comma_ && !fragment.empty() && fragment.front() == ',')
+        {
+            fragment.remove_prefix(1);
+        }
+        return fragment;
     }
 
     // Install a handler for spdlog runtime errors. Pass an empty
@@ -804,7 +942,7 @@ private:
             properties_.append_merged_to(fragment_storage, props);
             fragment = fragment_storage;
         }
-        logger_->log(lvl, fragment);
+        logger_->log(lvl, trim_leading_comma_(fragment));
     }
 
     template <typename... Args>
@@ -857,7 +995,7 @@ private:
         out += cached_properties_;
         out += message_sep;
         detail::append_json_quoted(out, msg);
-        logger_->log(lvl, out);
+        logger_->log(lvl, trim_leading_comma_(out));
     }
 
     void log_message_(spdlog::level lvl, const json_properties &props, std::string msg)
@@ -891,12 +1029,18 @@ private:
         out.append(fragment.data(), fragment.size());
         out += message_sep;
         detail::append_json_quoted(out, msg);
-        logger_->log(lvl, out);
+        logger_->log(lvl, trim_leading_comma_(out));
     }
 
     std::shared_ptr<spdlog::logger> logger_;
     json_properties properties_;
     std::string cached_properties_;
+    json_pattern_options pattern_options_;
+    // Cached from the last apply_pattern_(). True for the default options
+    // (and any subset that keeps at least one fixed field); false only when
+    // every fixed field is omitted, in which case log_*() must strip the
+    // leading comma from the fragment it would otherwise emit.
+    bool fragment_starts_with_comma_ = true;
 };
 
 // ============================================================================

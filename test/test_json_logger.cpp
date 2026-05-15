@@ -441,3 +441,218 @@ TEST_CASE(
     // assertion.
     REQUIRE_NOTHROW(source.info("trigger"));
 }
+
+// ============================================================================
+// json_pattern_options: customize/omit fixed header fields.
+// ============================================================================
+
+TEST_CASE("json_pattern_options: renaming fields keeps the JSON line valid", "[json_logger][pattern_options]")
+{
+    // Renaming individual fields must produce a structurally valid JSON line
+    // with the new keys in the same fixed order as before. Field values stay
+    // unchanged: timestamp is still ISO-8601, level is still the spdlog
+    // string, process/thread are still numeric.
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+    jspdlog::json_pattern_options opts;
+    opts.timestamp = "ts";
+    opts.logger = "svc";
+    opts.level = "lvl";
+    opts.process = "pid";
+    opts.thread = "tid";
+    jspdlog::json_logger logger("RenamedFields", std::move(sink), opts);
+    logger.set_level(spdlog::level::trace);
+
+    logger.info("hi");
+    REQUIRE(matches(
+        oss.str(),
+        add_endline(
+            std::string(R"(\{"ts":")") + TIMESTAMP_RE + R"(","svc":"RenamedFields","lvl":"info",)" +
+            R"("pid":[0-9]+,"tid":[0-9]+,"message":"hi"\})"
+        )
+    ));
+}
+
+TEST_CASE("json_pattern_options: omitting a single field drops it from the output", "[json_logger][pattern_options]")
+{
+    // Setting a field to std::nullopt must remove it entirely from the
+    // emitted line; the surrounding fields keep their key names and the
+    // ones still present remain comma-separated correctly (no stray
+    // double-commas or trailing commas).
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+    jspdlog::json_pattern_options opts;
+    opts.process = std::nullopt;
+    jspdlog::json_logger logger("NoProcess", std::move(sink), opts);
+    logger.set_level(spdlog::level::trace);
+
+    logger.info("hi");
+    const std::string out = oss.str();
+    REQUIRE(matches(
+        out,
+        add_endline(
+            std::string(R"(\{"timestamp":")") + TIMESTAMP_RE +
+            R"(","logger":"NoProcess","level":"info","thread":[0-9]+,"message":"hi"\})"
+        )
+    ));
+    REQUIRE(out.find("\"process\"") == std::string::npos);
+}
+
+TEST_CASE(
+    "json_pattern_options: omitting every fixed field still produces valid JSON",
+    "[json_logger][pattern_options]"
+)
+{
+    // The "remove everything" corner case: with no fixed fields the pinned
+    // pattern collapses to `{%v}`, and json_logger has to skip the leading
+    // comma on the %v fragment that would otherwise turn the line into
+    // `{,...}` (invalid JSON).
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+    jspdlog::json_pattern_options opts;
+    opts.timestamp = std::nullopt;
+    opts.logger = std::nullopt;
+    opts.level = std::nullopt;
+    opts.process = std::nullopt;
+    opts.thread = std::nullopt;
+    jspdlog::json_logger logger("Stripped", std::move(sink), opts);
+    logger.set_level(spdlog::level::trace);
+
+    SECTION("message only")
+    {
+        logger.info("hi");
+        REQUIRE(oss.str() == add_endline(R"({"message":"hi"})"));
+    }
+
+    SECTION("properties only")
+    {
+        logger.info(jspdlog::json_properties{"k", 1});
+        REQUIRE(oss.str() == add_endline(R"({"k":1})"));
+    }
+
+    SECTION("properties plus message")
+    {
+        logger.warn(jspdlog::json_properties{"k", 1}, "hi");
+        REQUIRE(oss.str() == add_endline(R"({"k":1,"message":"hi"})"));
+    }
+
+    SECTION("bound properties only, no message")
+    {
+        auto bound = logger.with_properties({"app", "x"});
+        bound.info(jspdlog::json_properties{});
+        REQUIRE(oss.str() == add_endline(R"({"app":"x"})"));
+    }
+
+    SECTION("empty properties-only call produces an empty object")
+    {
+        logger.info(jspdlog::json_properties{});
+        REQUIRE(oss.str() == add_endline(R"({})"));
+    }
+}
+
+TEST_CASE("json_pattern_options: keys with special characters are JSON-escaped", "[json_logger][pattern_options]")
+{
+    // User-supplied keys go through the same JSON-escape + spdlog-pattern
+    // hardening as the logger name: quotes, backslashes, control characters
+    // and percent signs must all be safe.
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+    jspdlog::json_pattern_options opts;
+    opts.timestamp = std::nullopt;
+    opts.logger = std::nullopt;
+    opts.level = std::nullopt;
+    opts.process = std::nullopt;
+    opts.thread = "weird\"key\\with\ttab%v";
+    jspdlog::json_logger logger("Esc", std::move(sink), opts);
+    logger.set_level(spdlog::level::trace);
+
+    logger.info("hi");
+
+    // Hoisted out of the REQUIRE because MSVC's stringifier mishandles raw
+    // string literals with backslashes inside Catch2's expression capture.
+    const std::string expected_key = R"("weird\"key\\with\ttab%v")";
+    const std::string out = oss.str();
+    REQUIRE(out.find(expected_key) != std::string::npos);
+    REQUIRE(out.find("\"message\":\"hi\"") != std::string::npos);
+    // The %v in the key must NOT have spliced the message into the key name.
+    REQUIRE(out.find("\"weird\\\"key\\\\with\\ttabhi") == std::string::npos);
+}
+
+TEST_CASE("json_pattern_options: properties combine correctly with omitted fields", "[json_logger][pattern_options]")
+{
+    // With only timestamp kept, the `%v` fragment still needs its leading
+    // comma. Bound + per-call properties exercise the merge path; the
+    // result must remain valid JSON with properties separated correctly.
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+    jspdlog::json_pattern_options opts;
+    opts.logger = std::nullopt;
+    opts.level = std::nullopt;
+    opts.process = std::nullopt;
+    opts.thread = std::nullopt;
+    jspdlog::json_logger root("Combo", std::move(sink), opts);
+    root.set_level(spdlog::level::trace);
+
+    auto child = root.with_properties({"app", "svc", "v", 2});
+    child.warn(jspdlog::json_properties{"v", 3, "extra", true}, "hi");
+
+    REQUIRE(matches(
+        oss.str(),
+        add_endline(
+            std::string(R"(\{"timestamp":")") + TIMESTAMP_RE +
+            R"(","app":"svc","extra":true,"v":3,"message":"hi"\})"
+        )
+    ));
+}
+
+TEST_CASE(
+    "json_pattern_options: set_pattern_time and adopt preserve customization", "[json_logger][pattern_options]"
+)
+{
+    // Pattern reapplication paths (set_pattern_time + the adopt() overload
+    // that takes options) must keep using the configured options rather
+    // than silently reverting to the defaults. We assert both the renamed
+    // key and the UTC offset are present after each mutation.
+    SECTION("set_pattern_time keeps custom keys")
+    {
+        std::ostringstream oss;
+        auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+        jspdlog::json_pattern_options opts;
+        opts.timestamp = "ts";
+        jspdlog::json_logger logger("KeepOpts", std::move(sink), opts);
+        logger.set_level(spdlog::level::trace);
+        logger.set_pattern_time(spdlog::pattern_time_type::utc);
+
+        logger.info("hi");
+        const std::string out = oss.str();
+        REQUIRE(out.find(R"("ts":")") != std::string::npos);
+        const bool has_utc_offset = out.find(R"(+00:00")") != std::string::npos ||
+                                    out.find(R"(+0000")") != std::string::npos;
+        REQUIRE(has_utc_offset);
+    }
+
+    SECTION("adopt(options) installs the customization on an adopted logger")
+    {
+        std::ostringstream oss;
+        auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+        auto inner = std::make_shared<spdlog::logger>("Adopted", sink);
+        inner->set_pattern("non-json: %v");
+        inner->set_level(spdlog::level::trace);
+
+        jspdlog::json_pattern_options opts;
+        opts.timestamp = "ts";
+        opts.process = std::nullopt;
+        auto logger = jspdlog::json_logger::adopt(std::move(inner), opts);
+
+        logger.info("hi");
+        const std::string out = oss.str();
+        REQUIRE(matches(
+            out,
+            add_endline(
+                std::string(R"(\{"ts":")") + TIMESTAMP_RE +
+                R"(","logger":"Adopted","level":"info","thread":[0-9]+,"message":"hi"\})"
+            )
+        ));
+        REQUIRE(out.find("\"process\"") == std::string::npos);
+    }
+}

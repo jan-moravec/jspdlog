@@ -41,6 +41,9 @@ machinery, and ecosystem.
 - **Typed structured properties.** Bind key/value pairs to a logger, or
   attach them per call; the wire format is built once at insert time, not
   reparsed on every log.
+- **Configurable header fields.** Rename `"timestamp"` → `"ts"`, drop
+  `"process"` entirely, etc., via `json_pattern_options`. The output
+  remains structurally valid JSON regardless of the subset.
 - **No JSON library dependency.** Bring your own (nlohmann/json, RapidJSON,
   glaze, ...) and pass a `jspdlog::raw_json{ your_lib.dump() }` if you need
   to embed arrays or objects.
@@ -128,21 +131,58 @@ Output:
 {"timestamp":"...","logger":"app","level":"info","process":...,"thread":...,"request_id":"abc-123","message":"request started"}
 ```
 
+## Customizing the header fields
+
+The five fixed header fields (`timestamp`, `logger`, `level`, `process`,
+`thread`) can be renamed or omitted via `jspdlog::json_pattern_options`.
+Each field is a `std::optional<std::string>`: a value renames the key,
+`std::nullopt` omits the field entirely. Defaults reproduce the
+pre-customization output exactly, so existing call sites are unaffected.
+
+```cpp
+jspdlog::json_pattern_options opts;
+opts.timestamp = "ts";          // rename
+opts.process   = std::nullopt;  // omit
+jspdlog::json_logger logger("app", sink, opts);
+
+logger.info("hello");
+// {"ts":"...","logger":"app","level":"info","thread":...,"message":"hello"}
+```
+
+Field *order* is fixed (`timestamp`, `logger`, `level`, `process`,
+`thread`) regardless of which subset is selected. Only the *keys* are
+configurable; values stay in their canonical formats — timestamps remain
+ISO-8601, levels remain spdlog's level strings, process/thread remain
+numeric. Keys go through the same JSON-escape + spdlog-pattern hardening
+as the logger name, so any byte (quotes, backslashes, control chars,
+`%` signs) is safe. Omitting *all* five fields is supported and produces
+`{"message":"..."}` (or `{}` for an empty properties-only call).
+
 ## API reference
 
 ### `jspdlog::json_logger`
 
 ```cpp
-// Construction. Any spdlog sink, or a list/range of them.
-json_logger(std::string name, spdlog::sink_ptr sink);
-json_logger(std::string name, spdlog::sinks_init_list sinks);
+// Construction. Any spdlog sink, or a list/range of them. The optional
+// json_pattern_options renames or omits the fixed header fields; defaults
+// reproduce the historical timestamp/logger/level/process/thread output.
+json_logger(std::string name, spdlog::sink_ptr sink,
+            json_pattern_options options = {});
+json_logger(std::string name, spdlog::sinks_init_list sinks,
+            json_pattern_options options = {});
 template <typename It>
-json_logger(std::string name, It sinks_begin, It sinks_end);
+json_logger(std::string name, It sinks_begin, It sinks_end,
+            json_pattern_options options = {});
 
 // Adopt an existing spdlog::logger (the JSON pattern is re-applied). The
 // optional time_type preserves a UTC-configured adopted logger through the
-// pattern reapplication; it defaults to local.
+// pattern reapplication; it defaults to local. The options-taking overload
+// installs custom header fields on the adopted logger.
 static json_logger adopt(std::shared_ptr<spdlog::logger> logger,
+                         spdlog::pattern_time_type time_type
+                             = spdlog::pattern_time_type::local);
+static json_logger adopt(std::shared_ptr<spdlog::logger> logger,
+                         json_pattern_options options,
                          spdlog::pattern_time_type time_type
                              = spdlog::pattern_time_type::local);
 
@@ -246,6 +286,22 @@ Note that plain `char` is serialized as a one-character JSON string (so
 `{"c", 'a'}` produces `"c":"a"`, not `"c":97`). `signed char` and
 `unsigned char` keep integer behavior because they're the canonical
 `int8_t` / `uint8_t` types.
+
+### `jspdlog::json_pattern_options`
+
+```cpp
+struct json_pattern_options {
+    std::optional<std::string> timestamp = "timestamp";
+    std::optional<std::string> logger    = "logger";
+    std::optional<std::string> level     = "level";
+    std::optional<std::string> process   = "process";
+    std::optional<std::string> thread    = "thread";
+};
+```
+
+Per-field knob: a string renames the key, `std::nullopt` omits the field.
+Field order is fixed; only keys are configurable. See [Customizing the
+header fields](#customizing-the-header-fields) above for details.
 
 ### `jspdlog::raw_json`
 
