@@ -1,0 +1,273 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 4
+
+jobs:
+  pre-commit:
+    # Fails fast on formatting / lint issues before any expensive build runs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        id: python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.x"
+
+      - name: Cache pre-commit environments
+        # Resolved Python version in the key so a runner-image 3.12 -> 3.13
+        # bump invalidates venvs with stale interpreter paths.
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            pre-commit-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-
+            pre-commit-${{ runner.os }}-
+
+      - name: Install pre-commit
+        run: pip install pre-commit==4.2.0
+
+      - name: Run pre-commit
+        run: pre-commit run --all-files --show-diff-on-failure --color=always
+
+  clang-ci:
+    # Clang 18 matrix:
+    #   asan-ubsan -> AddressSanitizer + UBSan
+    #   coverage   -> source-based coverage + Codecov upload; also runs
+    #                 cpp-linter-action against the build's compile_commands.json.
+    # Coverage uploads tokenlessly via OIDC; the Codecov GitHub App must be
+    # installed on the repo (fail_ci_if_error=true catches a misconfigured app).
+    needs: pre-commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      # pull-requests: write lets cpp-linter-action post inline tidy review
+      # comments on PRs; id-token: write enables tokenless Codecov OIDC upload;
+      # contents: read is inherited.
+      contents: read
+      pull-requests: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [asan-ubsan, coverage]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Clang 18 + LLVM tools
+        # Ubuntu 24.04 ships clang-18 / clang-tidy-18 / llvm-18 in its default
+        # apt repos, so no llvm.sh bootstrap is needed.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang-18 clang++-18 clang-tidy-18 \
+            llvm-18 llvm-18-tools
+          clang-18 --version
+          clang-tidy-18 --version
+          llvm-cov-18 --version
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@7bfc9baacbbdcb5e37957ad05c3546b3e222be3c # v4.3.2
+
+      - name: Configure
+        run: cmake --preset clang-${{ matrix.mode }}
+
+      - name: Build
+        run: cmake --build --preset clang-${{ matrix.mode }}
+
+      - name: Run clang-tidy on PR changes
+        # Coverage leg only, after the build so any generated headers exist.
+        # style/tidy-checks empty -> defer to pre-commit and .clang-tidy.
+        # SHA-pinned so a tag re-cut can't change what we run.
+        if: matrix.mode == 'coverage'
+        id: cpp-linter
+        uses: cpp-linter/cpp-linter-action@77c390c5ba9c947ebc185a3e49cc754f1558abb5 # v2.18.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          version: "18"
+          style: ""
+          tidy-checks: ""
+          database: build/clang-coverage
+          extensions: cpp,hpp,h,cc
+          files-changed-only: true
+          lines-changed-only: true
+          tidy-review: true
+          thread-comments: update
+          step-summary: true
+
+      - name: Run tests
+        # Sanitizer + LLVM_PROFILE_FILE env comes from the preset.
+        run: ctest --preset clang-${{ matrix.mode }}
+
+      - name: Merge coverage profiles + export lcov
+        # Drop _deps/ (FetchContent), build/ (generated), test/, example/
+        # so the report covers only the library header.
+        if: matrix.mode == 'coverage'
+        run: |
+          set -euo pipefail
+          llvm-profdata-18 merge -sparse \
+            build/clang-coverage/profiles/*.profraw \
+            -o build/clang-coverage/merged.profdata
+          OBJECTS=(
+            "build/clang-coverage/test/jspdlog_tests"
+            -object "build/clang-coverage/test/jspdlog_nlohmann_interop_test"
+          )
+          llvm-cov-18 export -format=lcov \
+            -instr-profile=build/clang-coverage/merged.profdata \
+            -ignore-filename-regex='(_deps|build|test|example)/' \
+            "${OBJECTS[@]}" \
+            > coverage.lcov
+          echo "::group::Coverage summary (library header only)"
+          llvm-cov-18 report \
+            -instr-profile=build/clang-coverage/merged.profdata \
+            -ignore-filename-regex='(_deps|build|test|example)/' \
+            "${OBJECTS[@]}"
+          echo "::endgroup::"
+
+      - name: Upload coverage to Codecov
+        # Tokenless OIDC upload via the Codecov GitHub App (installed on the repo).
+        # fail_ci_if_error: a broken upload (e.g. app uninstalled) fails the leg
+        # loudly instead of silently producing zero-coverage runs.
+        # SHA-pinned so a tag re-cut can't change what we run.
+        if: matrix.mode == 'coverage'
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        with:
+          files: ./coverage.lcov
+          fail_ci_if_error: true
+          verbose: true
+          use_oidc: true
+
+  build-and-test:
+    needs: pre-commit
+    name: ${{ matrix.os }} / ${{ matrix.cxx }} / C++${{ matrix.std }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 ships gcc-11 and clang-15 in its default apt repos;
+          # ubuntu-latest has moved to 24.04 which has neither.
+          - { os: ubuntu-22.04,   cc: gcc-11,   cxx: g++-11,     std: 17 }
+          - { os: ubuntu-22.04,   cc: clang-15, cxx: clang++-15, std: 17 }
+          # Ubuntu 24.04 (the current ubuntu-latest) ships gcc-13 and clang-18.
+          - { os: ubuntu-latest,  cc: gcc-13,   cxx: g++-13,     std: 20 }
+          - { os: ubuntu-latest,  cc: clang-18, cxx: clang++-18, std: 20 }
+          - { os: macos-latest,   cc: clang,    cxx: clang++,    std: 17 }
+          - { os: macos-latest,   cc: clang,    cxx: clang++,    std: 20 }
+          # On Windows we let CMake auto-select MSVC via the VS generator
+          # rather than passing -DCMAKE_CXX_COMPILER=cl, which would require
+          # a Developer-Command-Prompt environment that the default shell
+          # doesn't set up. The cc / cxx fields are labels used only for the
+          # job display name (and so for branch-protection matching); empty
+          # strings rendered as `windows-latest /  / C++17`, hence `msvc`.
+          - { os: windows-latest, cc: msvc,     cxx: msvc,       std: 17 }
+          - { os: windows-latest, cc: msvc,     cxx: msvc,       std: 20 }
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install toolchain (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.cc }} ${{ matrix.cxx }}
+        shell: bash
+
+      - name: Configure (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DCMAKE_CXX_STANDARD=${{ matrix.std }} \
+            -DCMAKE_BUILD_TYPE=Release
+        shell: bash
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake -S . -B build ^
+            -G "Visual Studio 17 2022" -A x64 ^
+            -DCMAKE_CXX_STANDARD=${{ matrix.std }} ^
+            -DCMAKE_BUILD_TYPE=Release
+        shell: cmd
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure -C Release
+
+      - name: Run examples (smoke)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd build/example
+          for exe in example_01_console example_02_rotating_file example_03_properties \
+                     example_04_custom_sink example_05_async example_06_nlohmann_raw_json; do
+            # The Windows MSBuild generator puts binaries in build/example/Release/.
+            found=
+            for candidate in "./$exe" "./Release/$exe" "./$exe.exe" "./Release/$exe.exe"; do
+              if [ -x "$candidate" ]; then
+                found=$candidate
+                break
+              fi
+            done
+            if [ -z "$found" ]; then
+              echo "::error::no executable found for $exe (looked in . and ./Release)"
+              exit 1
+            fi
+            echo "::group::$exe"
+            "$found"
+            echo "::endgroup::"
+          done
+
+  install-smoke:
+    needs: pre-commit
+    name: install + find_package consumer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Configure & build jspdlog
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DJSPDLOG_BUILD_TESTS=OFF \
+            -DJSPDLOG_BUILD_EXAMPLES=OFF
+          cmake --build build
+
+      - name: Install to a temp prefix
+        run: cmake --install build --prefix "$RUNNER_TEMP/jspdlog-prefix"
+
+      - name: Build the install_smoke consumer
+        run: |
+          cmake -S test/install_smoke -B build-smoke \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/jspdlog-prefix"
+          cmake --build build-smoke
+
+      - name: Run the install_smoke consumer
+        run: ./build-smoke/jspdlog_install_smoke

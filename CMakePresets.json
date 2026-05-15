@@ -1,0 +1,169 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": { "major": 3, "minor": 25 },
+
+    "configurePresets": [
+        {
+            "name": "_base",
+            "hidden": true,
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+        {
+            "name": "release",
+            "displayName": "Release (Ninja)",
+            "description": "Optimized build, no debug info, assertions stripped.",
+            "inherits": "_base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+        },
+        {
+            "name": "debug",
+            "displayName": "Debug (Ninja)",
+            "description": "Debug build with full symbols and assertions.",
+            "inherits": "_base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+        },
+        {
+            "name": "relwithdebinfo",
+            "displayName": "RelWithDebInfo (Ninja)",
+            "description": "Release optimizations + debug info, suitable for profiling.",
+            "inherits": "_base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+        },
+        {
+            "name": "_clang_ci_base",
+            "hidden": true,
+            "inherits": "_base",
+            "description": "Shared base for the Clang sanitizer / coverage CI presets. Pins clang-18, RelWithDebInfo, and disables IPO/LTO (LTO breaks sanitizer stack traces and skews coverage line mapping).",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "CMAKE_C_COMPILER": "clang-18",
+                "CMAKE_CXX_COMPILER": "clang++-18",
+                "CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO": "OFF"
+            }
+        },
+        {
+            "name": "clang-asan-ubsan",
+            "displayName": "Clang AddressSanitizer + UndefinedBehaviorSanitizer",
+            "description": "Clang 18 RelWithDebInfo + ASan + UBSan. -fno-sanitize-recover=all makes the first hit fail the test binary so CTest turns it into a job failure.",
+            "inherits": "_clang_ci_base",
+            "cacheVariables": {
+                "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all",
+                "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all",
+                "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
+                "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address,undefined",
+                "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=address,undefined"
+            }
+        },
+        {
+            "name": "clang-coverage",
+            "displayName": "Clang source-based coverage",
+            "description": "Clang 18 RelWithDebInfo + -fprofile-instr-generate -fcoverage-mapping. The CI coverage job also runs `cpp-linter-action` against this build's `compile_commands.json` (no separate tidy preset needed). Local repro: `cmake --workflow --preset clang-coverage` then `llvm-profdata-18 merge build/clang-coverage/profiles/*.profraw -o merged.profdata` + `llvm-cov-18 export -format=lcov ...`.",
+            "inherits": "_clang_ci_base",
+            "cacheVariables": {
+                "CMAKE_CXX_FLAGS": "-fprofile-instr-generate -fcoverage-mapping",
+                "CMAKE_C_FLAGS": "-fprofile-instr-generate -fcoverage-mapping",
+                "CMAKE_EXE_LINKER_FLAGS": "-fprofile-instr-generate -fcoverage-mapping",
+                "CMAKE_SHARED_LINKER_FLAGS": "-fprofile-instr-generate -fcoverage-mapping",
+                "CMAKE_MODULE_LINKER_FLAGS": "-fprofile-instr-generate -fcoverage-mapping"
+            }
+        }
+    ],
+
+    "buildPresets": [
+        { "name": "release",          "configurePreset": "release" },
+        { "name": "debug",            "configurePreset": "debug" },
+        { "name": "relwithdebinfo",   "configurePreset": "relwithdebinfo" },
+        { "name": "clang-asan-ubsan", "configurePreset": "clang-asan-ubsan" },
+        { "name": "clang-coverage",   "configurePreset": "clang-coverage" }
+    ],
+
+    "testPresets": [
+        {
+            "name": "_test_base",
+            "hidden": true,
+            "output":      { "outputOnFailure": true },
+            "execution":   { "noTestsAction": "error", "stopOnFailure": false }
+        },
+        {
+            "name": "release",
+            "displayName": "Release tests",
+            "description": "Default test run for the Catch2 unit suite.",
+            "configurePreset": "release",
+            "inherits": "_test_base"
+        },
+        {
+            "name": "debug",
+            "configurePreset": "debug",
+            "inherits": "release"
+        },
+        {
+            "name": "relwithdebinfo",
+            "configurePreset": "relwithdebinfo",
+            "inherits": "release"
+        },
+        {
+            "name": "clang-asan-ubsan",
+            "displayName": "ASan + UBSan tests",
+            "description": "Runs the unit suite under AddressSanitizer + UndefinedBehaviorSanitizer. ASAN_OPTIONS / UBSAN_OPTIONS halt on first hit so CTest reports the failure.",
+            "configurePreset": "clang-asan-ubsan",
+            "inherits": "_test_base",
+            "environment": {
+                "ASAN_OPTIONS": "detect_leaks=1:halt_on_error=1:abort_on_error=1:strict_string_checks=1:detect_stack_use_after_return=1",
+                "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1:abort_on_error=1"
+            }
+        },
+        {
+            "name": "clang-coverage",
+            "displayName": "Coverage tests",
+            "description": "Runs the unit suite under -fprofile-instr-generate. Each test binary writes its own .profraw under build/clang-coverage/profiles/; merge with `llvm-profdata-18 merge -sparse` and export with `llvm-cov-18 export -format=lcov` for upload.",
+            "configurePreset": "clang-coverage",
+            "inherits": "_test_base",
+            "environment": {
+                "LLVM_PROFILE_FILE": "${sourceDir}/build/clang-coverage/profiles/%p-%m.profraw"
+            }
+        }
+    ],
+
+    "workflowPresets": [
+        {
+            "name": "release",
+            "displayName": "Release: configure + build + test",
+            "steps": [
+                { "type": "configure", "name": "release" },
+                { "type": "build",     "name": "release" },
+                { "type": "test",      "name": "release" }
+            ]
+        },
+        {
+            "name": "debug",
+            "displayName": "Debug: configure + build + test",
+            "steps": [
+                { "type": "configure", "name": "debug" },
+                { "type": "build",     "name": "debug" },
+                { "type": "test",      "name": "debug" }
+            ]
+        },
+        {
+            "name": "clang-asan-ubsan",
+            "displayName": "Clang ASan+UBSan: configure + build + test",
+            "steps": [
+                { "type": "configure", "name": "clang-asan-ubsan" },
+                { "type": "build",     "name": "clang-asan-ubsan" },
+                { "type": "test",      "name": "clang-asan-ubsan" }
+            ]
+        },
+        {
+            "name": "clang-coverage",
+            "displayName": "Clang coverage: configure + build + test",
+            "steps": [
+                { "type": "configure", "name": "clang-coverage" },
+                { "type": "build",     "name": "clang-coverage" },
+                { "type": "test",      "name": "clang-coverage" }
+            ]
+        }
+    ]
+}
