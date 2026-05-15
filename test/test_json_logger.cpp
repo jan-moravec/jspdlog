@@ -705,3 +705,109 @@ TEST_CASE("json_logger: pattern_time() reflects the persisted mode", "[json_logg
         REQUIRE(adopted.pattern_time() == spdlog::pattern_time_type::local);
     }
 }
+
+// ============================================================================
+// Disambiguation tests: pin the two adopt() overloads against each other so
+// a future refactor doesn't silently collapse them or break overload
+// resolution at the explicitly-typed call sites that users actually write.
+// (The brace-init form `adopt(logger, {})` is intentionally NOT tested
+// because it's documented as ambiguous -- failing to compile there is the
+// contract.)
+// ============================================================================
+
+TEST_CASE("json_logger: adopt(logger, pattern_time_type) is unambiguous when the type is explicit", "[json_logger]")
+{
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+    auto inner = std::make_shared<spdlog::logger>("Explicit", sink);
+    auto adopted = jspdlog::json_logger::adopt(std::move(inner), spdlog::pattern_time_type::utc);
+    REQUIRE(adopted.pattern_time() == spdlog::pattern_time_type::utc);
+}
+
+TEST_CASE("json_logger: adopt(logger, json_pattern_options) is unambiguous when the type is explicit", "[json_logger]")
+{
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+    auto inner = std::make_shared<spdlog::logger>("Explicit", sink);
+    jspdlog::json_pattern_options opts;
+    opts.timestamp = "ts";
+    auto adopted = jspdlog::json_logger::adopt(std::move(inner), opts);
+    adopted.set_level(spdlog::level::trace);
+    adopted.info("hi");
+    REQUIRE(oss.str().find(R"("ts":")") != std::string::npos);
+}
+
+// ============================================================================
+// set_eol: cross-platform line terminator override.
+// ============================================================================
+
+TEST_CASE("json_logger: set_eol forces a custom line terminator across platforms", "[json_logger][eol]")
+{
+    // spdlog's default eol is platform-specific ("\r\n" on Windows, "\n"
+    // elsewhere). set_eol("\n") must produce LF-only on every host so a
+    // cross-platform JSON-lines consumer never sees stray carriage returns.
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+    jspdlog::json_logger logger("Eol", std::move(sink));
+    logger.set_level(spdlog::level::trace);
+    logger.set_eol("\n");
+
+    logger.info("hi");
+    const std::string out = oss.str();
+    REQUIRE_FALSE(out.empty());
+    REQUIRE(out.back() == '\n');
+    REQUIRE(out.find('\r') == std::string::npos);
+    REQUIRE(logger.eol().has_value());
+    REQUIRE(*logger.eol() == "\n");
+}
+
+TEST_CASE("json_logger: set_eol(\"\") suppresses the line terminator entirely", "[json_logger][eol]")
+{
+    // Edge case: the empty eol is occasionally useful for sinks that frame
+    // their own delimiters. The JSON line itself must still be intact -- no
+    // trailing characters at all, just the closing `}`.
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+    jspdlog::json_logger logger("Eol", std::move(sink));
+    logger.set_level(spdlog::level::trace);
+    logger.set_eol("");
+
+    logger.info("hi");
+    const std::string out = oss.str();
+    REQUIRE_FALSE(out.empty());
+    REQUIRE(out.back() == '}');
+}
+
+TEST_CASE("json_logger: set_eol survives set_pattern_time reapplication", "[json_logger][eol]")
+{
+    // set_pattern_time triggers an internal pattern reinstallation; the eol
+    // override is persisted on the json_logger and must survive that, just
+    // like the time mode survives.
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+    jspdlog::json_logger logger("EolKeep", std::move(sink));
+    logger.set_level(spdlog::level::trace);
+    logger.set_eol("\n");
+    logger.set_pattern_time(spdlog::pattern_time_type::utc);
+
+    logger.info("hi");
+    const std::string out = oss.str();
+    REQUIRE(out.back() == '\n');
+    REQUIRE(out.find('\r') == std::string::npos);
+}
+
+TEST_CASE("json_logger: set_eol(nullopt) returns to spdlog's platform default", "[json_logger][eol]")
+{
+    // After clearing the override, output must match the default add_endline
+    // string (which itself queries spdlog::details::os::default_eol).
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+    jspdlog::json_logger logger("EolReset", std::move(sink));
+    logger.set_level(spdlog::level::trace);
+    logger.set_eol("\n");
+    logger.set_eol(std::nullopt);
+
+    logger.info("hi");
+    REQUIRE(matches(oss.str(), expected_line("EolReset", "info", R"(,"message":"hi")")));
+    REQUIRE_FALSE(logger.eol().has_value());
+}

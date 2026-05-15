@@ -19,13 +19,25 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remember a separate `set_pattern_time(utc)` after `adopt()` to keep a
   UTC-configured logger UTC.
 - `json_logger::pattern_time()` getter for the persisted timestamp mode.
+- `json_logger::set_eol(...)` / `json_logger::eol()` override the line
+  terminator appended after each JSON line. Pass `"\n"` to force LF on
+  every platform (useful for cross-platform JSON-lines pipelines that
+  would otherwise see `\r\n` on Windows), pass `""` to suppress the
+  terminator entirely, or pass `std::nullopt` to fall back to spdlog's
+  platform default. The override is persisted on the json_logger and
+  survives subsequent `set_pattern_time(...)` reapplications.
 - Rvalue-qualified `json_logger::with_properties() &&` mutates `*this` in
   place and returns by move, so chained construction
   (`make_logger().with_properties(a).with_properties(b)`) avoids the
   lvalue overload's copy step.
+- `json_properties::size()` and `json_properties::clear()` for inspection
+  and recycling of a single `json_properties` across a hot loop.
 - `json_properties` keys now accept `std::string_view` (in addition to
   `std::string` and string literals), via an explicit `std::string{view}`
   step inside the variadic constructor.
+- `JSPDLOG_VERSION_MAJOR`, `JSPDLOG_VERSION_MINOR`, `JSPDLOG_VERSION_PATCH`,
+  `JSPDLOG_VERSION_CHECK(...)` and `JSPDLOG_VERSION` macros for consumer-
+  side feature detection.
 
 ### Changed
 
@@ -56,6 +68,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `spdlog::logger` be a different object from the source's; sharing only
   sinks is fine. Asserted in debug builds (the violation would otherwise
   deadlock on spdlog's non-recursive `err_helper` mutex).
+
+### Fixed
+
+- `json_logger::forward_errors_to(...)`: removed the dead `in_handler`
+  re-entrancy guard whose documentation claimed it protected cyclic
+  forwarder chains. Spdlog's `err_helper` acquires a non-recursive
+  `std::mutex` *before* invoking the handler, so any cyclic chain
+  deadlocks in `handle_ex` before the guard could fire. The doc comment
+  has been rewritten to call out the cyclic-chain deadlock as a known
+  limitation that jspdlog cannot intercept. Behavior of well-formed
+  forwarder trees is unchanged.
+- `json_logger` public constructors and `adopt()` now assert that the
+  supplied sink / iterator-range entry / spdlog::logger is non-null in
+  debug builds. The previous behavior crashed inside spdlog on the first
+  log call instead of pointing at the misuse site. The iterator-range
+  pre-walk only runs for forward+ iterators so input-iterator users are
+  unaffected.
+
+### Improved
+
+- `json_logger::set_level(...)`, `flush()`, and `flush_on(...)` are now
+  declared `noexcept` to match spdlog's own annotation.
+- `set_pattern_time(...)`, `adopt(...)`, `with_properties(...)`,
+  `forward_errors_to(...)` and the new `set_eol(...)` documentation has
+  been clarified -- thread-safety, side effects, lifetime, and rhs-wins
+  collision semantics are now spelled out at each call site.
+- `json_properties` variadic constructor's `static_assert` message now
+  describes the failure mode ("odd-numbered remainder") instead of
+  restating the contract.
+- `cached_properties_` is now maintained via a single
+  `rebuild_property_cache_()` helper rather than open-coded at each
+  mutation site, so the next mutator added to `json_logger` can't
+  desynchronize the cache by forgetting one line.
 
 ### Removed
 

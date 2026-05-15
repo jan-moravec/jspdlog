@@ -178,6 +178,14 @@ json_logger(std::string name, It sinks_begin, It sinks_end,
 // optional time_type preserves a UTC-configured adopted logger through the
 // pattern reapplication; it defaults to local. The options-taking overload
 // installs custom header fields on the adopted logger.
+//
+// `logger` must not be null (asserted in debug builds). The adopted
+// logger's pattern is replaced as a side effect of adopt() *before* the
+// returned json_logger is constructed, so the mutation persists even if
+// you drop the return value -- pass a fresh shared_ptr if you need the
+// original configuration left intact. Calling `adopt(logger, {})` is
+// ambiguous because `{}` can value-initialize either argument type; pass
+// the type explicitly to disambiguate.
 static json_logger adopt(std::shared_ptr<spdlog::logger> logger,
                          spdlog::pattern_time_type time_type
                              = spdlog::pattern_time_type::local);
@@ -194,7 +202,9 @@ void info(const json_properties& props,
 void info(const json_properties& props, const T& msg);            // props + value
 void info(const json_properties& props);                          // properties only, no message
 
-// Property binding. The rvalue overload mutates *this in place so chained
+// Property binding. New entries in `props` win over existing bound entries
+// on key collisions (same rhs-wins semantics as merge / operator+). The
+// rvalue overload mutates *this in place so chained
 // `make().with_properties(a).with_properties(b)` avoids a second copy.
 json_logger with_properties(json_properties props) const&;
 json_logger with_properties(json_properties props) &&;
@@ -210,27 +220,34 @@ void silence_errors();
 // Forward spdlog runtime errors emitted by *this to `destination` as
 // structured JSON warn lines tagged with this logger's name. The handler
 // captures `destination` by value, so subsequent with_properties() calls
-// on the original `destination` do not affect the forwarder. The handler
-// is guarded against re-entrancy, so cyclic forwarder chains terminate at
-// the second entry.
+// on the original `destination` do not affect the forwarder. The captured
+// copy also keeps `destination`'s underlying spdlog::logger alive until
+// *this is destroyed or `silence_errors()` is called.
 //
 // Precondition: `destination`'s underlying spdlog::logger must NOT be the
-// same object as this logger's (sharing only sinks is fine). asserted in
+// same object as this logger's (sharing only sinks is fine). Asserted in
 // debug builds; in release the violation would deadlock on spdlog's
-// non-recursive err_helper mutex.
+// non-recursive err_helper mutex. Cyclic forwarder chains (A forwards to
+// B, B forwards to A) are also a deadlock hazard and cannot be intercepted
+// by jspdlog -- don't build them.
 void forward_errors_to(json_logger destination);
 
-// spdlog passthroughs.
+// spdlog passthroughs (all noexcept; spdlog's underlying methods are).
 const std::string& name() const noexcept;
 spdlog::level log_level() const noexcept;
-void set_level(spdlog::level level);
-void flush();
-void flush_on(spdlog::level level);
+void set_level(spdlog::level level) noexcept;
+void flush() noexcept;
+void flush_on(spdlog::level level) noexcept;
+
+// Pattern reapplication helpers. NOT thread-safe (same caveat as spdlog's
+// set_pattern); configure once during initialization.
 void set_pattern_time(spdlog::pattern_time_type time_type);       // local <-> utc, persisted
 spdlog::pattern_time_type pattern_time() const noexcept;          // current mode
+void set_eol(std::optional<std::string> eol);                     // override line terminator
+const std::optional<std::string>& eol() const noexcept;           // null => spdlog platform default
 
-// Escape hatch. Do NOT call set_pattern() on this.
-const std::shared_ptr<spdlog::logger>& spdlog_logger() const;
+// Escape hatch. Do NOT call set_pattern() / set_formatter() on this.
+const std::shared_ptr<spdlog::logger>& spdlog_logger() const noexcept;
 ```
 
 ### `jspdlog::json_properties`
@@ -241,40 +258,44 @@ json_properties(key1, value1, key2, value2, ...);                 // variadic ke
 
 // Typed inserts. The set is exhaustive: every supported scalar gets a
 // dedicated overload so values are serialized once, at insert time, with
-// no surprise routing through fmt or to_string().
-void insert(const std::string& key, std::nullptr_t);              // -> null
-void insert(const std::string& key, std::string_view value);
-void insert(const std::string& key, const std::string& value);
-void insert(const std::string& key, const char* value);           // null -> null
-void insert(const std::string& key, bool value);
-void insert(const std::string& key, char value);                  // one-character JSON string
+// no surprise routing through fmt or to_string(). Keys are taken by value
+// so the caller's temporary `std::string` (typically built from a string
+// literal) moves straight into storage.
+void insert(std::string key, std::nullptr_t);                     // -> null
+void insert(std::string key, std::string_view value);
+void insert(std::string key, const std::string& value);
+void insert(std::string key, const char* value);                  // null -> null
+void insert(std::string key, bool value);
+void insert(std::string key, char value);                         // one-character JSON string
 template <typename T,
           std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>
                                                  && !std::is_same_v<T, char>, int> = 0>
-void insert(const std::string& key, T value);                     // every integral type except bool and char:
+void insert(std::string key, T value);                            // every integral type except bool and char:
                                                                   //   signed/unsigned char, short, int, long,
                                                                   //   long long, size_t, int8_t..int64_t, ...
-void insert(const std::string& key, float value);                 // NaN / Inf serialize as null,
-void insert(const std::string& key, double value);                // integer-valued floats keep a
+void insert(std::string key, float value);                        // NaN / Inf serialize as null,
+void insert(std::string key, double value);                       // integer-valued floats keep a
                                                                   // trailing `.0` so downstream
                                                                   // JSON parsers see a stable type
-void insert(const std::string& key, const raw_json& value);       // empty -> null
-void insert(const std::string& key, raw_json&& value);
+void insert(std::string key, const raw_json& value);              // empty -> null
+void insert(std::string key, raw_json&& value);
 template <typename T>
-void insert(const std::string& key, const T* value);              // null -> null, otherwise *value
+void insert(std::string key, const T* value);                     // null -> null, otherwise *value
                                                                   //                (recurses through pointer chains)
 
 // Wide-character types are deliberately deleted: encoding a single
 // wchar_t / char16_t / char32_t to UTF-8 needs a unicode encoder the
 // library doesn't bundle. Convert to a UTF-8 std::string first.
-void insert(const std::string&, wchar_t)  = delete;
-void insert(const std::string&, char16_t) = delete;
-void insert(const std::string&, char32_t) = delete;
+void insert(std::string, wchar_t)  = delete;
+void insert(std::string, char16_t) = delete;
+void insert(std::string, char32_t) = delete;
 
 void merge(const json_properties& other);                         // other overrides this
 void merge(json_properties&& other);
 
-bool empty() const;
+bool empty() const noexcept;
+std::size_t size() const noexcept;                                // distinct keys currently stored
+void clear() noexcept;                                            // drop every entry, recyclable
 std::string to_string() const;                                    // serialized fragment, leading ','
 void append_merged_to(std::string& out,                           // hot-path: walks two
                       const json_properties& rhs) const;          // sorted maps in lockstep,
@@ -361,6 +382,12 @@ child*, but configuration changes are not: calling `set_level()`,
 `silence_errors()`, `forward_errors_to()`, or `flush_on()` on the child
 reconfigures the underlying spdlog logger and so affects every json_logger
 derived from the same root.
+
+**Why are my Windows lines terminated with `\r\n`?**
+That's spdlog's platform-specific default. Call
+`logger.set_eol("\n")` to force LF on every host (useful when shipping
+logs into a Unix-side JSON-lines pipeline). Pass `std::nullopt` to fall
+back to spdlog's default, or `""` to suppress the line terminator entirely.
 
 **Is this header-only?**
 Yes. No `.cpp` files, no `JSPDLOG_COMPILED_LIB` mode, no link step beyond

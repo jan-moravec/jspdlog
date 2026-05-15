@@ -161,6 +161,46 @@ TEST_CASE("json_properties: empty has no entries", "[json_properties]")
     REQUIRE_FALSE(properties.empty());
 }
 
+TEST_CASE("json_properties: size reflects distinct keys (rhs-wins replacement)", "[json_properties]")
+{
+    // size() must match the de-duplicated key count: the variadic constructor
+    // takes pairs in order and rhs-wins on collision, so duplicate keys
+    // collapse to one stored entry. This matches the to_string() and merge
+    // behavior and saves callers from having to count manually.
+    jspdlog::json_properties properties;
+    REQUIRE(properties.size() == 0);
+
+    properties.insert("a", 1);
+    REQUIRE(properties.size() == 1);
+
+    properties.insert("b", 2);
+    REQUIRE(properties.size() == 2);
+
+    properties.insert("a", 99);
+    REQUIRE(properties.size() == 2);
+
+    const jspdlog::json_properties from_variadic{"x", 1, "y", 2, "x", 3};
+    REQUIRE(from_variadic.size() == 2);
+}
+
+TEST_CASE("json_properties: clear drops every entry", "[json_properties]")
+{
+    // After clear() the object must be indistinguishable from a freshly
+    // default-constructed one, so callers can recycle a single instance
+    // across a hot loop.
+    jspdlog::json_properties properties{"a", 1, "b", 2};
+    REQUIRE_FALSE(properties.empty());
+
+    properties.clear();
+    REQUIRE(properties.empty());
+    REQUIRE(properties.size() == 0);
+    REQUIRE(properties.to_string().empty());
+
+    properties.insert("c", 3);
+    REQUIRE(properties.size() == 1);
+    REQUIRE(properties.to_string() == R"(,"c":3)");
+}
+
 TEST_CASE("json_properties: non-finite floats serialize as null", "[json_properties]")
 {
     const double nan = std::numeric_limits<double>::quiet_NaN();

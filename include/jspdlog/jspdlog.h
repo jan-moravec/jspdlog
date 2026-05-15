@@ -27,8 +27,20 @@
 
 #pragma once
 
+// Version macros for consumers that need to feature-detect or pin a minimum
+// jspdlog version at compile time. Bump these alongside the project()
+// VERSION declaration in CMakeLists.txt and the CHANGELOG.
+#define JSPDLOG_VERSION_MAJOR 0
+#define JSPDLOG_VERSION_MINOR 1
+#define JSPDLOG_VERSION_PATCH 0
+// Numeric composite, suitable for `#if JSPDLOG_VERSION >= JSPDLOG_VERSION_CHECK(0, 1, 0)` checks.
+#define JSPDLOG_VERSION_CHECK(major, minor, patch) ((major) * 10000 + (minor) * 100 + (patch))
+#define JSPDLOG_VERSION                                                                                                \
+    JSPDLOG_VERSION_CHECK(JSPDLOG_VERSION_MAJOR, JSPDLOG_VERSION_MINOR, JSPDLOG_VERSION_PATCH)
+
 #include <spdlog/common.h>
 #include <spdlog/logger.h>
+#include <spdlog/pattern_formatter.h>
 #include <spdlog/sinks/sink.h>
 
 // fmt is required transitively by spdlog v2 (it always uses external fmt).
@@ -40,7 +52,6 @@
 // ever grows a std::format mode.
 #include <fmt/format.h>
 
-#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <functional>
@@ -313,7 +324,12 @@ public:
     template <typename K, typename V, typename... Rest>
     json_properties(K &&key, V &&value, Rest &&...rest)
     {
-        static_assert(sizeof...(rest) % 2 == 0, "json_properties requires key/value pairs");
+        static_assert(
+            sizeof...(rest) % 2 == 0,
+            "json_properties: expected an even number of arguments forming key/value pairs "
+            "(got the leading key/value plus an odd-numbered remainder -- one trailing key "
+            "with no value, or a value with no preceding key)"
+        );
         insert(make_key_(std::forward<K>(key)), std::forward<V>(value));
         if constexpr (sizeof...(rest) > 0)
         {
@@ -471,6 +487,18 @@ public:
     // --- Inspection -----------------------------------------------------------
 
     [[nodiscard]] bool empty() const noexcept { return members_.empty(); }
+
+    // Number of distinct keys currently stored. Note that the variadic
+    // constructor counts pairs after de-duplication, so
+    // `json_properties{"k", 1, "k", 2}.size() == 1` (rhs-wins replacement
+    // matches the merge / operator+ semantics).
+    [[nodiscard]] std::size_t size() const noexcept { return members_.size(); }
+
+    // Drop every stored entry, leaving the object in the same state as a
+    // default-constructed `json_properties`. Lets callers recycle a single
+    // instance across a hot loop without paying for a fresh allocation /
+    // deallocation cycle for the underlying map nodes.
+    void clear() noexcept { members_.clear(); }
 
     // Returns the serialized fragment ready to be appended after the spdlog
     // header. Always begins with a comma when non-empty, e.g.
@@ -656,14 +684,16 @@ public:
     // owns the spdlog::logger, applying the pinned JSON pattern.
 
     json_logger(std::string name, spdlog::sink_ptr sink, json_pattern_options options = {})
-        : logger_(std::make_shared<spdlog::logger>(std::move(name), std::move(sink)))
+        : logger_((assert(sink && "json_logger: sink must not be null"),
+                   std::make_shared<spdlog::logger>(std::move(name), std::move(sink))))
         , pattern_options_(std::move(options))
     {
         apply_pattern_();
     }
 
     json_logger(std::string name, spdlog::sinks_init_list sinks, json_pattern_options options = {})
-        : logger_(std::make_shared<spdlog::logger>(std::move(name), sinks))
+        : logger_((assert_no_null_sink_(sinks.begin(), sinks.end()),
+                   std::make_shared<spdlog::logger>(std::move(name), sinks)))
         , pattern_options_(std::move(options))
     {
         apply_pattern_();
@@ -673,13 +703,19 @@ public:
     // some unrelated type fails at the constructor signature with a clear
     // message, rather than producing a confusing instantiation error inside
     // spdlog's own constructor body.
+    //
+    // The range is walked twice in debug builds: once to assert no entry is
+    // null, once by spdlog's own constructor. We accept the second pass; the
+    // alternative (materialize into a vector and forward that) would change
+    // the iterator category requirement.
     template <
         typename It,
         std::enable_if_t<
             std::is_constructible_v<spdlog::sink_ptr, typename std::iterator_traits<It>::reference>,
             int> = 0>
     json_logger(std::string name, It sinks_begin, It sinks_end, json_pattern_options options = {})
-        : logger_(std::make_shared<spdlog::logger>(std::move(name), sinks_begin, sinks_end))
+        : logger_((assert_no_null_sink_(sinks_begin, sinks_end),
+                   std::make_shared<spdlog::logger>(std::move(name), sinks_begin, sinks_end)))
         , pattern_options_(std::move(options))
     {
         apply_pattern_();
@@ -700,11 +736,24 @@ public:
     // is equivalent to calling `set_pattern_time(utc)` on the returned logger
     // immediately, except that the value is also persisted on the json_logger
     // so any future internal pattern reapplication keeps it.
+    //
+    // Side effect: the underlying `spdlog::logger` has its pattern (and time
+    // mode) replaced as soon as adopt() returns -- even if the caller drops
+    // the returned `json_logger`. Pass a fresh `shared_ptr` if you want the
+    // original logger's configuration left intact.
+    //
+    // Precondition: `logger` must not be null. Asserted in debug builds.
+    //
+    // Brace-init footgun: `adopt(logger, {})` is ambiguous -- `{}` can value-
+    // initialize either `pattern_time_type` or `json_pattern_options`. Pass
+    // the type explicitly (`adopt(logger, spdlog::pattern_time_type::local)`
+    // or `adopt(logger, json_pattern_options{})`) to disambiguate.
     [[nodiscard]] static json_logger adopt(
         std::shared_ptr<spdlog::logger> logger,
         spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local
     )
     {
+        assert(logger && "json_logger::adopt: logger must not be null");
         return json_logger(std::move(logger), json_pattern_options{}, time_type);
     }
 
@@ -719,6 +768,7 @@ public:
         spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local
     )
     {
+        assert(logger && "json_logger::adopt: logger must not be null");
         return json_logger(std::move(logger), std::move(options), time_type);
     }
 
@@ -732,7 +782,9 @@ public:
 
     // Returns a child logger that shares the underlying spdlog::logger (and
     // therefore its sinks, level, error handler), but carries an additional
-    // set of bound properties. Existing keys are overridden by `props`.
+    // set of bound properties. On key collisions the new entries in `props`
+    // win over the parent's bound entries (rhs-wins, matching `json_properties::merge`
+    // and `json_properties::operator+`).
     //
     // Sharing the spdlog::logger means *bound properties are isolated per
     // child*, but configuration mutations are not: calling set_level(),
@@ -750,14 +802,14 @@ public:
     {
         json_logger copy = *this;
         copy.properties_.merge(std::move(props));
-        copy.cached_properties_ = copy.properties_.to_string();
+        copy.rebuild_property_cache_();
         return copy;
     }
 
     [[nodiscard]] json_logger with_properties(json_properties props) &&
     {
         properties_.merge(std::move(props));
-        cached_properties_ = properties_.to_string();
+        rebuild_property_cache_();
         return std::move(*this);
     }
 
@@ -785,23 +837,19 @@ public:
     // surface as
     //   destination.warn(json_properties{"source", this->name()}, "{}", msg)
     //
-    // `destination` is taken by value and captured into the handler, so
-    // subsequent `with_properties()` calls on the original `destination` do
-    // not affect the forwarder.
+    // `destination` is taken by value and captured into the handler. Two
+    // user-visible consequences:
+    //   * subsequent `with_properties()` calls on the original `destination`
+    //     do not affect the forwarder (the captured copy is independent);
+    //   * the forwarder keeps `destination`'s underlying `spdlog::logger`
+    //     alive (via the captured shared_ptr) until *this is destroyed or
+    //     `silence_errors()` is called. Drop your own handle and the lambda
+    //     is still the last owner.
     //
     // Exceptions thrown from `destination`'s own logging path are swallowed.
-    // An error handler that throws would re-enter spdlog's error machinery
-    // and risk infinite recursion (or, depending on the sink, deadlocking
-    // against a sink mutex). Silently dropping the secondary failure is the
-    // conservative choice when the user has already opted into "best-effort
-    // error reporting".
-    //
-    // A second protection covers cyclic forwarder chains: if writing the
-    // forwarded warn line itself triggers a sink failure on a logger that
-    // forwards back into *this, the per-handler `in_handler` flag breaks the
-    // recursion at the second entry without losing the first message. The
-    // flag is per-installation (not global), so independent forwarder chains
-    // don't interfere with each other.
+    // An error handler that throws would re-enter spdlog's error machinery,
+    // so silently dropping the secondary failure is the conservative choice
+    // when the user has already opted into "best-effort error reporting".
     //
     // Precondition: `destination`'s underlying `spdlog::logger` must NOT be
     // the same object as this logger's. If it is, the forwarder would call
@@ -810,6 +858,15 @@ public:
     // debug builds; in release builds the deadlock would manifest as a hang
     // on the first sink failure. Sharing only sinks (with distinct
     // spdlog::loggers) is fine.
+    //
+    // Known limitation -- cyclic forwarder chains: if `destination` (or any
+    // logger transitively reached from it) installs a forwarder that lands
+    // back on *this, the second sink failure on *this from inside the
+    // outer handler will block on this logger's own err_helper mutex (held
+    // by the outer handler invocation on the same thread). Spdlog's
+    // `err_helper` uses a non-recursive `std::mutex`, and the deadlock
+    // happens in `handle_ex` before the handler runs, so jspdlog cannot
+    // intercept it. Don't build cycles.
     void forward_errors_to(json_logger destination)
     {
         assert(
@@ -819,16 +876,9 @@ public:
         );
 
         auto name = this->name();
-        auto in_handler = std::make_shared<std::atomic<bool>>(false);
         set_error_handler_(
             [name = std::move(name),
-             dest = std::move(destination),
-             in_handler = std::move(in_handler)](std::string_view msg) mutable {
-                bool expected = false;
-                if (!in_handler->compare_exchange_strong(expected, true))
-                {
-                    return;
-                }
+             dest = std::move(destination)](std::string_view msg) mutable {
                 try
                 {
                     dest.warn(json_properties{"source", name}, "{}", msg);
@@ -837,7 +887,6 @@ public:
                 {
                     // Intentionally swallowed; see comment above.
                 }
-                in_handler->store(false);
             }
         );
     }
@@ -890,6 +939,10 @@ public:
 #undef JSPDLOG_DEFINE_LEVEL_API
 
     // --- spdlog passthroughs --------------------------------------------------
+    //
+    // All five passthroughs are noexcept because the underlying spdlog
+    // methods are noexcept. set_pattern_time() below is the exception: it
+    // installs a new spdlog formatter (which can throw on allocation).
 
     [[nodiscard]] const std::string &name() const noexcept { return logger_->name(); }
 
@@ -897,23 +950,27 @@ public:
     // unqualified `spdlog::level` type inside the class body).
     [[nodiscard]] spdlog::level log_level() const noexcept { return logger_->log_level(); }
 
-    void set_level(spdlog::level lvl) { logger_->set_level(lvl); }
+    void set_level(spdlog::level lvl) noexcept { logger_->set_level(lvl); }
 
-    void flush() { logger_->flush(); }
+    void flush() noexcept { logger_->flush(); }
 
-    void flush_on(spdlog::level lvl) { logger_->flush_on(lvl); }
+    void flush_on(spdlog::level lvl) noexcept { logger_->flush_on(lvl); }
 
     // Switch between local and UTC timestamps without losing the pinned
     // JSON pattern. The mode is persisted on this json_logger, so any
-    // subsequent internal pattern reapplication (today only `set_pattern_time`
-    // itself triggers one, but that may grow) keeps it. spdlog's
-    // `set_pattern()` otherwise resets the time mode to whatever you pass it
-    // (defaulting to local), which is why exposing this separately from
-    // set_level() / flush() is necessary.
+    // subsequent internal pattern reapplication (e.g. a future `set_eol`
+    // hook) keeps it. spdlog's `set_pattern()` otherwise resets the time
+    // mode to whatever you pass it (defaulting to local), which is why
+    // exposing this separately from set_level() / flush() is necessary.
     //
     // For loggers built via the public constructors the default is `local`
     // (matching spdlog's own default). `adopt(logger, time_type)` lets
     // callers override that up front for a foreign logger.
+    //
+    // Thread-safety: same caveat as spdlog::logger::set_pattern -- the call
+    // is NOT safe to invoke concurrently with logging on the same logger.
+    // Set the mode once during initialization, before handing the logger
+    // off to producer threads.
     void set_pattern_time(spdlog::pattern_time_type time_type)
     {
         pattern_time_ = time_type;
@@ -926,10 +983,36 @@ public:
     // having to track the value separately.
     [[nodiscard]] spdlog::pattern_time_type pattern_time() const noexcept { return pattern_time_; }
 
+    // Override the line terminator appended after each JSON line. spdlog's
+    // own default is platform-specific (`\r\n` on Windows, `\n` everywhere
+    // else), which is awkward for cross-platform JSON-lines pipelines that
+    // expect a bare LF on every host. Passing `"\n"` here forces LF on all
+    // platforms; pass `""` to suppress the line terminator entirely (e.g.
+    // for sinks that frame messages themselves), or `std::nullopt` to fall
+    // back to spdlog's platform default.
+    //
+    // The mode is persisted on the json_logger and re-applied on every
+    // internal pattern reapplication (so a subsequent set_pattern_time()
+    // keeps the custom eol).
+    //
+    // Thread-safety: same caveat as spdlog::logger::set_pattern -- not safe
+    // to call concurrently with logging on the same logger.
+    void set_eol(std::optional<std::string> eol)
+    {
+        eol_ = std::move(eol);
+        apply_pattern_();
+    }
+
+    // Current eol override, or `std::nullopt` if jspdlog is using spdlog's
+    // platform default. The returned string is *not* the actual terminator
+    // when nullopt is returned; ask spdlog if you need that exact value.
+    [[nodiscard]] const std::optional<std::string> &eol() const noexcept { return eol_; }
+
     // Escape hatch for any spdlog::logger configuration we don't expose
     // directly (extra sinks, custom error handler, etc.). The "structurally
     // impossible to emit invalid JSON" guarantee assumes nobody calls
-    // set_pattern() on the returned logger -- doing so will break it.
+    // set_pattern() or set_formatter() on the returned logger -- doing so
+    // will break it.
     [[nodiscard]] const std::shared_ptr<spdlog::logger> &spdlog_logger() const noexcept { return logger_; }
 
 private:
@@ -948,16 +1031,71 @@ private:
         apply_pattern_();
     }
 
+    // Debug-only walk to assert no sink in the supplied range is null. We
+    // bail at the first null with a self-describing assertion message
+    // rather than NDEBUG-folding the loop, so users see the failure up
+    // front instead of much later inside spdlog's sink_it_ dispatch.
+    //
+    // Only forward+ iterators (the multi-pass kind) are inspected -- walking
+    // a single-pass input iterator here would leave nothing for spdlog's
+    // own constructor to consume. Init lists and vector iterators both
+    // qualify, so the practical check coverage is unaffected.
+    template <typename It>
+    static void assert_no_null_sink_(It begin, It end)
+    {
+#ifndef NDEBUG
+        using category = typename std::iterator_traits<It>::iterator_category;
+        if constexpr (std::is_base_of_v<std::forward_iterator_tag, category>)
+        {
+            for (auto it = begin; it != end; ++it)
+            {
+                assert(*it && "json_logger: sink in range must not be null");
+            }
+        }
+        else
+        {
+            (void)begin;
+            (void)end;
+        }
+#else
+        (void)begin;
+        (void)end;
+#endif
+    }
+
     // Installs the pinned JSON pattern on the underlying spdlog logger and
     // refreshes the cached "does the %v fragment need a leading comma?" flag.
-    // Always uses the persisted `pattern_time_` so a previously-configured
-    // UTC mode survives any future pattern reapplication.
+    // Always uses the persisted `pattern_time_` (and persisted `eol_`) so
+    // previously-configured customizations survive any future pattern
+    // reapplication.
+    //
+    // The default-eol path uses `set_pattern()` (one heap allocation for the
+    // formatter, spdlog picks the platform default eol); the custom-eol
+    // path swaps in a manually-constructed `pattern_formatter`. The two
+    // paths share the same pattern string and `pattern_time_` argument so
+    // the user-visible JSON output is identical apart from the line ending.
     void apply_pattern_()
     {
         auto built = detail::make_json_pattern(logger_->name(), pattern_options_);
         fragment_needs_leading_comma_ = built.fragment_needs_leading_comma;
-        logger_->set_pattern(std::move(built.pattern), pattern_time_);
+        if (eol_.has_value())
+        {
+            logger_->set_formatter(
+                std::make_unique<spdlog::pattern_formatter>(std::move(built.pattern), pattern_time_, *eol_)
+            );
+        }
+        else
+        {
+            logger_->set_pattern(std::move(built.pattern), pattern_time_);
+        }
     }
+
+    // Single source of truth for keeping cached_properties_ in lockstep with
+    // properties_. Anywhere properties_ is mutated, call this immediately
+    // afterwards -- if you call to_string() inline at the mutation site
+    // instead, the next contributor adding a new mutation path is likely to
+    // miss the cache update and silently desynchronize the two.
+    void rebuild_property_cache_() { cached_properties_ = properties_.to_string(); }
 
     // Strip the leading comma from `fragment` when the pinned pattern emits
     // no fixed fields (i.e. it is just `{%v}`). With at least one fixed
@@ -1132,6 +1270,11 @@ private:
     // re-pass `pattern_time_` from `apply_pattern_()` to keep the chosen
     // mode through any future reapplication.
     spdlog::pattern_time_type pattern_time_ = spdlog::pattern_time_type::local;
+    // Persisted line-terminator override, or std::nullopt to use spdlog's
+    // platform default. When set, apply_pattern_() installs a manually-
+    // constructed pattern_formatter via set_formatter rather than going
+    // through set_pattern (which has no eol parameter).
+    std::optional<std::string> eol_;
     // Cached from the last apply_pattern_(). True for the default options
     // (and any subset that keeps at least one fixed field); false only when
     // every fixed field is omitted, in which case log_*() must strip the
