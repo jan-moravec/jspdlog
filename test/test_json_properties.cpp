@@ -196,6 +196,19 @@ TEST_CASE("json_properties: integer-valued floats keep a trailing decimal", "[js
     );
 }
 
+TEST_CASE("json_properties: negative zero serializes as -0.0", "[json_properties]")
+{
+    // Negative zero is finite but fmt emits it as "-0" (no decimal). The
+    // trailing-decimal step then turns it into "-0.0", preserving both the
+    // sign and the JSON-number type. Pinned because this corner falls
+    // between the "non-finite -> null" branch and the "integer-valued
+    // finite -> append .0" branch and we want a regression net under it.
+    const double neg_zero = -0.0;
+    const float neg_zero_f = -0.0f;
+    const jspdlog::json_properties properties{"d", neg_zero, "f", neg_zero_f};
+    REQUIRE(properties.to_string() == R"(,"d":-0.0,"f":-0.0)");
+}
+
 TEST_CASE("json_properties: keys accept std::string_view", "[json_properties]")
 {
     // std::string_view doesn't implicitly convert to std::string, but the

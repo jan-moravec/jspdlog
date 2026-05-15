@@ -359,7 +359,7 @@ TEST_CASE(
 
     std::ostringstream dest_oss;
     auto dest = make_stream_logger("Captor", dest_oss);
-    jspdlog::forward_errors_to(source, dest);
+    source.forward_errors_to(dest);
 
     source.info("first");
     const std::string after_first = dest_oss.str();
@@ -384,7 +384,7 @@ TEST_CASE(
     std::ostringstream dest_oss;
     auto dest = make_stream_logger("FailureLogger", dest_oss);
 
-    jspdlog::forward_errors_to(source, dest);
+    source.forward_errors_to(dest);
 
     source.info("original message");
 
@@ -405,7 +405,7 @@ TEST_CASE("json_logger: forward_errors_to snapshots the destination at call time
     std::ostringstream oss;
     auto dest = make_stream_logger("Sink", oss);
 
-    jspdlog::forward_errors_to(source, dest);
+    source.forward_errors_to(dest);
 
     // Mutating the original `dest` after wiring up forwarding must not affect
     // what the forwarder writes (the lambda holds its own copy).
@@ -420,25 +420,22 @@ TEST_CASE("json_logger: forward_errors_to snapshots the destination at call time
 }
 
 TEST_CASE(
-    "json_logger: forward_errors_to does not infinite-loop when source and destination share a sink",
+    "json_logger: forward_errors_to tolerates a destination that shares a sink with the source",
     "[json_logger][error_handler]"
 )
 {
-    // Reproduces the original footgun: if the destination uses the same
-    // always-throwing sink as the source, writing the forwarded warn line
-    // would trigger another sink exception, spdlog would catch it and
-    // re-enter the same error handler, and so on without bound. The
-    // re-entrancy guard in forward_errors_to bails out on the second entry,
-    // so this call must simply return.
+    // Sharing a sink is supported (only sharing the underlying spdlog::logger
+    // is forbidden -- see the next test case). Source's failing sink throws,
+    // its err_helper invokes the forwarder, the forwarder calls dest.warn,
+    // dest's spdlog::logger writes to the same throwing sink and calls *its
+    // own* err_helper (which has no custom handler installed). No recursion,
+    // no deadlock; the call simply returns.
     auto throwing = std::make_shared<throwing_sink>("recursive boom");
-    jspdlog::json_logger source("Self", throwing);
-    const jspdlog::json_logger destination("Self", throwing);
+    jspdlog::json_logger source("Source", throwing);
+    const jspdlog::json_logger destination("Dest", throwing);
 
-    jspdlog::forward_errors_to(source, destination);
+    source.forward_errors_to(destination);
 
-    // The bug we're guarding against is infinite recursion; reaching the
-    // line after source.info() (under a default test timeout) is the
-    // assertion.
     REQUIRE_NOTHROW(source.info("trigger"));
 }
 
@@ -541,6 +538,18 @@ TEST_CASE(
         auto bound = logger.with_properties({"app", "x"});
         bound.info(jspdlog::json_properties{});
         REQUIRE(oss.str() == add_endline(R"({"app":"x"})"));
+    }
+
+    SECTION("bound properties + message routed through log_message_(level, msg)")
+    {
+        // Hits the third leading-comma branch: `cached_properties_` is non-
+        // empty AND we go through the props-less log_message_ overload, so
+        // the assembled fragment is `,"app":"x","message":"hi"` and
+        // trim_leading_comma_ has to strip the first byte to keep the line
+        // structurally valid.
+        auto bound = logger.with_properties({"app", "x"});
+        bound.info("hi");
+        REQUIRE(oss.str() == add_endline(R"({"app":"x","message":"hi"})"));
     }
 
     SECTION("empty properties-only call produces an empty object")
@@ -654,5 +663,45 @@ TEST_CASE(
             )
         ));
         REQUIRE(out.find("\"process\"") == std::string::npos);
+    }
+}
+
+TEST_CASE("json_logger: pattern_time() reflects the persisted mode", "[json_logger]")
+{
+    // The new accessor lets callers (and tests) round-trip the time mode
+    // without having to inspect spdlog directly. Defaults to local for
+    // public constructors and adopt(); set_pattern_time and adopt(time_type)
+    // both update the persisted value.
+    std::ostringstream oss;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+
+    SECTION("constructor defaults to local")
+    {
+        const jspdlog::json_logger logger("LocalDefault", sink);
+        REQUIRE(logger.pattern_time() == spdlog::pattern_time_type::local);
+    }
+
+    SECTION("set_pattern_time persists the new value")
+    {
+        jspdlog::json_logger logger("Switcher", sink);
+        logger.set_pattern_time(spdlog::pattern_time_type::utc);
+        REQUIRE(logger.pattern_time() == spdlog::pattern_time_type::utc);
+
+        logger.set_pattern_time(spdlog::pattern_time_type::local);
+        REQUIRE(logger.pattern_time() == spdlog::pattern_time_type::local);
+    }
+
+    SECTION("adopt(logger, utc) persists utc")
+    {
+        auto inner = std::make_shared<spdlog::logger>("AdoptedUtc", sink);
+        const auto adopted = jspdlog::json_logger::adopt(std::move(inner), spdlog::pattern_time_type::utc);
+        REQUIRE(adopted.pattern_time() == spdlog::pattern_time_type::utc);
+    }
+
+    SECTION("adopt(logger, options) defaults to local")
+    {
+        auto inner = std::make_shared<spdlog::logger>("AdoptedOpts", sink);
+        const auto adopted = jspdlog::json_logger::adopt(std::move(inner), jspdlog::json_pattern_options{});
+        REQUIRE(adopted.pattern_time() == spdlog::pattern_time_type::local);
     }
 }

@@ -199,19 +199,26 @@ void info(const json_properties& props);                          // properties 
 json_logger with_properties(json_properties props) const&;
 json_logger with_properties(json_properties props) &&;
 
-// Error handling. Two helpers cover the supported use cases:
+// Error handling. Two member helpers cover the supported use cases:
 //   * silence_errors()           - drop spdlog runtime errors entirely.
-//   * forward_errors_to(...)     - surface them as JSON warn lines on
-//                                  another logger (free function below).
+//   * forward_errors_to(dest)    - surface them as JSON warn lines on
+//                                  another logger.
 // Lower-level callbacks are not part of the public API; reach through
 // spdlog_logger()->set_error_handler(...) if you really need one.
 void silence_errors();
 
-// Forward spdlog runtime errors from `source` to `destination` as structured
-// JSON warn lines tagged with the source logger's name. The handler is
-// guarded against re-entrancy, so it's safe to call even when `destination`
-// shares a (failing) sink with `source`.
-void jspdlog::forward_errors_to(json_logger& source, json_logger destination);
+// Forward spdlog runtime errors emitted by *this to `destination` as
+// structured JSON warn lines tagged with this logger's name. The handler
+// captures `destination` by value, so subsequent with_properties() calls
+// on the original `destination` do not affect the forwarder. The handler
+// is guarded against re-entrancy, so cyclic forwarder chains terminate at
+// the second entry.
+//
+// Precondition: `destination`'s underlying spdlog::logger must NOT be the
+// same object as this logger's (sharing only sinks is fine). asserted in
+// debug builds; in release the violation would deadlock on spdlog's
+// non-recursive err_helper mutex.
+void forward_errors_to(json_logger destination);
 
 // spdlog passthroughs.
 const std::string& name() const noexcept;
@@ -219,7 +226,8 @@ spdlog::level log_level() const noexcept;
 void set_level(spdlog::level level);
 void flush();
 void flush_on(spdlog::level level);
-void set_pattern_time(spdlog::pattern_time_type time_type);       // local <-> utc
+void set_pattern_time(spdlog::pattern_time_type time_type);       // local <-> utc, persisted
+spdlog::pattern_time_type pattern_time() const noexcept;          // current mode
 
 // Escape hatch. Do NOT call set_pattern() on this.
 const std::shared_ptr<spdlog::logger>& spdlog_logger() const;
@@ -350,9 +358,9 @@ No. The returned child shares the parent's `std::shared_ptr<spdlog::logger>`
 (and therefore its sinks, level, error handler). Only the bound property
 strings are copied. As a consequence, *bound properties are isolated per
 child*, but configuration changes are not: calling `set_level()`,
-`silence_errors()`, or `flush_on()` on the child reconfigures the
-underlying spdlog logger and so affects every json_logger derived from the
-same root.
+`silence_errors()`, `forward_errors_to()`, or `flush_on()` on the child
+reconfigures the underlying spdlog logger and so affects every json_logger
+derived from the same root.
 
 **Is this header-only?**
 Yes. No `.cpp` files, no `JSPDLOG_COMPILED_LIB` mode, no link step beyond
