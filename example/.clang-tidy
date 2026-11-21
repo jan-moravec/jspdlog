@@ -1,0 +1,26 @@
+# Example-level overrides.
+#
+# The standalone example programs intentionally use literal sizes and
+# counts (e.g. `10 * 1024 * 1024`, `for (int i = 0; i < 100; ++i)`) for
+# readability -- replacing them with named constants would obscure rather
+# than clarify what the snippets demonstrate. `bugprone-exception-escape`
+# fires on every `int main()` because MSVC's STL paths (e.g.
+# `_Throw_bad_array_new_length` inside `std::make_shared` and
+# `std::basic_string`) are formally throwing, even though the inputs in
+# the examples never come close to overflowing. Wrapping every example
+# `main` in `try { ... } catch(...)` would dilute the point of the
+# example without adding meaningful safety. `memory_sink` in
+# `04_custom_sink.cpp` deliberately exposes a public `lines` field for
+# illustration of an in-memory inspection pattern.
+#
+# Examples are demonstrations rather than production code; we accept
+# slightly looser checks here to keep them legible.
+
+InheritParentConfig: true
+
+Checks: >
+  -cppcoreguidelines-avoid-magic-numbers,
+  -readability-magic-numbers,
+  -bugprone-exception-escape,
+  -misc-non-private-member-variables-in-classes,
+  -cppcoreguidelines-non-private-member-variables-in-classes

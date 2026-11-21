@@ -1,0 +1,130 @@
+# Configure clang-tidy checks
+#
+# Each check has a name and the checks to run can be chosen with the Checks list,
+# which specifies a comma-separated list of positive and negative (prefixed with -) globs.
+# Positive globs add subsets of checks, and negative globs remove them.
+
+# First disable all checks, then enable the groups we like,
+# finally disable again specific checks.
+#
+# Disabled checks:
+#   -modernize-use-trailing-return-type: Stylistic preference only.
+#   -modernize-use-nodiscard: Too noisy; flags every function with a return value.
+#   -readability-function-cognitive-complexity: Noisy for complex functions.
+#   -cppcoreguidelines-pro-type-reinterpret-cast: Necessary for low-level buffer code.
+#   -cppcoreguidelines-pro-bounds-*: Too strict for pointer/array operations.
+#   -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access: Same family;
+#        flags every `vec[i]` in tests/macros and nlohmann/json `operator[]`.
+#   -cppcoreguidelines-avoid-c-arrays: C arrays sometimes needed for constexpr.
+#   -modernize-avoid-c-arrays: Alias for the above.
+#   -cppcoreguidelines-macro-usage: Some macros are necessary.
+#   -readability-identifier-length: Short names often appropriate (i, rd).
+#   -bugprone-easily-swappable-parameters: Too noisy.
+#   -performance-enum-size: Micro-optimization, not worth the noise.
+#   -portability-avoid-pragma-once: pragma once is supported by all modern compilers.
+#   -bugprone-implicit-widening-of-multiplication-result: Fires on size_t = int*int
+#        idioms; suppressing avoids sprinkling static_cast<size_t> everywhere.
+#   -cppcoreguidelines-narrowing-conversions: Dozens of false positives on
+#        size_t -> difference_type iterator arithmetic.
+#   -readability-uppercase-literal-suffix: Cosmetic (1u vs 1U).
+#   -readability-implicit-bool-conversion: Noisy on pointer `if (mPtr)` idioms.
+#   -misc-include-cleaner: With MissingIncludes/UnusedIncludes off it only prints
+#        a no-op banner per TU; disabling avoids noise until include-cleaner is adopted.
+#   -modernize-use-ranges: Most usable suggestions are `std::ranges::iota`, which is
+#        C++23 and unavailable on AppleClang 17 libc++ (macOS CI build). Other
+#        sites flagged are intentionally non-rangified (e.g. `std::lower_bound`
+#        with an asymmetric comparator that `std::ranges::lower_bound` rejects).
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
+  -readability-function-cognitive-complexity,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
+  -cppcoreguidelines-avoid-c-arrays,
+  -modernize-avoid-c-arrays,
+  -cppcoreguidelines-macro-usage,
+  -readability-identifier-length,
+  -bugprone-easily-swappable-parameters,
+  -performance-enum-size,
+  -portability-avoid-pragma-once,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -cppcoreguidelines-narrowing-conversions,
+  -readability-uppercase-literal-suffix,
+  -readability-implicit-bool-conversion,
+  -misc-include-cleaner,
+  -modernize-use-ranges
+
+WarningsAsErrors: ""
+FormatStyle: "file"
+
+# Additional options for checks.
+# Includes the style naming conventions.
+CheckOptions:
+  - { key: cppcoreguidelines-special-member-functions.AllowSoleDefaultDtor, value: true }
+  - { key: cppcoreguidelines-special-member-functions.AllowMissingMoveFunctionsWhenCopyIsDeleted, value: true }
+  - { key: modernize-avoid-c-arrays.AllowStringArrays, value: false }
+
+  # ------- Identifier naming -------
+  # jspdlog mirrors spdlog's snake_case API throughout. Every user-facing
+  # identifier is `lower_case`; template parameters keep CamelCase so they
+  # stand out from concrete types. Private members use a trailing underscore
+  # (Google style) to avoid collisions with same-named getters/parameters.
+  - { key: readability-identifier-naming.NamespaceCase,          value: lower_case }
+  - { key: readability-identifier-naming.ClassCase,              value: lower_case }
+  - { key: readability-identifier-naming.StructCase,             value: lower_case }
+  - { key: readability-identifier-naming.UnionCase,              value: lower_case }
+  - { key: readability-identifier-naming.EnumCase,               value: lower_case }
+  - { key: readability-identifier-naming.TypeAliasCase,          value: lower_case }
+  - { key: readability-identifier-naming.TypedefCase,            value: lower_case }
+  - { key: readability-identifier-naming.ConceptCase,            value: lower_case }
+  - { key: readability-identifier-naming.TemplateParameterCase,  value: CamelCase }
+
+  # Functions / methods: snake_case to match spdlog's logger API and the
+  # standard library's free-function naming.
+  - { key: readability-identifier-naming.FunctionCase,           value: lower_case }
+  - { key: readability-identifier-naming.MethodCase,             value: lower_case }
+  - { key: readability-identifier-naming.ClassMethodCase,        value: lower_case }
+
+  # Enum constants: snake_case, matching spdlog::level::trace etc.
+  - { key: readability-identifier-naming.EnumConstantCase,       value: lower_case }
+  - { key: readability-identifier-naming.ScopedEnumConstantCase, value: lower_case }
+
+  # Data members. Struct fields are bare snake_case (value-type aggregates);
+  # class fields use a trailing underscore so getters with the same logical
+  # name don't shadow them.
+  - { key: readability-identifier-naming.StructMemberCase,       value: lower_case }
+  - { key: readability-identifier-naming.ClassMemberCase,        value: lower_case }
+  - { key: readability-identifier-naming.PrivateMemberCase,      value: lower_case }
+  - { key: readability-identifier-naming.PrivateMemberSuffix,    value: _ }
+  - { key: readability-identifier-naming.ProtectedMemberCase,    value: lower_case }
+  - { key: readability-identifier-naming.ProtectedMemberSuffix,  value: _ }
+
+  # Local variables, parameters: snake_case. Local const (non-constexpr) is
+  # just a local variable in the clang-tidy sense, not a "constant".
+  - { key: readability-identifier-naming.ParameterCase,          value: lower_case }
+  - { key: readability-identifier-naming.LocalVariableCase,      value: lower_case }
+  - { key: readability-identifier-naming.LocalConstantCase,      value: lower_case }
+  - { key: readability-identifier-naming.VariableCase,           value: lower_case }
+
+  # True compile-time constants: UPPER_CASE. Covers constexpr (local and
+  # namespace), global const, static const at namespace or class scope,
+  # and macros.
+  - { key: readability-identifier-naming.MacroDefinitionCase,    value: UPPER_CASE }
+  - { key: readability-identifier-naming.ConstexprVariableCase,  value: UPPER_CASE }
+  - { key: readability-identifier-naming.GlobalConstantCase,     value: UPPER_CASE }
+  - { key: readability-identifier-naming.StaticConstantCase,     value: UPPER_CASE }
+  - { key: readability-identifier-naming.ClassConstantCase,      value: UPPER_CASE }

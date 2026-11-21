@@ -1,0 +1,21 @@
+# Settings for the Python helper scripts under scripts/ (checked by ruff in pre-commit).
+[tool.ruff]
+line-length = 120
+indent-width = 4
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle (errors)
+  "F",   # pyflakes
+  "W",   # pycodestyle (warnings)
+  "I",   # isort (import sorting)
+  "B",   # flake8-bugbear
+  "UP",  # pyupgrade
+  "C4",  # flake8-comprehensions
+  "RUF", # Ruff-specific rules
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

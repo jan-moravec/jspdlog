@@ -1,0 +1,157 @@
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++17
+ColumnLimit: 120
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+NamespaceIndentation: None
+FixNamespaceComments: true
+ShortNamespaceLines: 1
+CompactNamespaces: false
+
+# Bracket / argument layout.
+AlignAfterOpenBracket: BlockIndent
+AlignEscapedNewlines: Right
+AlignOperands: Align
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
+BinPackArguments: false
+BinPackParameters: false
+
+# Short-form clamps: no one-liners other than lambdas.
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLambdasOnASingleLine: All
+AllowShortLoopsOnASingleLine: false
+
+# Break rules.
+AlwaysBreakTemplateDeclarations: Yes
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+BreakConstructorInitializers: BeforeColon
+BreakInheritanceList: BeforeColon
+PackConstructorInitializers: NextLineOnly
+
+# Explicit brace wrapping (Allman, with all sub-options pinned).
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: true
+  AfterClass: true
+  AfterControlStatement: Always
+  AfterEnum: true
+  AfterExternBlock: true
+  AfterFunction: true
+  AfterNamespace: true
+  AfterObjCDeclaration: true
+  AfterStruct: true
+  AfterUnion: false
+  BeforeCatch: true
+  BeforeElse: true
+  BeforeLambdaBody: false
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: true
+  SplitEmptyRecord: true
+  SplitEmptyNamespace: true
+
+# Pointer / reference / qualifier alignment.
+PointerAlignment: Right
+ReferenceAlignment: Pointer
+DerivePointerAlignment: false
+QualifierAlignment: Left
+
+# Misc behavioural improvements.
+Cpp11BracedListStyle: true
+EmptyLineAfterAccessModifier: Never
+EmptyLineBeforeAccessModifier: LogicalBlock
+IndentCaseBlocks: false
+IndentCaseLabels: false
+InsertBraces: true
+InsertNewlineAtEOF: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+KeepEmptyLinesAtEOF: false
+LambdaBodyIndentation: Signature
+MaxEmptyLinesToKeep: 1
+ReflowComments: true
+RemoveBracesLLVM: false
+RemoveSemicolon: false
+SeparateDefinitionBlocks: Leave
+SortUsingDeclarations: LexicographicNumeric
+
+# Include handling.
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+# Project layout: quoted local headers -> <jspdlog/...> own headers ->
+# <spdlog/...> primary dependency -> <fmt/...> transitive dependency ->
+# test/example third-party (<catch2/...>, <nlohmann/...>) -> other
+# path-bearing third-party -> stdlib (single-token angle includes).
+# Authors group via blank lines; `IncludeBlocks: Regroup` keeps those
+# groups, these categories sort alphabetically within each group.
+IncludeCategories:
+  - Regex:           '^"jspdlog/'
+    Priority:        1
+    SortPriority:    0
+    CaseSensitive:   true
+  - Regex:           '^<jspdlog/'
+    Priority:        1
+    SortPriority:    0
+    CaseSensitive:   true
+  - Regex:           '^".*"'
+    Priority:        2
+    SortPriority:    0
+    CaseSensitive:   false
+  - Regex:           '^<spdlog/'
+    Priority:        3
+    SortPriority:    0
+    CaseSensitive:   true
+  - Regex:           '^<fmt/'
+    Priority:        4
+    SortPriority:    0
+    CaseSensitive:   true
+  - Regex:           '^<catch2/'
+    Priority:        5
+    SortPriority:    0
+    CaseSensitive:   true
+  - Regex:           '^<nlohmann/'
+    Priority:        5
+    SortPriority:    0
+    CaseSensitive:   true
+  - Regex:           '^<[^>]+/'
+    Priority:        6
+    SortPriority:    0
+    CaseSensitive:   false
+  - Regex:           '^<[^>]+>$'
+    Priority:        7
+    SortPriority:    0
+    CaseSensitive:   false
+  - Regex:           '.*'
+    Priority:        10
+    SortPriority:    0
+    CaseSensitive:   false
+
+# Spacing.
+BitFieldColonSpacing: Both
+SpaceAfterCStyleCast: false
+SpaceAfterLogicalNot: false
+SpaceAfterTemplateKeyword: true
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeCaseColon: false
+SpaceBeforeCpp11BracedList: false
+SpaceBeforeCtorInitializerColon: true
+SpaceBeforeInheritanceColon: true
+SpaceBeforeParens: ControlStatements
+SpaceBeforeRangeBasedForLoopColon: true
+SpaceBeforeSquareBrackets: false
+SpaceInEmptyBlock: false
+SpacesBeforeTrailingComments: 1
+SpacesInAngles: Never
+SpacesInContainerLiterals: true
+SpacesInParens: Never
+SpacesInSquareBrackets: false
+...

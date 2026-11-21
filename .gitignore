@@ -1,0 +1,41 @@
+build/
+build-*/
+out/
+cmake-build-*/
+
+# IDE/editor
+.vs/
+.vscode/
+.idea/
+.cache/
+*.user
+*.swp
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+Makefile
+_deps/
+
+# Compiled / linker
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.exp
+*.pdb
+*.ilk
+
+# Test artifacts
+Testing/
+*.log
+
+# Editor temp files
+*~
