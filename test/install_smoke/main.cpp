@@ -19,7 +19,7 @@ int main()
     }
     catch (const std::exception &e)
     {
-        std::fputs(e.what(), stderr);
+        (void)std::fputs(e.what(), stderr);
         return 1;
     }
     catch (...)

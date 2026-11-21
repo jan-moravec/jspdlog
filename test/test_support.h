@@ -54,8 +54,8 @@ struct fixture
     std::shared_ptr<capture_sink> sink = std::make_shared<capture_sink>();
     jspdlog::json_logger logger;
 
-    explicit fixture(std::string name = "t", jspdlog::json_options opts = deterministic_options())
-        : logger(std::move(name), sink, std::move(opts))
+    explicit fixture(std::string name = "t", const jspdlog::json_options &opts = deterministic_options())
+        : logger(std::move(name), sink, opts)
     {
         logger.set_level(jspdlog::level::trace);
     }
