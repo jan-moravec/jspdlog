@@ -19,6 +19,7 @@ endif()
 option(JSPDLOG_BUILD_TESTS "Build jspdlog unit tests" ${JSPDLOG_IS_TOP_LEVEL})
 option(JSPDLOG_BUILD_EXAMPLES "Build jspdlog examples" ${JSPDLOG_IS_TOP_LEVEL})
 option(JSPDLOG_INSTALL "Generate install rules for jspdlog" ${JSPDLOG_IS_TOP_LEVEL})
+option(JSPDLOG_BUILD_POC "Build the proof-of-concept programs under poc/" ${JSPDLOG_IS_TOP_LEVEL})
 option(JSPDLOG_WARNINGS_AS_ERRORS "Treat warnings in jspdlog's tests and examples as errors" OFF)
 # JSPDLOG_TEST_NLOHMANN_INTEROP is declared inside test/CMakeLists.txt so its
 # default tracks the live value of JSPDLOG_BUILD_TESTS across reconfigures
@@ -119,4 +120,8 @@ endif()
 
 if(JSPDLOG_BUILD_EXAMPLES)
     add_subdirectory(example)
+endif()
+
+if(JSPDLOG_BUILD_POC)
+    add_subdirectory(poc/formatter)
 endif()
