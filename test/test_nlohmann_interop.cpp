@@ -37,7 +37,7 @@ TEST_CASE("raw_json: nlohmann arrays and objects round-trip into the log line", 
 
     // The full line must round-trip through nlohmann::json::parse, proving it
     // is valid JSON.
-    auto eol_pos = out.find_first_of("\r\n");
+    const auto eol_pos = out.find_first_of("\r\n");
     const std::string line = out.substr(0, eol_pos);
     auto parsed = nlohmann::json::parse(line);
     REQUIRE(parsed["logger"] == "interop");

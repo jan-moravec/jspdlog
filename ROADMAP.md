@@ -42,7 +42,7 @@ These decide every feature below.
 
 ## 3. Where we are (0.1, pattern-based)
 
-The trimmed header ([include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h))
+The header ([include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h))
 provides `json_logger` (five call shapes per level plus `log(level, ...)`),
 `with_properties`, `adopt`, `json_options` (rename or omit header fields,
 UTC, eol), typed `json_properties` with nesting, and `raw_json`. It works with
@@ -61,6 +61,9 @@ limits:
   `%` flags) and are fixed at construction.
 - `%z` is wrong in UTC mode on spdlog < 1.13 (worked around with a literal
   `Z`).
+- Per-call fields are serialized when the braced list is built, before the
+  level check, so principle 5 holds only for the message. Lazy values
+  (milestone 0.3.0) close this gap.
 
 ## 4. Architecture decision: custom `spdlog::formatter` (proposed for 0.2)
 
@@ -68,14 +71,14 @@ The proof of concept on the
 [poc/formatter branch](https://github.com/jan-moravec/jspdlog/tree/poc/formatter/poc/formatter)
 implements the proposed design. Evidence:
 
-| Question                                     | Result                                                                                                                                                               |
-| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Valid JSON for messages that bypass jspdlog? | Yes. Plain payloads become an escaped `"message"`. The current header produces a broken line in the same test.                                                       |
-| Injection by a crafted message?              | No. jspdlog payloads carry a random 16-byte token per logger, shared only with that logger's formatter; anything else is escaped.                                    |
-| Async (v1 `async_logger`, v2 `async_sink`)?  | Yes. Token and fields travel in the copied payload.                                                                                                                  |
-| Source location without macros?              | Yes. `__builtin_FILE/LINE/FUNCTION` as default arguments in C++17 (GCC, Clang, MSVC); consteval format-string wrapper in C++20. Tested on MSVC with C++17 and C++20. |
-| spdlog v1 and v2 from one header?            | Yes. Tested with 1.12.0 (C++20), 1.17.0 and v2.x (C++17).                                                                                                            |
-| Performance                                  | Equal or slightly better (see below).                                                                                                                                |
+| Question                                     | Result                                                                                                                                                                                      |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Valid JSON for messages that bypass jspdlog? | Yes. Plain payloads become an escaped `"message"`. The current header produces a broken line in the same test.                                                                              |
+| Injection by a crafted message?              | No. In the PoC, jspdlog payloads carry a random 16-byte token per logger, shared only with that logger's formatter; anything else is escaped. 0.2 uses one process-wide token (decision 6). |
+| Async (v1 `async_logger`, v2 `async_sink`)?  | Yes. Token and fields travel in the copied payload.                                                                                                                                         |
+| Source location without macros?              | Yes. `__builtin_FILE/LINE/FUNCTION` as default arguments in C++17 (GCC, Clang, MSVC); consteval format-string wrapper in C++20. Tested on MSVC with C++17 and C++20.                        |
+| spdlog v1 and v2 from one header?            | Yes. Tested with 1.12.0 (C++20), 1.17.0 and v2.x (C++17).                                                                                                                                   |
+| Performance                                  | Equal or slightly better (see below).                                                                                                                                                       |
 
 Benchmark: Windows, MSVC Release, single thread. The sink formats every
 message and discards it, so the numbers are ns/message for serialization plus
@@ -102,7 +105,7 @@ the renames listed in section 9.
 
 ### 0.1.0: baseline (current branch)
 
-- [x] Trimmed API with construction-time `json_options`.
+- [x] API with construction-time `json_options`.
 - [x] spdlog v1.x (>= 1.12) and v2.x support, CI legs for both.
 - [x] UTC timestamps end in `Z`.
 - [x] Proof of concept for the formatter design (branch `poc/formatter`).
@@ -189,8 +192,7 @@ possible, so numbers, booleans and nested data stay filterable as such
 
 - Keys known at compile time are escaped at compile time.
 - Error-handler helper that reports sink failures as JSON without deadlocking
-  spdlog's non-recursive error mutex (the removed `forward_errors_to` will be
-  redesigned here, if wanted).
+  spdlog's non-recursive error mutex.
 - `SPDLOG_USE_STD_FORMAT` builds (needs a `std::formattable` fallback for the
   value-form trait).
 

@@ -6,6 +6,8 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 
 using jspdlog::json_properties;
 using jspdlog::raw_json;
@@ -25,6 +27,37 @@ TEST_CASE("json_properties: scalar types", "[json_properties]")
     CHECK(json_properties{"v", short{-3}}.to_json() == R"({"v":-3})");
     CHECK(json_properties{"v", std::numeric_limits<std::int64_t>::min()}.to_json() == R"({"v":-9223372036854775808})");
     CHECK(json_properties{"v", std::numeric_limits<std::uint64_t>::max()}.to_json() == R"({"v":18446744073709551615})");
+}
+
+namespace
+{
+
+template <typename T, typename = void>
+struct can_insert : std::false_type
+{
+};
+
+template <typename T>
+struct can_insert<T, std::void_t<decltype(std::declval<json_properties &>().insert(std::string{}, std::declval<T>()))>>
+    : std::true_type
+{
+};
+
+} // namespace
+
+TEST_CASE("json_properties: types without a JSON mapping are rejected", "[json_properties]")
+{
+    STATIC_CHECK(can_insert<int>::value);
+    STATIC_CHECK(can_insert<const char *>::value);
+    STATIC_CHECK_FALSE(can_insert<wchar_t>::value);
+    STATIC_CHECK_FALSE(can_insert<char16_t>::value);
+    STATIC_CHECK_FALSE(can_insert<char32_t>::value);
+    STATIC_CHECK_FALSE(can_insert<const int *>::value);
+    STATIC_CHECK_FALSE(can_insert<void *>::value);
+    STATIC_CHECK_FALSE(can_insert<const wchar_t *>::value);
+#ifdef __cpp_char8_t
+    STATIC_CHECK_FALSE(can_insert<char8_t>::value);
+#endif
 }
 
 TEST_CASE("json_properties: floating point", "[json_properties]")

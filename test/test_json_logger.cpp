@@ -17,7 +17,7 @@ using test_support::fixture;
 TEST_CASE("json_logger: default header fields", "[json_logger]")
 {
     std::ostringstream oss;
-    jspdlog::json_logger logger("app", std::make_shared<spdlog::sinks::ostream_sink_mt>(oss));
+    const jspdlog::json_logger logger("app", std::make_shared<spdlog::sinks::ostream_sink_mt>(oss));
     logger.info("hello {}", "world");
 
     // spdlog's %z always renders as +hh:mm.
@@ -67,13 +67,31 @@ TEST_CASE("json_logger: log(level, ...) takes the level at runtime", "[json_logg
 {
     fixture f;
     const std::vector<jspdlog::level> levels{jspdlog::level::info, jspdlog::level::err};
-    for (auto lvl : levels)
+    for (const auto lvl : levels)
     {
         f.logger.log(lvl, {"n", 1}, "x");
     }
     REQUIRE(f.sink->lines.size() == 2);
     CHECK(f.sink->lines[0] == R"({"logger":"t","level":"info","n":1,"message":"x"})");
     CHECK(f.sink->lines[1] == R"({"logger":"t","level":"error","n":1,"message":"x"})");
+}
+
+TEST_CASE("json_logger: logging through a const reference", "[json_logger]")
+{
+    fixture f;
+    const jspdlog::json_logger &logger = f.logger;
+    logger.info({"k", 1}, "const {}", "ref");
+    CHECK(f.last() == R"({"logger":"t","level":"info","k":1,"message":"const ref"})");
+    logger.log(jspdlog::level::warn, std::string{"value"});
+    CHECK(f.last() == R"({"logger":"t","level":"warning","message":"value"})");
+}
+
+TEST_CASE("version macros match the CMake project version", "[version]")
+{
+    const std::string from_macros = std::to_string(JSPDLOG_VERSION_MAJOR) + "." +
+                                    std::to_string(JSPDLOG_VERSION_MINOR) + "." + std::to_string(JSPDLOG_VERSION_PATCH);
+    CHECK(from_macros == JSPDLOG_TEST_PROJECT_VERSION);
+    CHECK(JSPDLOG_VERSION == (JSPDLOG_VERSION_MAJOR * 10000) + (JSPDLOG_VERSION_MINOR * 100) + JSPDLOG_VERSION_PATCH);
 }
 
 TEST_CASE("json_logger: level filtering", "[json_logger]")
@@ -148,7 +166,7 @@ TEST_CASE("json_logger: with_properties", "[json_logger]")
     }
     SECTION("nested with_properties: newer values win")
     {
-        auto grandchild = child.with_properties({"user", 3});
+        const auto grandchild = child.with_properties({"user", 3});
         grandchild.info("x");
         CHECK(f.last() == R"({"logger":"t","level":"info","request_id":"abc","user":3,"message":"x"})");
     }
@@ -205,7 +223,7 @@ TEST_CASE("json_options: eol and time type", "[json_options]")
     jspdlog::json_options opts;
     opts.eol = "\n";
     opts.time_type = spdlog::pattern_time_type::utc;
-    jspdlog::json_logger logger("t", std::make_shared<spdlog::sinks::ostream_sink_mt>(oss), opts);
+    const jspdlog::json_logger logger("t", std::make_shared<spdlog::sinks::ostream_sink_mt>(oss), opts);
     logger.info("x");
 
     const std::string out = oss.str();
@@ -220,7 +238,7 @@ TEST_CASE("json_options: eol and time type", "[json_options]")
         std::ostringstream oss2;
         jspdlog::json_options no_eol;
         no_eol.eol = "";
-        jspdlog::json_logger l2("t", std::make_shared<spdlog::sinks::ostream_sink_mt>(oss2), no_eol);
+        const jspdlog::json_logger l2("t", std::make_shared<spdlog::sinks::ostream_sink_mt>(oss2), no_eol);
         l2.info("x");
         CHECK(oss2.str().back() == '}');
     }
@@ -230,14 +248,14 @@ TEST_CASE("json_logger: construction", "[json_logger]")
 {
     SECTION("multiple sinks via init list and iterator range")
     {
-        auto s1 = std::make_shared<test_support::capture_sink>();
-        auto s2 = std::make_shared<test_support::capture_sink>();
-        jspdlog::json_logger a("a", {s1, s2}, test_support::deterministic_options());
+        const auto s1 = std::make_shared<test_support::capture_sink>();
+        const auto s2 = std::make_shared<test_support::capture_sink>();
+        const jspdlog::json_logger a("a", {s1, s2}, test_support::deterministic_options());
         a.info("x");
         CHECK(s1->last() == s2->last());
 
         std::vector<spdlog::sink_ptr> sinks{s1, s2};
-        jspdlog::json_logger b("b", sinks.begin(), sinks.end(), test_support::deterministic_options());
+        const jspdlog::json_logger b("b", sinks.begin(), sinks.end(), test_support::deterministic_options());
         b.info("y");
         CHECK(s1->last() == R"({"logger":"b","level":"info","message":"y"})");
         CHECK(s2->last() == s1->last());
@@ -252,10 +270,10 @@ TEST_CASE("json_logger: construction", "[json_logger]")
     }
     SECTION("adopt replaces the formatter of an existing logger")
     {
-        auto sink = std::make_shared<test_support::capture_sink>();
+        const auto sink = std::make_shared<test_support::capture_sink>();
         auto raw = std::make_shared<spdlog::logger>("raw", sink);
         raw->set_pattern("%v");
-        auto logger = jspdlog::json_logger::adopt(raw, test_support::deterministic_options());
+        const auto logger = jspdlog::json_logger::adopt(raw, test_support::deterministic_options());
         logger.info("adopted");
         CHECK(sink->last() == R"({"logger":"raw","level":"info","message":"adopted"})");
         CHECK(logger.spdlog_logger() == raw);

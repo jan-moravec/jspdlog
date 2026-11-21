@@ -30,6 +30,8 @@
 #   -readability-implicit-bool-conversion: Noisy on pointer `if (mPtr)` idioms.
 #   -misc-include-cleaner: With MissingIncludes/UnusedIncludes off it only prints
 #        a no-op banner per TU; disabling avoids noise until include-cleaner is adopted.
+#   -cppcoreguidelines-macro-to-enum, -modernize-macro-to-enum: The version macros
+#        must stay macros so that users can compare them in #if.
 #   -modernize-use-ranges: Most usable suggestions are `std::ranges::iota`, which is
 #        C++23 and unavailable on AppleClang 17 libc++ (macOS CI build). Other
 #        sites flagged are intentionally non-rangified (e.g. `std::lower_bound`
@@ -66,6 +68,8 @@ Checks: >
   -readability-uppercase-literal-suffix,
   -readability-implicit-bool-conversion,
   -misc-include-cleaner,
+  -cppcoreguidelines-macro-to-enum,
+  -modernize-macro-to-enum,
   -modernize-use-ranges
 
 WarningsAsErrors: ""
@@ -94,10 +98,15 @@ CheckOptions:
   - { key: readability-identifier-naming.TemplateParameterCase,  value: CamelCase }
 
   # Functions / methods: snake_case to match spdlog's logger API and the
-  # standard library's free-function naming.
+  # standard library's free-function naming. Private and protected methods end
+  # with an underscore, as in spdlog (sink_it_, flush_). No ClassMethodCase:
+  # it would take precedence over the access-based rules for static methods.
   - { key: readability-identifier-naming.FunctionCase,           value: lower_case }
   - { key: readability-identifier-naming.MethodCase,             value: lower_case }
-  - { key: readability-identifier-naming.ClassMethodCase,        value: lower_case }
+  - { key: readability-identifier-naming.PrivateMethodCase,      value: lower_case }
+  - { key: readability-identifier-naming.PrivateMethodSuffix,    value: _ }
+  - { key: readability-identifier-naming.ProtectedMethodCase,    value: lower_case }
+  - { key: readability-identifier-naming.ProtectedMethodSuffix,  value: _ }
 
   # Enum constants: snake_case, matching spdlog::level::trace etc.
   - { key: readability-identifier-naming.EnumConstantCase,       value: lower_case }
@@ -125,6 +134,8 @@ CheckOptions:
   # and macros.
   - { key: readability-identifier-naming.MacroDefinitionCase,    value: UPPER_CASE }
   - { key: readability-identifier-naming.ConstexprVariableCase,  value: UPPER_CASE }
+  # Type-trait variable templates follow the standard library (is_same_v).
+  - { key: readability-identifier-naming.ConstexprVariableIgnoredRegexp, value: '^[a-z][a-z0-9_]*_v$' }
   - { key: readability-identifier-naming.GlobalConstantCase,     value: UPPER_CASE }
   - { key: readability-identifier-naming.StaticConstantCase,     value: UPPER_CASE }
   - { key: readability-identifier-naming.ClassConstantCase,      value: UPPER_CASE }

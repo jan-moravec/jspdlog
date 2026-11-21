@@ -29,7 +29,7 @@
 /** @brief Patch version of jspdlog. */
 #define JSPDLOG_VERSION_PATCH 0
 /** @brief The version as one number, major * 10000 + minor * 100 + patch, for #if comparisons. */
-#define JSPDLOG_VERSION (JSPDLOG_VERSION_MAJOR * 10000 + JSPDLOG_VERSION_MINOR * 100 + JSPDLOG_VERSION_PATCH)
+#define JSPDLOG_VERSION ((JSPDLOG_VERSION_MAJOR * 10000) + (JSPDLOG_VERSION_MINOR * 100) + JSPDLOG_VERSION_PATCH)
 
 #include <spdlog/version.h>
 
@@ -41,7 +41,7 @@
 #if SPDLOG_VERSION < 11200
 #error "jspdlog requires spdlog >= 1.12 (or v2.x)"
 #endif
-#if defined(SPDLOG_USE_STD_FORMAT)
+#ifdef SPDLOG_USE_STD_FORMAT
 #error "jspdlog does not support SPDLOG_USE_STD_FORMAT yet; build spdlog with {fmt}"
 #endif
 #include <spdlog/fmt/fmt.h>
@@ -76,7 +76,7 @@ namespace jspdlog
  * spdlog::level::level_enum, and spdlog v2, where it is the scoped enum spdlog::level.
  */
 #if JSPDLOG_SPDLOG_V2
-using level = spdlog::level;
+using spdlog::level;
 #else
 using level = spdlog::level::level_enum;
 #endif
@@ -140,14 +140,17 @@ namespace detail
 template <typename Buffer>
 void append_json_quoted(Buffer &out, std::string_view s)
 {
-    static constexpr char hex[] = "0123456789abcdef";
+    static constexpr char HEX_DIGITS[] = "0123456789abcdef";
+    static constexpr unsigned FIRST_PRINTABLE = 0x20U; // Bytes below this are control characters.
+    static constexpr unsigned NIBBLE_BITS = 4U;
+    static constexpr unsigned NIBBLE_MASK = 0xFU;
     out.push_back('"');
     const char *run = s.data(); // Start of the bytes not yet copied.
     const char *const end = s.data() + s.size();
     for (const char *p = run; p != end; ++p)
     {
-        const auto c = static_cast<unsigned char>(*p);
-        if (c >= 0x20 && c != '"' && c != '\\')
+        const unsigned c = static_cast<unsigned char>(*p);
+        if (c >= FIRST_PRINTABLE && c != '"' && c != '\\')
         {
             continue;
         }
@@ -181,8 +184,8 @@ void append_json_quoted(Buffer &out, std::string_view s)
             out.push_back('u');
             out.push_back('0');
             out.push_back('0');
-            out.push_back(hex[c >> 4]);
-            out.push_back(hex[c & 0xF]);
+            out.push_back(HEX_DIGITS[c >> NIBBLE_BITS]);
+            out.push_back(HEX_DIGITS[c & NIBBLE_MASK]);
             break;
         }
     }
@@ -199,7 +202,7 @@ inline void append_pattern_literal(std::string &out, std::string_view s)
 {
     std::string quoted;
     append_json_quoted(quoted, s);
-    for (char c : quoted)
+    for (const char c : quoted)
     {
         out.push_back(c);
         if (c == '%')
@@ -218,7 +221,7 @@ inline bool make_json_pattern(std::string &out, std::string_view logger_name, co
 {
     out = "{";
     bool any = false;
-    auto key = [&](const std::string &k) {
+    const auto key = [&](const std::string &k) {
         if (any)
         {
             out.push_back(',');
@@ -282,8 +285,11 @@ inline constexpr bool is_loggable_value_v =
  *
  * Pass them per call, usually as a braced list such as {"user_id", 42, "ok", true}, or bind them to a child logger with
  * json_logger::with_properties. Values keep their JSON type, so numbers and booleans stay filterable as such. Keys are
- * written in alphabetical order. Inserting a key that exists replaces its value, and when two sets are merged the
- * right-hand side wins.
+ * written sorted byte by byte, which is alphabetical for ASCII keys. Inserting a key that exists replaces its value,
+ * and when two sets are merged the right-hand side wins.
+ *
+ * Values are serialized as soon as the set is built, so a braced list passed to a disabled level still costs its
+ * serialization. Guard expensive fields with json_logger::should_log.
  *
  * A key equal to one of the logger's header keys or to message produces a duplicate key in the line. Avoiding that is
  * up to the caller.
@@ -291,6 +297,7 @@ inline constexpr bool is_loggable_value_v =
 class json_properties
 {
 public:
+    /** @brief Creates an empty set. Add fields with insert or merge. */
     json_properties() = default;
 
     /**
@@ -382,8 +389,14 @@ public:
      * std::string first.
      */
     void insert(std::string, wchar_t) = delete;
+    /** @brief Rejected like wchar_t. Convert to a UTF-8 std::string first. */
     void insert(std::string, char16_t) = delete;
+    /** @brief Rejected like wchar_t. Convert to a UTF-8 std::string first. */
     void insert(std::string, char32_t) = delete;
+#ifdef __cpp_char8_t
+    /** @brief Rejected, because a single UTF-8 code unit is not always a character. Use a std::string instead. */
+    void insert(std::string, char8_t) = delete;
+#endif
     /**
      * @brief Pointers other than C strings are rejected. Without this overload they would silently convert to bool.
      */
@@ -462,7 +475,7 @@ private:
     template <typename Buffer>
     static void append_merged_(Buffer &out, const json_properties &lhs, const json_properties &rhs)
     {
-        auto emit = [&out](const std::string &key, const std::string &value) {
+        const auto emit = [&out](const std::string &key, const std::string &value) {
             out.push_back(',');
             detail::append_json_quoted(out, key);
             out.push_back(':');
@@ -496,9 +509,13 @@ private:
 /**
  * @brief A logger that writes one JSON object per line.
  *
- * Copies are cheap and share the underlying spdlog::logger, so its level, sinks and error handler apply to every copy.
- * Bound fields belong to each copy: with_properties returns a child that adds fields to every line it writes, which is
- * how inner code adds context without affecting its caller.
+ * Copies share the underlying spdlog::logger, so its level, sinks and error handler apply to every copy. Bound fields
+ * belong to each copy and are copied with it: with_properties returns a child that adds fields to every line it writes,
+ * which is how inner code adds context without affecting its caller.
+ *
+ * The logging calls are const and only read the json_logger, so inner code can take a const reference, and several
+ * threads can log through one json_logger at once. Whether their lines are written safely is up to the sinks, as in
+ * spdlog: use the _mt sinks when logging from several threads.
  *
  * Each level has five call forms, also available through log with the level as the first argument:
  *
@@ -516,14 +533,14 @@ class json_logger
 {
 public:
     /** @brief Creates a logger writing to one sink. Throws std::invalid_argument if the sink is null. */
-    json_logger(std::string name, spdlog::sink_ptr sink, json_options options = {})
+    json_logger(std::string name, spdlog::sink_ptr sink, const json_options &options = {})
         : json_logger(make_logger_(std::move(name), std::move(sink)), options)
     {
     }
 
     /** @brief Creates a logger writing to several sinks. Throws std::invalid_argument if any sink is null. */
-    json_logger(std::string name, spdlog::sinks_init_list sinks, json_options options = {})
-        : json_logger(std::move(name), sinks.begin(), sinks.end(), std::move(options))
+    json_logger(std::string name, spdlog::sinks_init_list sinks, const json_options &options = {})
+        : json_logger(std::move(name), sinks.begin(), sinks.end(), options)
     {
     }
 
@@ -532,7 +549,7 @@ public:
         typename It,
         std::enable_if_t<std::is_constructible_v<spdlog::sink_ptr, typename std::iterator_traits<It>::reference>, int> =
             0>
-    json_logger(std::string name, It first, It last, json_options options = {})
+    json_logger(std::string name, It first, It last, const json_options &options = {})
         : json_logger(make_logger_(std::move(name), first, last), options)
     {
     }
@@ -549,7 +566,7 @@ public:
         {
             throw std::invalid_argument("jspdlog: adopt() requires a non-null logger");
         }
-        return json_logger(std::move(logger), options);
+        return {std::move(logger), options};
     }
 
     /**
@@ -571,7 +588,7 @@ public:
     [[nodiscard]] const json_properties &properties() const noexcept { return properties_; }
 
     /** @brief Writes a line with fields only, without a message. */
-    void log(level lvl, const json_properties &props)
+    void log(level lvl, const json_properties &props) const
     {
         if (should_log(lvl))
         {
@@ -581,21 +598,21 @@ public:
 
     /** @brief Writes a formatted message. The format string is checked at compile time. */
     template <typename... Args>
-    void log(level lvl, spdlog::format_string_t<Args...> fmt, Args &&...args)
+    void log(level lvl, spdlog::format_string_t<Args...> fmt, Args &&...args) const
     {
         log(lvl, empty_properties_(), fmt, std::forward<Args>(args)...);
     }
 
     /** @brief Writes a value formatted with {fmt} as the message, for example a runtime string. */
     template <typename T, std::enable_if_t<detail::is_loggable_value_v<T>, int> = 0>
-    void log(level lvl, const T &msg)
+    void log(level lvl, const T &msg) const
     {
         log(lvl, empty_properties_(), msg);
     }
 
     /** @brief Writes fields and a formatted message. */
     template <typename... Args>
-    void log(level lvl, const json_properties &props, spdlog::format_string_t<Args...> fmt, Args &&...args)
+    void log(level lvl, const json_properties &props, spdlog::format_string_t<Args...> fmt, Args &&...args) const
     {
         if (should_log(lvl))
         {
@@ -607,7 +624,7 @@ public:
 
     /** @brief Writes fields and a value formatted with {fmt} as the message. */
     template <typename T, std::enable_if_t<detail::is_loggable_value_v<T>, int> = 0>
-    void log(level lvl, const json_properties &props, const T &msg)
+    void log(level lvl, const json_properties &props, const T &msg) const
     {
         if (should_log(lvl))
         {
@@ -618,39 +635,39 @@ public:
     }
 
 // Defines the five call forms for one level. Undefined right after use.
-#define JSPDLOG_LEVEL_FUNCTIONS_(name, lvl)                                                                            \
+#define JSPDLOG_DETAIL_LEVEL_FUNCTIONS(name, lvl)                                                                      \
     template <typename... Args>                                                                                        \
-    void name(spdlog::format_string_t<Args...> fmt, Args &&...args)                                                    \
+    void name(spdlog::format_string_t<Args...> fmt, Args &&...args) const                                              \
     {                                                                                                                  \
         log(lvl, fmt, std::forward<Args>(args)...);                                                                    \
     }                                                                                                                  \
     template <typename T, std::enable_if_t<detail::is_loggable_value_v<T>, int> = 0>                                   \
-    void name(const T &msg)                                                                                            \
+    void name(const T &msg) const                                                                                      \
     {                                                                                                                  \
         log(lvl, msg);                                                                                                 \
     }                                                                                                                  \
-    void name(const json_properties &props)                                                                            \
+    void name(const json_properties &props) const                                                                      \
     {                                                                                                                  \
         log(lvl, props);                                                                                               \
     }                                                                                                                  \
     template <typename... Args>                                                                                        \
-    void name(const json_properties &props, spdlog::format_string_t<Args...> fmt, Args &&...args)                      \
+    void name(const json_properties &props, spdlog::format_string_t<Args...> fmt, Args &&...args) const                \
     {                                                                                                                  \
         log(lvl, props, fmt, std::forward<Args>(args)...);                                                             \
     }                                                                                                                  \
     template <typename T, std::enable_if_t<detail::is_loggable_value_v<T>, int> = 0>                                   \
-    void name(const json_properties &props, const T &msg)                                                              \
+    void name(const json_properties &props, const T &msg) const                                                        \
     {                                                                                                                  \
         log(lvl, props, msg);                                                                                          \
     }
 
-    JSPDLOG_LEVEL_FUNCTIONS_(trace, level::trace)
-    JSPDLOG_LEVEL_FUNCTIONS_(debug, level::debug)
-    JSPDLOG_LEVEL_FUNCTIONS_(info, level::info)
-    JSPDLOG_LEVEL_FUNCTIONS_(warn, level::warn)
-    JSPDLOG_LEVEL_FUNCTIONS_(error, level::err)
-    JSPDLOG_LEVEL_FUNCTIONS_(critical, level::critical)
-#undef JSPDLOG_LEVEL_FUNCTIONS_
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(trace, level::trace)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(debug, level::debug)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(info, level::info)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(warn, level::warn)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(error, level::err)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(critical, level::critical)
+#undef JSPDLOG_DETAIL_LEVEL_FUNCTIONS
 
     /** @brief The logger name, as given at construction or taken from the adopted spdlog::logger. */
     [[nodiscard]] const std::string &name() const noexcept { return logger_->name(); }
@@ -731,15 +748,15 @@ private:
     /** @brief An empty set of fields, shared by the call forms without fields. */
     static const json_properties &empty_properties_()
     {
-        static const json_properties empty;
-        return empty;
+        static const json_properties EMPTY;
+        return EMPTY;
     }
 
     /**
      * @brief Serializes the bound and per-call fields and the message, and passes them to spdlog as the message part
      * of the pattern. A null msg writes no message key.
      */
-    void emit_(level lvl, const json_properties &props, const spdlog::memory_buf_t *msg)
+    void emit_(level lvl, const json_properties &props, const spdlog::memory_buf_t *msg) const
     {
         spdlog::memory_buf_t out;
         if (props.empty())
@@ -752,8 +769,8 @@ private:
         }
         if (msg != nullptr)
         {
-            static constexpr std::string_view message_sep = R"(,"message":)";
-            out.append(message_sep.data(), message_sep.data() + message_sep.size());
+            static constexpr std::string_view MESSAGE_SEPARATOR = R"(,"message":)";
+            out.append(MESSAGE_SEPARATOR.data(), MESSAGE_SEPARATOR.data() + MESSAGE_SEPARATOR.size());
             detail::append_json_quoted(out, std::string_view{msg->data(), msg->size()});
         }
         const std::size_t skip = (!leading_comma_ && out.size() > 0) ? 1 : 0;

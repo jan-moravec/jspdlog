@@ -10,7 +10,7 @@ int main()
 
     // with_properties() returns a child logger that shares the underlying
     // spdlog logger and sinks, but carries an extra set of bound properties.
-    auto request_logger = root.with_properties({"request_id", "abc-123", "user_id", 42});
+    const auto request_logger = root.with_properties({"request_id", "abc-123", "user_id", 42});
 
     request_logger.info("request started");
     request_logger.warn({"latency_ms", 312}, "slow path hit");

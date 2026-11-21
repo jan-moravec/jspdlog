@@ -40,8 +40,8 @@ protected:
 
 int main()
 {
-    auto sink = std::make_shared<memory_sink>();
-    jspdlog::json_logger logger("svc", sink);
+    const auto sink = std::make_shared<memory_sink>();
+    const jspdlog::json_logger logger("svc", sink);
     logger.info({"k", 1}, "hello");
 
     for (const auto &line : sink->lines)

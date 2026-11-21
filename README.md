@@ -102,17 +102,17 @@ top-level project.
 ```cpp
 // Construction: one sink, a list, or an iterator range. Throws
 // std::invalid_argument on a null sink.
-json_logger(std::string name, spdlog::sink_ptr sink, json_options options = {});
-json_logger(std::string name, spdlog::sinks_init_list sinks, json_options options = {});
+json_logger(std::string name, spdlog::sink_ptr sink, const json_options &options = {});
+json_logger(std::string name, spdlog::sinks_init_list sinks, const json_options &options = {});
 template <typename It>
-json_logger(std::string name, It first, It last, json_options options = {});
+json_logger(std::string name, It first, It last, const json_options &options = {});
 
 // Wrap an existing spdlog::logger (e.g. a v1 async logger). Its formatter is
 // replaced; sinks, level and error handler are kept.
 static json_logger adopt(std::shared_ptr<spdlog::logger> logger, const json_options &options = {});
 
 // Same five shapes for trace / debug / info / warn / error / critical,
-// and for log(level, ...):
+// and for log(level, ...). All of them are const.
 void info(spdlog::format_string_t<Args...> fmt, Args&&... args);   // formatted message
 void info(const T& value);                                          // any fmt-formattable value
 void info(const json_properties& props);                            // properties only
@@ -140,6 +140,10 @@ typed values in properties: `info({"value", 42})` emits `"value":42`.
 Copies (including `with_properties()` children) share the underlying
 `spdlog::logger`, so `set_level`, `flush_on` and the error handler apply to
 all of them; bound properties are per copy.
+
+The logging calls are `const`, so functions can take a
+`const jspdlog::json_logger &`, and several threads can log through the same
+object. As with spdlog, use the `_mt` sinks for multi-threaded logging.
 
 ### `jspdlog::json_options`
 
@@ -190,8 +194,13 @@ std::string to_json() const;                       // {"key1":...,"key2":...}
 | `json_properties`                                | nested object                                     |
 | `raw_json{"..."}`                                | inserted verbatim (empty: `null`)                 |
 
-Wide characters and pointers (other than `const char*`) do not compile. Keys
-are emitted in lexicographic order.
+Wide characters (`wchar_t`, `char8_t`, `char16_t`, `char32_t`) and pointers
+other than `const char*` do not compile. Keys are emitted sorted byte by byte
+(alphabetically for ASCII keys).
+
+Values are serialized when the properties are built, before the level check.
+For expensive fields on a level that is often off, check
+`logger.should_log(level)` first.
 
 ### `jspdlog::raw_json`
 

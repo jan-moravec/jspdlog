@@ -21,6 +21,8 @@ include(Catch)
 
 add_executable(jspdlog_tests test_json_logger.cpp test_json_properties.cpp)
 target_link_libraries(jspdlog_tests PRIVATE jspdlog::jspdlog Catch2::Catch2WithMain)
+# Lets a test check that the header's version macros match project(VERSION).
+target_compile_definitions(jspdlog_tests PRIVATE JSPDLOG_TEST_PROJECT_VERSION="${PROJECT_VERSION}")
 jspdlog_set_warnings(jspdlog_tests)
 
 catch_discover_tests(jspdlog_tests)

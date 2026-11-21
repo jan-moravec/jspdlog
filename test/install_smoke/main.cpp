@@ -6,9 +6,24 @@
 
 #include <spdlog/sinks/null_sink.h>
 
+#include <cstdio>
+#include <exception>
+
 int main()
 {
-    jspdlog::json_logger logger("install_smoke", std::make_shared<spdlog::sinks::null_sink_mt>());
-    logger.info(jspdlog::json_properties{"ok", true}, "hello {}", "world");
-    return 0;
+    try
+    {
+        const jspdlog::json_logger logger("install_smoke", std::make_shared<spdlog::sinks::null_sink_mt>());
+        logger.info(jspdlog::json_properties{"ok", true}, "hello {}", "world");
+        return 0;
+    }
+    catch (const std::exception &e)
+    {
+        std::fputs(e.what(), stderr);
+        return 1;
+    }
+    catch (...)
+    {
+        return 1;
+    }
 }
