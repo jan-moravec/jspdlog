@@ -308,11 +308,12 @@ inline const payload_token &process_token()
         static constexpr char ALPHABET[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
         static constexpr std::size_t PREFIX_SIZE = 8;
         static constexpr unsigned ALPHABET_MASK = 63U;
-        std::array<std::uint32_t, 10> seed{};
+        static constexpr std::size_t RANDOM_WORDS = 8;
+        std::array<std::uint32_t, RANDOM_WORDS + 2> seed{};
         try
         {
             std::random_device rd;
-            for (std::size_t i = 0; i < 8; ++i)
+            for (std::size_t i = 0; i < RANDOM_WORDS; ++i)
             {
                 seed[i] = static_cast<std::uint32_t>(rd());
             }
@@ -322,8 +323,8 @@ inline const payload_token &process_token()
         }
         // Mixed in so that the token differs per run even when random_device is deterministic.
         const int local = 0;
-        seed[8] = static_cast<std::uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count());
-        seed[9] = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(&local));
+        seed[RANDOM_WORDS] = static_cast<std::uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+        seed[RANDOM_WORDS + 1] = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(&local));
         std::seed_seq seq(seed.begin(), seed.end());
         std::mt19937_64 gen(seq);
         payload_token t{};
@@ -378,7 +379,15 @@ inline parsed_payload parse_payload(std::string_view p, const payload_token &tok
     {
         return {};
     }
-    return {true, rest.substr(0, n), rest.substr(n)};
+    const std::string_view fields = rest.substr(0, n);
+    const std::string_view message = rest.substr(n);
+    const bool fields_ok = fields.empty() || fields.front() == ',';
+    const bool message_ok = message.empty() || (message.size() >= 2 && message.front() == '"' && message.back() == '"');
+    if (!fields_ok || !message_ok)
+    {
+        return {};
+    }
+    return {true, fields, message};
 }
 
 /**
@@ -610,11 +619,12 @@ private:
         static constexpr int MINUTES_PER_HOUR = 60;
         static constexpr int MILLIS_HUNDREDS = 100;
         const auto since_epoch = msg.time.time_since_epoch();
-        const auto whole = std::chrono::duration_cast<std::chrono::seconds>(since_epoch);
+        // floor keeps the milliseconds in 0 to 999 for times before the epoch too.
+        const auto whole = std::chrono::floor<std::chrono::seconds>(since_epoch);
         const auto millis =
             static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(since_epoch - whole).count());
         const auto second = static_cast<std::time_t>(whole.count());
-        if (second != cached_second_)
+        if (!cached_second_ || second != *cached_second_)
         {
             const bool utc = opts_.time_type == spdlog::pattern_time_type::utc;
             const std::tm tm = utc ? spdlog::details::os::gmtime(second) : spdlog::details::os::localtime(second);
@@ -656,23 +666,21 @@ private:
         detail::append(dest, zone_);
     }
 
-    /** @brief Appends the call site as an object. The file name is escaped once per distinct file name pointer. */
-    void append_source_(const spdlog::source_loc &src, spdlog::memory_buf_t &dest)
+    /**
+     * @brief Appends the call site as an object, with the base name of the file.
+     *
+     * Nothing is cached, because a file name pointer may be reused for different text once a dynamic call site ends.
+     */
+    static void append_source_(const spdlog::source_loc &src, spdlog::memory_buf_t &dest)
     {
-        if (src.filename != cached_file_ptr_)
+        std::string_view file{src.filename != nullptr ? src.filename : ""};
+        if (const auto slash = file.find_last_of("/\\"); slash != std::string_view::npos)
         {
-            std::string_view file{src.filename != nullptr ? src.filename : ""};
-            if (const auto slash = file.find_last_of("/\\"); slash != std::string_view::npos)
-            {
-                file.remove_prefix(slash + 1);
-            }
-            cached_file_.clear();
-            detail::append(cached_file_, std::string_view{R"({"file":)"});
-            detail::append_json_quoted(cached_file_, file);
-            detail::append(cached_file_, std::string_view{R"(,"line":)"});
-            cached_file_ptr_ = src.filename;
+            file.remove_prefix(slash + 1);
         }
-        detail::append(dest, cached_file_);
+        detail::append(dest, std::string_view{R"({"file":)"});
+        detail::append_json_quoted(dest, file);
+        detail::append(dest, std::string_view{R"(,"line":)"});
         detail::append_int(dest, src.line);
         detail::append(dest, std::string_view{R"(,"function":)"});
         detail::append_json_quoted(dest, std::string_view{src.funcname != nullptr ? src.funcname : ""});
@@ -689,16 +697,12 @@ private:
     std::string message_key_;
     /** @brief The header keys, quoted and followed by a colon. Empty for keys that are left out. */
     std::string timestamp_key_, logger_key_, level_key_, process_key_, thread_key_, source_key_;
-    /** @brief The second of the cached timestamp part, or -1 before the first line. */
-    std::time_t cached_second_ = -1;
+    /** @brief The second of the cached timestamp part, empty before the first line. */
+    std::optional<std::time_t> cached_second_;
     /** @brief The quoted date and time up to the decimal point. */
     std::string cached_prefix_;
     /** @brief The UTC offset, or Z, with the closing quote. */
     std::string zone_;
-    /** @brief The file name pointer the cached source text belongs to. */
-    const char *cached_file_ptr_ = nullptr;
-    /** @brief The escaped file name and the start of the line number. */
-    std::string cached_file_;
 };
 
 /**

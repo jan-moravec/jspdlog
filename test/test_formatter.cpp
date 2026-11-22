@@ -73,6 +73,9 @@ TEST_CASE("formatter: payloads that imitate jspdlog are escaped", "[formatter]")
         t + "M00000006,\"a\":1",                                      // message kind without a message
         t + "F00000001,\"a\":1",                                      // F with trailing bytes
         t + "X00000006,\"a\":1",                                      // unknown kind
+        t + "M00000000x",                                             // message not quoted
+        t + "M00000000\"x",                                           // message without a closing quote
+        t + "F00000004\"a\":",                                        // fields without a leading comma
         std::string("jspdlog:") + std::string(24, 'A') + "F00000000", // wrong token
     };
     for (const std::string &fake : fakes)
@@ -167,6 +170,13 @@ TEST_CASE("formatter: source_key writes the base name of the call site", "[forma
         R"({"logger":"t","level":"info","source":{"file":"other.cpp","line":8,"function":"fn"},"message":"y"})";
     CHECK(f.last() == expected_other);
 
+    // A file name buffer reused with different text is read again.
+    std::string reused = "first.cpp";
+    f.logger.spdlog_logger()->log(spdlog::source_loc{reused.c_str(), 1, "f"}, jspdlog::level::info, "a");
+    reused.replace(0, 5, "other");
+    f.logger.spdlog_logger()->log(spdlog::source_loc{reused.c_str(), 2, "f"}, jspdlog::level::info, "b");
+    CHECK(f.last().find(R"("file":"other.cpp","line":2)") != std::string::npos);
+
     // A json_logger call has no call site yet.
     f.logger.info("z");
     CHECK(f.last() == R"({"logger":"t","level":"info","message":"z"})");
@@ -219,6 +229,19 @@ TEST_CASE("formatter: timestamps are RFC 3339 with milliseconds", "[formatter]")
         formatter.format(msg, buf);
         CHECK(std::string(buf.data(), buf.size()).rfind(R"({"ts":"2026-05-13T08:00:02.000Z",)", 0) == 0);
     }
+#ifndef _WIN32 // The Windows C runtime does not convert times before the epoch.
+    SECTION("times before the epoch")
+    {
+        opts.time_type = spdlog::pattern_time_type::utc;
+        jspdlog::json_formatter formatter(opts);
+        spdlog::details::log_msg msg("name", jspdlog::level::info, "x");
+        // 1969-12-31T23:59:59.250Z, whose second is -1.
+        msg.time = spdlog::log_clock::time_point{-std::chrono::milliseconds(750)};
+        spdlog::memory_buf_t buf;
+        formatter.format(msg, buf);
+        CHECK(std::string(buf.data(), buf.size()).rfind(R"({"ts":"1969-12-31T23:59:59.250Z",)", 0) == 0);
+    }
+#endif
 }
 
 TEST_CASE("formatter: process and thread are numbers", "[formatter]")

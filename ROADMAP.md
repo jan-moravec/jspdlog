@@ -104,7 +104,7 @@ the renames listed in section 9.
 Milestones are development stages on `main`, not releases. The first tag is
 `v1.0.0`.
 
-### 0.1.0: baseline (current branch)
+### 0.1.0: baseline
 
 - [x] API with construction-time `json_options`.
 - [x] spdlog v1.x (>= 1.12) and v2.x support, CI legs for both.
@@ -320,7 +320,7 @@ separate per-version headers aren't needed.
 | 6   | Payload token                        | One immutable process-wide token. Accepted exception to "no global state": it is a constant, not configurable shared state. `adopt()` keeps installing the formatter.       |
 | 7   | Minimum spdlog                       | 1.12.                                                                                                                                                                       |
 | 8   | Raw-message sinks                    | A documented route per sink, no stripping helper; `mongo_sink` and `kafka_sink` unsupported.                                                                                |
-| 9   | Source `file`                        | Base name, written by the formatter from the first release of the formatter.                                                                                                |
+| 9   | Source `file`                        | Base name, written by the formatter from 0.2.0 on.                                                                                                                          |
 | 10  | Process id                           | Read per message, like spdlog; revisit only if the benchmark shows a real cost.                                                                                             |
 | 11  | Per-call key replacing a context key | Context position: a key stays where it first appeared.                                                                                                                      |
 | 12  | Getter name for bound fields         | `context()`.                                                                                                                                                                |
