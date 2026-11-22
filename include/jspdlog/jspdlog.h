@@ -984,19 +984,18 @@ public:
     /** @brief Collects the enabled header keys, the source key and the message key. */
     explicit reserved_keys(const json_options &options)
     {
-        for (const auto *key :
-             {&options.timestamp_key,
-              &options.logger_key,
-              &options.level_key,
-              &options.process_key,
-              &options.thread_key,
-              &options.source_key})
-        {
-            if (*key)
+        const auto add = [this](const std::optional<std::string> &key) {
+            if (key)
             {
-                keys_.push_back(**key);
+                keys_.push_back(*key);
             }
-        }
+        };
+        add(options.timestamp_key);
+        add(options.logger_key);
+        add(options.level_key);
+        add(options.process_key);
+        add(options.thread_key);
+        add(options.source_key);
         keys_.push_back(options.message_key);
     }
 
@@ -1024,16 +1023,24 @@ struct site
     explicit constexpr site(
         const char *f = __builtin_FILE(), int l = __builtin_LINE(), const char *fn = __builtin_FUNCTION()
     ) noexcept
-        : file(f), line(l), function(fn)
+        : file_(f), line_(l), function_(fn)
     {
     }
 
     /** @brief The source file, as the compiler spells it. */
-    const char *file;
+    [[nodiscard]] constexpr const char *file() const noexcept { return file_; }
     /** @brief The line of the call. */
-    int line;
+    [[nodiscard]] constexpr int line() const noexcept { return line_; }
     /** @brief The short name of the calling function, which depends on the compiler. */
-    const char *function;
+    [[nodiscard]] constexpr const char *function() const noexcept { return function_; }
+
+private:
+    /** @brief The source file. */
+    const char *file_;
+    /** @brief The line of the call. */
+    int line_;
+    /** @brief The name of the calling function. */
+    const char *function_;
 };
 
 /** @brief std::type_identity for C++17, used to keep a parameter out of template argument deduction. */
@@ -1090,14 +1097,16 @@ class basic_format_here
 public:
     /** @brief Converts a string literal, capturing the call site of the logging function. */
     template <typename S, std::enable_if_t<std::is_convertible_v<const S &, spdlog::fmt_lib::string_view>, int> = 0>
-    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor): a literal must convert
+    // Implicit on purpose: a string literal or fmt::runtime must convert at the call.
+    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
     FMT_CONSTEVAL basic_format_here(const S &s, detail::site w = detail::site())
         : fmt_(s), where_(w)
     {
     }
 
     /** @brief Converts fmt::runtime(...), capturing the call site of the logging function. */
-    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor): fmt::runtime must convert
+    // Implicit on purpose: a string literal or fmt::runtime must convert at the call.
+    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
     basic_format_here(detail::runtime_format_string r, detail::site w = detail::site())
         : fmt_(r), where_(w)
     {
@@ -1492,7 +1501,7 @@ private:
         // The line type is int in spdlog v1 and unsigned in v2.
         using line_type = decltype(spdlog::source_loc{}.line);
         logger_->log(
-            spdlog::source_loc{where.file, static_cast<line_type>(where.line), where.function},
+            spdlog::source_loc{where.file(), static_cast<line_type>(where.line()), where.function()},
             lvl,
             "{}",
             detail::deferred_payload<decltype(write)>{&write}

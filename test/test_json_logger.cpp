@@ -306,7 +306,8 @@ TEST_CASE("json_logger: copies are small and share their context", "[json_logger
     STATIC_CHECK(sizeof(jspdlog::json_logger) <= 4 * sizeof(void *));
     fixture f;
     const auto child = f.logger.with({"a", 1});
-    const auto context_after_copy = [](jspdlog::json_logger copy) { return &copy.context(); };
-    CHECK(context_after_copy(child) == &child.context());
+    auto copy = child;
+    copy.set_level(copy.log_level());
+    CHECK(&copy.context() == &child.context());
     CHECK(&f.logger.context() != &child.context());
 }
