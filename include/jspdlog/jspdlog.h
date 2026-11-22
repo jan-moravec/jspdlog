@@ -315,7 +315,7 @@ inline const payload_token &process_token()
             std::random_device rd;
             for (std::size_t i = 0; i < RANDOM_WORDS; ++i)
             {
-                seed[i] = static_cast<std::uint32_t>(rd());
+                seed[i] = rd();
             }
         }
         catch (...) // NOLINT(bugprone-empty-catch): no entropy source, the values below still make the token unique
@@ -623,7 +623,7 @@ private:
         const auto whole = std::chrono::floor<std::chrono::seconds>(since_epoch);
         const auto millis =
             static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(since_epoch - whole).count());
-        const auto second = static_cast<std::time_t>(whole.count());
+        const std::time_t second = spdlog::log_clock::to_time_t(spdlog::log_clock::time_point{whole});
         if (!cached_second_ || second != *cached_second_)
         {
             const bool utc = opts_.time_type == spdlog::pattern_time_type::utc;

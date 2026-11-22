@@ -25,7 +25,7 @@ std::string format_payload(jspdlog::json_formatter &formatter, const std::string
     const spdlog::details::log_msg msg("name", jspdlog::level::info, payload);
     spdlog::memory_buf_t buf;
     formatter.format(msg, buf);
-    return std::string(buf.data(), buf.size());
+    return {buf.data(), buf.size()};
 }
 
 jspdlog::json_options no_header_options()
@@ -67,8 +67,8 @@ TEST_CASE("formatter: payloads that imitate jspdlog are escaped", "[formatter]")
     const std::vector<std::string> fakes = {
         t.substr(0, 31),                                              // token prefix only
         t + "M",                                                      // header cut short
-        t + "Mzzzzzzzz,\"a\":1\"m\"",                                 // size not hex
-        t + "MFFFFFFFF,\"a\":1\"m\"",                                 // size not lowercase hex
+        t + R"(Mzzzzzzzz,"a":1"m")",                                  // size not hex
+        t + R"(MFFFFFFFF,"a":1"m")",                                  // size not lowercase hex
         t + "M00000010,\"a\":1",                                      // size past the end
         t + "M00000006,\"a\":1",                                      // message kind without a message
         t + "F00000001,\"a\":1",                                      // F with trailing bytes
@@ -284,11 +284,11 @@ TEST_CASE("formatter: eol is appended", "[formatter]")
 
 TEST_CASE("formatter: clone keeps the options and the token", "[formatter]")
 {
-    jspdlog::json_formatter formatter(no_header_options());
+    const jspdlog::json_formatter formatter(no_header_options());
     const auto copy = formatter.clone();
     const auto &token = jspdlog::detail::process_token();
     std::string payload(token.data(), token.size());
-    payload += "M00000006,\"k\":1\"m\"";
+    payload += R"(M00000006,"k":1"m")";
     const spdlog::details::log_msg msg("name", jspdlog::level::info, payload);
     spdlog::memory_buf_t buf;
     copy->format(msg, buf);
