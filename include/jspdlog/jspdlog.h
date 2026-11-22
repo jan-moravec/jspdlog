@@ -13,9 +13,12 @@
  * //  "user_id":42,"message":"hello world"}
  * @endcode
  *
- * The header fields are part of an spdlog pattern that ends with the message flag and the closing brace. jspdlog passes
+ * The header fields are part of an spdlog pattern that ends with the fields and the closing brace. jspdlog passes
  * spdlog an already escaped list of fields as the message, so every line written through jspdlog is a complete JSON
- * object. A message logged directly on the underlying spdlog::logger bypasses that escaping.
+ * object. spdlog keeps the pattern on the sinks, so loggers that share a sink share its pattern. A message logged
+ * directly on the underlying spdlog::logger bypasses the escaping, and so does a sink that writes the raw message
+ * instead of the formatted line. Logging calls do not throw: a formatting error goes to the spdlog error handler, as in
+ * spdlog.
  *
  * @copyright Copyright (c) 2026 Jan Moravec. Distributed under the MIT License, see LICENSE.
  */
@@ -53,8 +56,10 @@
 #include <spdlog/logger.h>
 #include <spdlog/pattern_formatter.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <ctime>
 #include <functional>
 #include <iterator>
 #include <map>
@@ -196,7 +201,7 @@ void append_json_quoted(Buffer &out, std::string_view s)
 /**
  * @brief Appends text as a quoted JSON string that spdlog's pattern parser keeps literally.
  *
- * Percent signs are doubled so that a logger name or key containing them cannot turn into a pattern flag.
+ * Percent signs are doubled so that a key containing them cannot turn into a pattern flag.
  */
 inline void append_pattern_literal(std::string &out, std::string_view s)
 {
@@ -212,12 +217,72 @@ inline void append_pattern_literal(std::string &out, std::string_view s)
     }
 }
 
+/** @brief Pattern flag of name_flag. */
+inline constexpr char NAME_FLAG = 'N';
+/** @brief Pattern flag of fields_flag. */
+inline constexpr char FIELDS_FLAG = 'J';
+
 /**
- * @brief Builds the spdlog pattern for a logger: the header fields followed by the message flag and a closing brace.
+ * @brief Pattern flag that writes the name of the logger that wrote the line, as a quoted JSON string.
  *
- * @return Whether the pattern has at least one header field, in which case the message part must start with a comma.
+ * The name is read from each message rather than fixed in the pattern, because spdlog keeps the formatter on the sinks:
+ * loggers that share a sink, including clones, share its pattern.
  */
-inline bool make_json_pattern(std::string &out, std::string_view logger_name, const json_options &opts)
+class name_flag final : public spdlog::custom_flag_formatter
+{
+public:
+    void format(const spdlog::details::log_msg &msg, const std::tm & /*tm_time*/, spdlog::memory_buf_t &dest) override
+    {
+        append_json_quoted(dest, std::string_view{msg.logger_name.data(), msg.logger_name.size()});
+    }
+
+    [[nodiscard]] std::unique_ptr<spdlog::custom_flag_formatter> clone() const override
+    {
+        return std::make_unique<name_flag>();
+    }
+};
+
+/**
+ * @brief Pattern flag that writes the fields and message that json_logger serialized, which start with a comma.
+ *
+ * Without header fields the leading comma is dropped. The decision belongs to the sink's pattern, not to the logger, so
+ * loggers with different options can share a sink and still write valid JSON.
+ */
+class fields_flag final : public spdlog::custom_flag_formatter
+{
+public:
+    /** @brief after_header tells whether the pattern writes header fields before this flag. */
+    explicit fields_flag(bool after_header)
+        : after_header_(after_header)
+    {
+    }
+
+    void format(const spdlog::details::log_msg &msg, const std::tm & /*tm_time*/, spdlog::memory_buf_t &dest) override
+    {
+        const char *first = msg.payload.data();
+        const char *const last = first + msg.payload.size();
+        if (!after_header_ && first != last && *first == ',')
+        {
+            ++first;
+        }
+        dest.append(first, last);
+    }
+
+    [[nodiscard]] std::unique_ptr<spdlog::custom_flag_formatter> clone() const override
+    {
+        return std::make_unique<fields_flag>(after_header_);
+    }
+
+private:
+    bool after_header_;
+};
+
+/**
+ * @brief Builds the spdlog pattern for a logger: the header fields followed by fields_flag and a closing brace.
+ *
+ * @return Whether the pattern has at least one header field.
+ */
+inline bool make_json_pattern(std::string &out, const json_options &opts)
 {
     out = "{";
     bool any = false;
@@ -240,7 +305,8 @@ inline bool make_json_pattern(std::string &out, std::string_view logger_name, co
     if (opts.logger_key)
     {
         key(*opts.logger_key);
-        append_pattern_literal(out, logger_name);
+        out += '%';
+        out += NAME_FLAG;
     }
     if (opts.level_key)
     {
@@ -257,7 +323,9 @@ inline bool make_json_pattern(std::string &out, std::string_view logger_name, co
         key(*opts.thread_key);
         out += "%t";
     }
-    out += "%v}";
+    out += '%';
+    out += FIELDS_FLAG;
+    out += '}';
     return any;
 }
 
@@ -278,7 +346,42 @@ inline constexpr bool is_loggable_value_v =
     (!std::is_pointer_v<remove_cvref_t<T>> ||
      std::is_same_v<std::remove_cv_t<std::remove_pointer_t<remove_cvref_t<T>>>, char>);
 
+/**
+ * @brief Hands spdlog the function that writes a line's fields and message.
+ *
+ * json_logger logs it with the format string "{}", so the user's message is formatted while spdlog formats the line.
+ * An exception thrown by a user formatter then reaches the logger's error handler, as it would for a plain spdlog call,
+ * and the logging call does not throw.
+ */
+template <typename Write>
+struct deferred_payload
+{
+    /** @brief Appends the fields and message to a buffer. */
+    const Write *write;
+};
+
 } // namespace detail
+} // namespace jspdlog
+
+/** @brief Formats a jspdlog::detail::deferred_payload by running its write function. */
+template <typename Write>
+struct fmt::formatter<jspdlog::detail::deferred_payload<Write>>
+{
+    /** @brief Accepts only an empty format specification. */
+    constexpr auto parse(fmt::format_parse_context &ctx) -> decltype(ctx.begin()) { return ctx.begin(); }
+
+    /** @brief Runs the write function and copies its output. */
+    template <typename Context>
+    auto format(const jspdlog::detail::deferred_payload<Write> &payload, Context &ctx) const -> decltype(ctx.out())
+    {
+        spdlog::memory_buf_t buf;
+        (*payload.write)(buf);
+        return std::copy(buf.begin(), buf.end(), ctx.out());
+    }
+};
+
+namespace jspdlog
+{
 
 /**
  * @brief Typed key/value fields for a log line, serialized when they are inserted.
@@ -528,6 +631,11 @@ private:
  * @endcode
  *
  * The message is always a JSON string. Put values that should keep their type in fields.
+ *
+ * The constructors and adopt install the JSON pattern on every sink of the spdlog::logger. A sink shared with another
+ * json_logger works; the options of the logger created last apply to both. A sink shared with a plain spdlog logger, or
+ * added to the spdlog::logger later, does not get JSON lines. Like spdlog, the logging calls do not throw: an exception
+ * from a user formatter goes to the spdlog::logger's error handler and the line is dropped.
  */
 class json_logger
 {
@@ -557,8 +665,8 @@ public:
     /**
      * @brief Wraps an existing spdlog::logger, for example an async logger.
      *
-     * The logger's formatter is replaced by jspdlog's, which affects everyone using that spdlog::logger. Its sinks,
-     * level and error handler stay as they are. Throws std::invalid_argument if the logger is null.
+     * The formatter of the logger's sinks is replaced by jspdlog's, which affects everyone using that spdlog::logger or
+     * those sinks. Its level and error handler stay as they are. Throws std::invalid_argument if the logger is null.
      */
     [[nodiscard]] static json_logger adopt(std::shared_ptr<spdlog::logger> logger, const json_options &options = {})
     {
@@ -592,7 +700,7 @@ public:
     {
         if (should_log(lvl))
         {
-            emit_(lvl, props, nullptr);
+            emit_(lvl, props, [](spdlog::memory_buf_t & /*out*/) {});
         }
     }
 
@@ -616,9 +724,11 @@ public:
     {
         if (should_log(lvl))
         {
-            spdlog::memory_buf_t msg;
-            spdlog::fmt_lib::format_to(std::back_inserter(msg), fmt, std::forward<Args>(args)...);
-            emit_(lvl, props, &msg);
+            emit_(lvl, props, [&](spdlog::memory_buf_t &out) {
+                spdlog::memory_buf_t msg;
+                spdlog::fmt_lib::format_to(std::back_inserter(msg), fmt, std::forward<Args>(args)...);
+                append_message_(out, msg);
+            });
         }
     }
 
@@ -628,9 +738,11 @@ public:
     {
         if (should_log(lvl))
         {
-            spdlog::memory_buf_t buf;
-            spdlog::fmt_lib::format_to(std::back_inserter(buf), "{}", msg);
-            emit_(lvl, props, &buf);
+            emit_(lvl, props, [&msg](spdlog::memory_buf_t &out) {
+                spdlog::memory_buf_t buf;
+                spdlog::fmt_lib::format_to(std::back_inserter(buf), "{}", msg);
+                append_message_(out, buf);
+            });
         }
     }
 
@@ -696,7 +808,8 @@ public:
     /**
      * @brief The underlying spdlog::logger, for settings jspdlog does not wrap, such as the error handler.
      *
-     * Setting a pattern or formatter on it, or logging through it directly, produces lines that are not valid JSON.
+     * Setting a pattern or formatter on it or on its sinks, or logging through it directly, produces lines that are not
+     * valid JSON. Adding a sink to it later gives that sink spdlog's default pattern.
      */
     [[nodiscard]] const std::shared_ptr<spdlog::logger> &spdlog_logger() const noexcept { return logger_; }
 
@@ -706,10 +819,16 @@ private:
         : logger_(std::move(logger))
     {
         std::string pattern;
-        leading_comma_ = detail::make_json_pattern(pattern, logger_->name(), options);
+        const bool has_header = detail::make_json_pattern(pattern, options);
+        spdlog::pattern_formatter::custom_flags flags;
+        flags[detail::NAME_FLAG] = std::make_unique<detail::name_flag>();
+        flags[detail::FIELDS_FLAG] = std::make_unique<detail::fields_flag>(has_header);
         logger_->set_formatter(
             std::make_unique<spdlog::pattern_formatter>(
-                std::move(pattern), options.time_type, options.eol.value_or(spdlog::details::os::default_eol)
+                std::move(pattern),
+                options.time_type,
+                options.eol.value_or(spdlog::details::os::default_eol),
+                std::move(flags)
             )
         );
     }
@@ -752,35 +871,37 @@ private:
         return EMPTY;
     }
 
-    /**
-     * @brief Serializes the bound and per-call fields and the message, and passes them to spdlog as the message part
-     * of the pattern. A null msg writes no message key.
-     */
-    void emit_(level lvl, const json_properties &props, const spdlog::memory_buf_t *msg) const
+    /** @brief Appends the message key and the message as a quoted JSON string. */
+    static void append_message_(spdlog::memory_buf_t &out, const spdlog::memory_buf_t &msg)
     {
-        spdlog::memory_buf_t out;
-        if (props.empty())
-        {
-            out.append(bound_.data(), bound_.data() + bound_.size());
-        }
-        else
-        {
-            json_properties::append_merged_(out, properties_, props);
-        }
-        if (msg != nullptr)
-        {
-            static constexpr std::string_view MESSAGE_SEPARATOR = R"(,"message":)";
-            out.append(MESSAGE_SEPARATOR.data(), MESSAGE_SEPARATOR.data() + MESSAGE_SEPARATOR.size());
-            detail::append_json_quoted(out, std::string_view{msg->data(), msg->size()});
-        }
-        const std::size_t skip = (!leading_comma_ && out.size() > 0) ? 1 : 0;
-        logger_->log(lvl, spdlog::string_view_t{out.data() + skip, out.size() - skip});
+        static constexpr std::string_view MESSAGE_SEPARATOR = R"(,"message":)";
+        out.append(MESSAGE_SEPARATOR.data(), MESSAGE_SEPARATOR.data() + MESSAGE_SEPARATOR.size());
+        detail::append_json_quoted(out, std::string_view{msg.data(), msg.size()});
+    }
+
+    /**
+     * @brief Logs the bound and per-call fields followed by what write_message appends, each part starting with a
+     * comma. spdlog runs the serialization while it formats the line, inside its error handling.
+     */
+    template <typename WriteMessage>
+    void emit_(level lvl, const json_properties &props, const WriteMessage &write_message) const
+    {
+        const auto write = [&](spdlog::memory_buf_t &out) {
+            if (props.empty())
+            {
+                out.append(bound_.data(), bound_.data() + bound_.size());
+            }
+            else
+            {
+                json_properties::append_merged_(out, properties_, props);
+            }
+            write_message(out);
+        };
+        logger_->log(lvl, "{}", detail::deferred_payload<decltype(write)>{&write});
     }
 
     /** @brief The spdlog::logger shared by every copy. */
     std::shared_ptr<spdlog::logger> logger_;
-    /** @brief Whether the pattern has header fields, so the message part must start with a comma. */
-    bool leading_comma_ = true;
     /** @brief Fields bound by with_properties. */
     json_properties properties_;
     /** @brief The bound fields serialized once, ready to append to every line. */

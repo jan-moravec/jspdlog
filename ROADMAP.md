@@ -57,8 +57,10 @@ limits:
   `spdlog_logger()->info(...)`) lands raw in `%v` and breaks the line.
 - Header fields can't be conditional, so source location can't be
   "present when known".
-- The logger name and keys must be escaped twice (for JSON and for spdlog's
-  `%` flags) and are fixed at construction.
+- Keys must be escaped twice (for JSON and for spdlog's `%` flags) and are
+  fixed at construction.
+- The options belong to each sink's pattern, so loggers sharing a sink share
+  the options of the one created last.
 - `%z` is wrong in UTC mode on spdlog < 1.13 (worked around with a literal
   `Z`).
 - Per-call fields are serialized when the braced list is built, before the
@@ -109,6 +111,13 @@ the renames listed in section 9.
 - [x] spdlog v1.x (>= 1.12) and v2.x support, CI legs for both.
 - [x] UTC timestamps end in `Z`.
 - [x] Proof of concept for the formatter design (branch `poc/formatter`).
+- [x] Logger name read from each message, so shared sinks and
+  `spdlog::logger::clone()` keep the right names; loggers with different
+  options can share a sink and still write valid JSON.
+- [x] Logging calls don't throw: formatting errors go to spdlog's error
+  handler.
+- [x] README section "Working with spdlog": sinks, error handler, registry,
+  default logger and compile-time settings.
 - [x] Strict warnings (warnings as errors) for tests and examples on MSVC, GCC
   and Clang.
 - [x] Doxygen comments in the header, checked in pre-commit.
@@ -124,7 +133,13 @@ the renames listed in section 9.
   Payloads without it are escaped into the message key. Wrapping the same
   spdlog logger twice keeps working.
 - `install_json_formatter(spdlog::logger&)` gives JSON output for loggers
-  jspdlog doesn't wrap.
+  jspdlog doesn't wrap. Documented pattern: install it on the default (v1) or
+  global (v2) logger so that third-party spdlog output, `dup_filter_sink`'s
+  "Skipped" line and v1 backtrace markers become valid JSON too.
+- Sinks that write the raw message (`callback_sink`, `mongo_sink`,
+  `kafka_sink`, syslog and systemd without formatting) must not receive the
+  token. Decide between stripping it in a jspdlog-provided callback helper
+  and documenting them as unsupported.
 - Source location without macros (C++17 builtins, C++20 consteval wrapper).
   The call site is always captured; it is written only when `source_key` is
   set (**off by default**), as `"source":{"file","line","function"}` with the
@@ -286,6 +301,8 @@ jspdlog's own fields.
 | {fmt} include         | bundled or external via `<spdlog/fmt/fmt.h>`; `std::format` optional | external `<fmt/format.h>`  | version switch; `std::format` mode rejected for now           |
 | Async                 | `async_logger` + thread pool                                         | `async_sink`               | user's choice; use `adopt()` for v1                           |
 | Global logger         | `set_default_logger`                                                 | `set_global_logger`        | not used by jspdlog                                           |
+| Registry              | `register_logger`, `get`, global `set_pattern` etc.                  | removed                    | not used; README lists the safe and breaking calls            |
+| Async worker errors   | the logger's error handler                                           | `async_sink`'s own handler | documented in README                                          |
 | `%z` in UTC mode      | local offset before 1.13                                             | `+00:00`                   | literal `Z`                                                   |
 | Library form          | header-only or compiled                                              | compiled                   | transparent                                                   |
 
