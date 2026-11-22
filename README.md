@@ -106,7 +106,8 @@ logger.log(jspdlog::level::warn, "disk {}% full", pct);
 ```
 
 The message is always a JSON string. A string literal is a format string, checked at compile time; a `std::string`,
-`std::string_view` or `const char*` variable is written as it is, without interpreting braces. A single argument that
+`std::string_view` or `const char*` variable, or a writable `char` buffer, is written as it is, without interpreting
+braces. A single argument that
 is not a string, such as `info(42)`, does not compile: values that should keep their type belong in fields,
 `info({"value", 42})` writes `"value":42`. Other string types (`std::pmr::string`, `QString`, a `fmt::memory_buffer`)
 are converted by the caller, for example `info(fmt::to_string(buf))`. `fmt::runtime(s)` works with arguments.
@@ -427,7 +428,7 @@ public:
     // trace, debug, info, warn, error, critical: five forms each, all const. log(level, ...) takes the same forms.
     // Each also takes the call site as a trailing default argument, which you never write.
     void info(format_here_t<Args...> fmt, Args &&...args) const;   // a string literal, or fmt::runtime(...)
-    void info(const S &msg) const;                                  // S: std::string, std::string_view, const char*
+    void info(const S &msg) const;                                  // S: std::string, std::string_view, const char*, char[N]
     void info(const fields &f) const;
     void info(const fields &f, format_here_t<Args...> fmt, Args &&...args) const;
     void info(const fields &f, const S &msg) const;

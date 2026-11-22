@@ -156,7 +156,7 @@ Milestones are development stages on `main`, not releases. The first tag is
 - Fuzzing infrastructure and targets 1 to 4 and 6 (section 6), with a CI
   fuzz job.
 - [x] `info(value)` accepts runtime strings only (`std::string`,
-  `std::string_view`, `const char*`); string literals still go to the
+  `std::string_view`, `const char*`, writable `char` buffers); string literals still go to the
   compile-time-checked format overload. Typed values belong in fields.
 - [x] **Duplicate keys are the caller's responsibility.** Debug builds check that
   no field key equals an enabled header key, the message key or the source

@@ -68,6 +68,20 @@ TEST_CASE("json_logger: runtime strings are messages, typed values are not", "[j
     CHECK(f.last() == R"({"logger":"t","level":"info","message":"1 and 2"})");
 }
 
+TEST_CASE("json_logger: a writable char buffer is a runtime string", "[json_logger]")
+{
+    fixture f;
+    char buffer[32] = "filled {} at run time";
+    f.logger.info(buffer);
+    CHECK(f.last() == R"({"logger":"t","level":"info","message":"filled {} at run time"})");
+    f.logger.info({"k", 1}, buffer);
+    CHECK(f.last() == R"({"logger":"t","level":"info","k":1,"message":"filled {} at run time"})");
+
+    char unterminated[3] = {'a', 'b', 'c'};
+    f.logger.warn(unterminated);
+    CHECK(f.last() == R"({"logger":"t","level":"warning","message":"abc"})");
+}
+
 TEST_CASE("json_logger: log(level, ...) takes the level at runtime", "[json_logger]")
 {
     fixture f;
@@ -150,7 +164,7 @@ TEST_CASE("json_logger: with", "[json_logger]")
     fixture f;
     auto child = f.logger.with({"request_id", "abc", "user", 1});
 
-    SECTION("child carries the bound properties, parent does not")
+    SECTION("child carries the bound fields, parent does not")
     {
         child.info("in child");
         CHECK(f.last() == R"({"logger":"t","level":"info","request_id":"abc","user":1,"message":"in child"})");
@@ -159,12 +173,12 @@ TEST_CASE("json_logger: with", "[json_logger]")
         CHECK(child.context().size() == 2);
         CHECK(f.logger.context().empty());
     }
-    SECTION("properties-only call on a child")
+    SECTION("fields-only call on a child")
     {
         child.info(jspdlog::fields{});
         CHECK(f.last() == R"({"logger":"t","level":"info","request_id":"abc","user":1})");
     }
-    SECTION("per-call properties merge with, and override, bound ones")
+    SECTION("per-call fields merge with, and override, bound ones")
     {
         child.info({"user", 2, "a", true}, "merged");
         CHECK(f.last() == R"({"logger":"t","level":"info","request_id":"abc","user":2,"a":true,"message":"merged"})");

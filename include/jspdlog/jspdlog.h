@@ -1054,10 +1054,21 @@ struct type_identity
 /** @brief The type of fmt::runtime(...) in the {fmt} version in use. */
 using runtime_format_string = decltype(spdlog::fmt_lib::runtime(""));
 
-/** @brief Whether a type is a string a call may pass as a message: a std::string, std::string_view or C string. */
+/**
+ * @brief Whether a type is a writable char array, such as a buffer filled at run time. String literals are const
+ * arrays, so they stay format strings.
+ */
 template <typename S>
-inline constexpr bool is_runtime_string_v = std::is_same_v<S, std::string> || std::is_same_v<S, std::string_view> ||
-                                            std::is_same_v<S, const char *> || std::is_same_v<S, char *>;
+inline constexpr bool is_char_buffer_v = std::is_array_v<S> && std::is_same_v<std::remove_extent_t<S>, char>;
+
+/**
+ * @brief Whether a type is a string a call may pass as a message: a std::string, std::string_view, C string or
+ * writable char array.
+ */
+template <typename S>
+inline constexpr bool is_runtime_string_v =
+    std::is_same_v<S, std::string> || std::is_same_v<S, std::string_view> || std::is_same_v<S, const char *> ||
+    std::is_same_v<S, char *> || is_char_buffer_v<S>;
 
 /** @brief Enables an overload for runtime strings only. String literals go to the format-string overloads. */
 template <typename S>
@@ -1068,13 +1079,21 @@ template <typename T>
 inline constexpr bool is_rejected_message_v =
     !is_runtime_string_v<T> && !std::is_array_v<T> && !std::is_same_v<T, runtime_format_string>;
 
-/** @brief Views a runtime string as a std::string_view. A null C string is an empty message. */
+/**
+ * @brief Views a runtime string as a std::string_view. A null C string is an empty message, and a char array ends at
+ * its first null character or at its end, whichever comes first.
+ */
 template <typename S>
 std::string_view message_view(const S &s) noexcept
 {
     if constexpr (std::is_pointer_v<S>)
     {
         return s != nullptr ? std::string_view{s} : std::string_view{};
+    }
+    else if constexpr (std::is_array_v<S>)
+    {
+        const char *const end = std::find(std::begin(s), std::end(s), '\0');
+        return std::string_view{std::begin(s), static_cast<std::size_t>(end - std::begin(s))};
     }
     else
     {
@@ -1151,7 +1170,7 @@ using format_here_t = basic_format_here<typename detail::type_identity<Args>::ty
  *
  * The message is always a JSON string, and a single argument that is not a string is rejected at compile time: put
  * values that should keep their type in fields. A string literal is a format string checked at compile time; a
- * std::string, std::string_view or C string variable is taken as it is. Convert other string types first.
+ * std::string, std::string_view, C string or writable char array is taken as it is. Convert other string types first.
  *
  * Every call records its file, line and function, and the formatter writes them when json_options::source_key is set.
  * The function is the short name the compiler gives, which differs between compilers.

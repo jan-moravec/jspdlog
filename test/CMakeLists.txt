@@ -60,13 +60,21 @@ jspdlog_set_warnings(jspdlog_assert_tests)
 catch_discover_tests(jspdlog_assert_tests)
 
 # Code that must not compile: each file is a target excluded from the build, and the test builds it and expects failure.
+# A control target builds the same file with the offending line replaced by a valid one and must succeed, so a failure
+# for an unrelated reason (a broken include, a typo) cannot pass as the expected one. The tests build in the shared
+# build directory, so they hold a lock and never run in parallel.
 foreach(case info_int info_vector odd_fields fields_int)
-    add_executable(compile_fail_${case} EXCLUDE_FROM_ALL compile_fail/${case}.cpp)
-    target_link_libraries(compile_fail_${case} PRIVATE jspdlog::jspdlog)
-    add_test(
-        NAME compile_fail.${case}
-        COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target compile_fail_${case}
-    )
+    foreach(kind fail control)
+        add_executable(compile_${kind}_${case} EXCLUDE_FROM_ALL compile_fail/${case}.cpp)
+        target_link_libraries(compile_${kind}_${case} PRIVATE jspdlog::jspdlog)
+        add_test(
+            NAME compile_${kind}.${case}
+            COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target compile_${kind}_${case} --config $<CONFIG>
+        )
+        set_tests_properties(compile_${kind}.${case} PROPERTIES RESOURCE_LOCK jspdlog_build_dir)
+    endforeach()
+    target_compile_definitions(compile_control_${case} PRIVATE JSPDLOG_COMPILE_FAIL_CONTROL)
+    jspdlog_set_warnings(compile_control_${case})
     set_tests_properties(compile_fail.${case} PROPERTIES WILL_FAIL TRUE)
 endforeach()
 
