@@ -71,12 +71,15 @@ TEST_CASE("json_logger: runtime strings are messages, typed values are not", "[j
 TEST_CASE("json_logger: a writable char buffer is a runtime string", "[json_logger]")
 {
     fixture f;
+    // Must stay writable: a const char array would be a format string.
+    // NOLINTNEXTLINE(misc-const-correctness)
     char buffer[32] = "filled {} at run time";
     f.logger.info(buffer);
     CHECK(f.last() == R"({"logger":"t","level":"info","message":"filled {} at run time"})");
     f.logger.info({"k", 1}, buffer);
     CHECK(f.last() == R"({"logger":"t","level":"info","k":1,"message":"filled {} at run time"})");
 
+    // NOLINTNEXTLINE(misc-const-correctness)
     char unterminated[3] = {'a', 'b', 'c'};
     f.logger.warn(unterminated);
     CHECK(f.last() == R"({"logger":"t","level":"warning","message":"abc"})");
