@@ -47,11 +47,11 @@ void check_integer(fuzz::reader &r)
     }
 }
 
-// Same bits, so -0.0 and 0.0 differ.
+// Equal values with the same sign, so -0.0 and 0.0 differ. Only called with finite values.
 template <typename T>
 bool same_bits(T a, T b)
 {
-    return std::memcmp(&a, &b, sizeof(T)) == 0;
+    return a == b && std::signbit(a) == std::signbit(b);
 }
 
 template <typename T>
@@ -115,12 +115,13 @@ long double make_long_double(fuzz::reader &r)
     const auto mantissa = r.value<std::uint64_t>();
     const auto exponent = static_cast<int>(r.value<std::uint16_t>() % 32800U) - 16400;
     const bool negative = (r.byte() & 1U) != 0;
-    long double v = std::ldexp(static_cast<long double>(mantissa), exponent);
+    const long double v = std::ldexp(static_cast<long double>(mantissa), exponent);
     return negative ? -v : v;
 }
 
 } // namespace
 
+// NOLINTNEXTLINE(readability-identifier-naming): libFuzzer requires this name
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size)
 {
     fuzz::reader r(fuzz::as_text(data, size));

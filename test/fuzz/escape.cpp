@@ -1,6 +1,7 @@
 // Target 1: append_json_quoted. The escaped text must decode back to the input bytes, whatever they are.
 #include "fuzz_support.h"
 
+// NOLINTNEXTLINE(readability-identifier-naming): libFuzzer requires this name
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size)
 {
     const std::string_view in = fuzz::as_text(data, size);
@@ -16,9 +17,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     FUZZ_CHECK(std::string_view(buf.data(), buf.size()) == quoted);
 
     // Byte-level oracle: valid for any input, with or without UTF-8.
-    const auto decoded = fuzz::decode_json_string(quoted);
-    FUZZ_CHECK(decoded.has_value());
-    FUZZ_CHECK(*decoded == in);
+    FUZZ_CHECK(fuzz::decode_json_string_or_abort(quoted) == in);
 
     // Independent oracle: a real JSON parser. Until a UTF-8 policy exists (ROADMAP 0.4), invalid UTF-8 passes through
     // and nlohmann rejects it, so this runs on valid input only.

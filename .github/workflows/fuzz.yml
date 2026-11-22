@@ -42,7 +42,7 @@ jobs:
         run: cmake --preset clang-fuzz
 
       - name: Build
-        run: cmake --build --preset clang-fuzz --target "fuzz_$TARGET"
+        run: cmake --build --preset clang-fuzz --target "fuzz_$TARGET" "fuzz_replay_$TARGET"
         env:
           TARGET: ${{ matrix.target }}
 

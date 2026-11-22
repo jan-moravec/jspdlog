@@ -31,14 +31,15 @@ validated validate(std::string_view p, std::string_view token)
         const char c = p[33 + i];
         const bool digit = c >= '0' && c <= '9';
         const bool lower = c >= 'a' && c <= 'f';
-        if (!digit && !lower)
+        if (!(digit || lower))
         {
             return {};
         }
-        n = n * 16 + static_cast<std::size_t>(digit ? c - '0' : c - 'a' + 10);
+        n = (n * 16) + static_cast<std::size_t>(digit ? c - '0' : c - 'a' + 10);
     }
     const std::string_view rest = p.substr(HEADER_SIZE);
-    if (!((kind == 'F' && n == rest.size()) || (kind == 'M' && n < rest.size())))
+    const bool sizes_ok = (kind == 'F' && n == rest.size()) || (kind == 'M' && n < rest.size());
+    if (!sizes_ok)
     {
         return {};
     }
@@ -48,7 +49,8 @@ validated validate(std::string_view p, std::string_view token)
     {
         return {};
     }
-    if (!message.empty() && !(message.size() >= 2 && message.front() == '"' && message.back() == '"'))
+    const bool message_ok = message.empty() || (message.size() >= 2 && message.front() == '"' && message.back() == '"');
+    if (!message_ok)
     {
         return {};
     }
@@ -57,10 +59,11 @@ validated validate(std::string_view p, std::string_view token)
 
 } // namespace
 
+// NOLINTNEXTLINE(readability-identifier-naming): libFuzzer requires this name
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size)
 {
     fuzz::reader r(fuzz::as_text(data, size));
-    fuzz::harness h("t", fuzz::deterministic_options());
+    const fuzz::harness h("t", fuzz::deterministic_options());
 
     // The first byte picks a prefix family, the rest is the payload tail.
     const auto &token = jspdlog::detail::process_token();
@@ -121,9 +124,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     FUZZ_CHECK(line.compare(0, PREFIX.size(), PREFIX) == 0);
     FUZZ_CHECK(line.compare(line.size() - 2, 2, "}\n") == 0);
     const std::string_view quoted = std::string_view{line}.substr(PREFIX.size(), line.size() - PREFIX.size() - 2);
-    const auto decoded = fuzz::decode_json_string(quoted);
-    FUZZ_CHECK(decoded.has_value());
-    FUZZ_CHECK(*decoded == payload);
+    FUZZ_CHECK(fuzz::decode_json_string_or_abort(quoted) == payload);
     fuzz::check_shape(line, "\n");
     if (fuzz::is_valid_utf8(payload))
     {

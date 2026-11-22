@@ -16,14 +16,25 @@ struct header_key
     std::string key;
 };
 
+// The terminators worth testing: none, LF and CR LF.
+std::string_view eol_for(std::uint8_t choice)
+{
+    if (choice == 0)
+    {
+        return "";
+    }
+    return choice == 1 ? "\n" : "\r\n";
+}
+
 } // namespace
 
+// NOLINTNEXTLINE(readability-identifier-naming): libFuzzer requires this name
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size)
 {
     fuzz::reader r(fuzz::as_text(data, size));
 
     const std::uint8_t flags = r.byte();
-    const std::uint8_t eol_choice = static_cast<std::uint8_t>(r.byte() % 3U);
+    const auto eol_choice = static_cast<std::uint8_t>(r.byte() % 3U);
     const std::string name = r.string(16);
 
     // Two equal keys would write a duplicate key, which is the caller's problem, so make them distinct.
@@ -47,7 +58,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     const header_key source = next_key((flags & 0x20U) != 0);
     const header_key message_key = next_key(true);
     const bool utc = (flags & 0x40U) != 0;
-    const std::string_view eol = eol_choice == 0 ? "" : (eol_choice == 1 ? "\n" : "\r\n");
+    const std::string_view eol = eol_for(eol_choice);
     const std::string message{r.rest()};
 
     jspdlog::json_options options;
@@ -64,7 +75,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     options.time_type = utc ? spdlog::pattern_time_type::utc : spdlog::pattern_time_type::local;
     options.eol = std::string{eol};
 
-    fuzz::harness h(name, options);
+    const fuzz::harness h(name, options);
     h.logger.info(message);
 
     FUZZ_CHECK(h.sink->lines.size() == 1);

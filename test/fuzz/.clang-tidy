@@ -1,0 +1,16 @@
+# Fuzz-target overrides.
+#
+# The targets and the replay driver are programs that report a failure by aborting and talk to the terminal with
+# printf, so the vararg and ignored-return checks (printf, fflush) do not apply. The reference model builds nested
+# fields by recursion with a fixed depth bound. A target is a free function, so `bugprone-exception-escape` on main
+# and on the entry point only flags a crash that libFuzzer reports anyway. The byte reader keeps a reference to its
+# input for the lifetime of one call.
+
+InheritParentConfig: true
+
+Checks: >
+  -cppcoreguidelines-pro-type-vararg,
+  -cert-err33-c,
+  -misc-no-recursion,
+  -bugprone-exception-escape,
+  -cppcoreguidelines-avoid-const-or-ref-data-members

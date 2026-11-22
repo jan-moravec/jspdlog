@@ -8,8 +8,10 @@
 #include <iterator>
 #include <vector>
 
+// NOLINTNEXTLINE(readability-identifier-naming): libFuzzer requires this name
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size);
 
+// NOLINTNEXTLINE(misc-const-correctness): main takes char **
 int main(int argc, char **argv)
 {
     std::size_t count = 0;
@@ -32,12 +34,11 @@ int main(int argc, char **argv)
         for (const auto &file : files)
         {
             std::ifstream in(file, std::ios::binary);
-            const std::vector<char> bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+            const std::vector<char> raw{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+            const std::vector<std::uint8_t> bytes(raw.begin(), raw.end());
             std::printf("replay %s\n", file.string().c_str());
             std::fflush(stdout);
-            LLVMFuzzerTestOneInput(
-                static_cast<const std::uint8_t *>(static_cast<const void *>(bytes.data())), bytes.size()
-            );
+            LLVMFuzzerTestOneInput(bytes.data(), bytes.size());
             ++count;
         }
     }

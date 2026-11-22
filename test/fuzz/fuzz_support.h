@@ -39,16 +39,18 @@ using ojson = nlohmann::ordered_json;
     std::abort();
 }
 
+/** Aborts unless the condition holds. */
+inline void check(bool condition, const char *expression, const char *file, int line)
+{
+    if (!condition)
+    {
+        fail(expression, file, line);
+    }
+}
+
 } // namespace fuzz
 
-#define FUZZ_CHECK(condition)                                                                                          \
-    do                                                                                                                 \
-    {                                                                                                                  \
-        if (!(condition))                                                                                              \
-        {                                                                                                              \
-            ::fuzz::fail(#condition, __FILE__, __LINE__);                                                              \
-        }                                                                                                              \
-    } while (false)
+#define FUZZ_CHECK(condition) ::fuzz::check((condition), #condition, __FILE__, __LINE__)
 
 namespace fuzz
 {
@@ -177,7 +179,7 @@ inline bool is_valid_utf8(std::string_view s)
     return true;
 }
 
-namespace detail_
+namespace text_detail
 {
 
 inline int hex_digit(char c)
@@ -205,25 +207,25 @@ inline void append_utf8(std::string &out, unsigned cp)
     }
     else if (cp < 0x800U)
     {
-        out.push_back(static_cast<char>(0xC0U | (cp >> 6)));
+        out.push_back(static_cast<char>(0xC0U | (cp >> 6U)));
         out.push_back(static_cast<char>(0x80U | (cp & 0x3FU)));
     }
     else if (cp < 0x10000U)
     {
-        out.push_back(static_cast<char>(0xE0U | (cp >> 12)));
-        out.push_back(static_cast<char>(0x80U | ((cp >> 6) & 0x3FU)));
+        out.push_back(static_cast<char>(0xE0U | (cp >> 12U)));
+        out.push_back(static_cast<char>(0x80U | ((cp >> 6U) & 0x3FU)));
         out.push_back(static_cast<char>(0x80U | (cp & 0x3FU)));
     }
     else
     {
-        out.push_back(static_cast<char>(0xF0U | (cp >> 18)));
-        out.push_back(static_cast<char>(0x80U | ((cp >> 12) & 0x3FU)));
-        out.push_back(static_cast<char>(0x80U | ((cp >> 6) & 0x3FU)));
+        out.push_back(static_cast<char>(0xF0U | (cp >> 18U)));
+        out.push_back(static_cast<char>(0x80U | ((cp >> 12U) & 0x3FU)));
+        out.push_back(static_cast<char>(0x80U | ((cp >> 6U) & 0x3FU)));
         out.push_back(static_cast<char>(0x80U | (cp & 0x3FU)));
     }
 }
 
-} // namespace detail_
+} // namespace text_detail
 
 /**
  * Decodes a JSON string literal byte by byte, for text that is not valid UTF-8 and so cannot go through nlohmann.
@@ -246,18 +248,18 @@ inline std::optional<std::string> decode_json_string(std::string_view quoted)
         int v = 0;
         for (std::size_t k = 0; k < 4; ++k)
         {
-            const int d = detail_::hex_digit(quoted[at + k]);
+            const int d = text_detail::hex_digit(quoted[at + k]);
             if (d < 0)
             {
                 return -1;
             }
-            v = v * 16 + d;
+            v = (v * 16) + d;
         }
         return v;
     };
     while (i < quoted.size())
     {
-        const unsigned char c = static_cast<unsigned char>(quoted[i]);
+        const auto c = static_cast<unsigned char>(quoted[i]);
         if (c == '"')
         {
             return i + 1 == quoted.size() ? std::optional<std::string>{std::move(out)} : std::nullopt;
@@ -312,7 +314,7 @@ inline std::optional<std::string> decode_json_string(std::string_view quoted)
                 return std::nullopt;
             }
             i += 4;
-            unsigned cp = static_cast<unsigned>(hi);
+            auto cp = static_cast<unsigned>(hi);
             if (cp >= 0xD800U && cp <= 0xDBFFU)
             {
                 if (i + 1 >= quoted.size() || quoted[i] != '\\' || quoted[i + 1] != 'u')
@@ -325,13 +327,13 @@ inline std::optional<std::string> decode_json_string(std::string_view quoted)
                     return std::nullopt;
                 }
                 i += 6;
-                cp = 0x10000U + ((cp - 0xD800U) << 10) + (static_cast<unsigned>(lo) - 0xDC00U);
+                cp = 0x10000U + ((cp - 0xD800U) << 10U) + (static_cast<unsigned>(lo) - 0xDC00U);
             }
             else if (cp >= 0xDC00U && cp <= 0xDFFFU)
             {
                 return std::nullopt;
             }
-            detail_::append_utf8(out, cp);
+            text_detail::append_utf8(out, cp);
             break;
         }
         default:
@@ -339,6 +341,17 @@ inline std::optional<std::string> decode_json_string(std::string_view quoted)
         }
     }
     return std::nullopt; // no closing quote
+}
+
+/** Decodes a JSON string literal, or aborts when it is not exactly one. */
+inline std::string decode_json_string_or_abort(std::string_view quoted)
+{
+    auto decoded = decode_json_string(quoted);
+    if (!decoded)
+    {
+        fail("decode_json_string(quoted)", __FILE__, __LINE__);
+    }
+    return std::move(*decoded);
 }
 
 /** True when the literal is exactly one JSON string. See decode_json_string. */
@@ -351,7 +364,7 @@ inline bool is_json_string_syntax(std::string_view quoted)
 inline bool is_json_number_grammar(std::string_view s)
 {
     std::size_t i = 0;
-    const auto digits = [&]() {
+    const auto digits = [&] {
         const std::size_t start = i;
         while (i < s.size() && s[i] >= '0' && s[i] <= '9')
         {

@@ -76,17 +76,17 @@ public:
         const unsigned count = static_cast<unsigned>(r_.byte()) % (max_ops + 1);
         for (unsigned i = 0; i < count; ++i)
         {
-            apply(out, depth);
+            apply_(out, depth);
         }
         return out;
     }
 
 private:
-    std::string key(bool avoid_reserved)
+    std::string key_(bool avoid_reserved)
     {
         // Most keys come from a tiny alphabet so that inserts collide and exercise replacement.
         const std::uint8_t b = r_.byte();
-        std::string k = b < 128U ? std::string(1, static_cast<char>('a' + b % 4U)) : r_.string(8);
+        std::string k = b < 128U ? std::string(1, static_cast<char>('a' + (b % 4U))) : r_.string(8);
         if (avoid_reserved)
         {
             k = fuzz::avoid_reserved_key(std::move(k), RESERVED_KEYS);
@@ -95,14 +95,14 @@ private:
         return k;
     }
 
-    void apply(built &out, unsigned depth)
+    void apply_(built &out, unsigned depth)
     {
         const unsigned op = static_cast<unsigned>(r_.byte()) % 6U;
         switch (op)
         {
         case 0:
         {
-            const std::string k = key(depth == 0);
+            const std::string k = key_(depth == 0);
             const std::string v = r_.string(16);
             all_utf8 = all_utf8 && fuzz::is_valid_utf8(v);
             out.f.insert(k, std::string_view{v});
@@ -111,7 +111,7 @@ private:
         }
         case 1:
         {
-            const std::string k = key(depth == 0);
+            const std::string k = key_(depth == 0);
             const unsigned width = static_cast<unsigned>(r_.byte()) % 8U;
             const auto bits = r_.value<std::uint64_t>();
             switch (width)
@@ -153,7 +153,7 @@ private:
         }
         case 2:
         {
-            const std::string k = key(depth == 0);
+            const std::string k = key_(depth == 0);
             const auto d = r_.value<double>();
             out.f.insert(k, d);
             out.m.put(k, std::isfinite(d) ? ojson(d) : ojson(nullptr));
@@ -161,7 +161,7 @@ private:
         }
         case 3:
         {
-            const std::string k = key(depth == 0);
+            const std::string k = key_(depth == 0);
             switch (r_.byte() % 4U)
             {
             case 0:
@@ -188,15 +188,15 @@ private:
         }
         case 4:
         {
-            const std::string k = key(depth == 0);
-            built nested = depth < MAX_DEPTH ? build(depth + 1, 4) : built{};
+            const std::string k = key_(depth == 0);
+            const built nested = depth < MAX_DEPTH ? build(depth + 1, 4) : built{};
             out.f.insert(k, nested.f);
             out.m.put(k, nested.m.to_json());
             break;
         }
         default:
         {
-            built other = build(depth, 3);
+            const built other = build(depth, 3);
             out.f.merge(other.f);
             out.m.merge(other.m);
             break;
@@ -234,14 +234,15 @@ void check_set(const built &b, bool utf8)
 
 } // namespace
 
+// NOLINTNEXTLINE(readability-identifier-naming): libFuzzer requires this name
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size)
 {
     fuzz::reader r(fuzz::as_text(data, size));
     builder b(r);
 
-    built a = b.build(0, 12); // bound to a child logger
-    built c = b.build(0, 6);  // bound to a grandchild
-    built d = b.build(0, 6);  // passed per call
+    const built a = b.build(0, 12); // bound to a child logger
+    const built c = b.build(0, 6);  // bound to a grandchild
+    const built d = b.build(0, 6);  // passed per call
     const bool with_message = (r.byte() & 1U) != 0;
     const std::string message = r.string(24);
     const bool utf8 = b.all_utf8 && fuzz::is_valid_utf8(message);
@@ -259,7 +260,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     }
 
     // 2. Bound context: with() merges, and the original logger does not change.
-    fuzz::harness h("t", fuzz::deterministic_options());
+    const fuzz::harness h("t", fuzz::deterministic_options());
     const jspdlog::json_logger child = h.logger.with(a.f);
     const jspdlog::json_logger grandchild = child.with(c.f);
     FUZZ_CHECK(h.logger.context().empty());

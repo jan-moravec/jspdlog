@@ -51,7 +51,7 @@ constexpr int REPEATS = 5;
 // The best of several repeats, after a warm-up, in nanoseconds per call.
 double measure(std::size_t iterations, const std::function<void()> &call)
 {
-    for (std::size_t i = 0; i < iterations / 10 + 1; ++i)
+    for (std::size_t i = 0; i < (iterations / 10) + 1; ++i)
     {
         call();
     }
@@ -93,6 +93,7 @@ jspdlog::fields bound_fields()
 
 } // namespace
 
+// NOLINTNEXTLINE(misc-const-correctness): main takes char **
 int main(int argc, char **argv)
 {
     std::size_t iterations = 200000;
@@ -137,7 +138,7 @@ int main(int argc, char **argv)
 
     // The common service case: bound context plus a few fields per call.
     {
-        jspdlog::json_logger root("bench", make_sink(), options_with(true, false));
+        const jspdlog::json_logger root("bench", make_sink(), options_with(true, false));
         const auto logger = root.with(bound_fields());
         run("jspdlog, 5 bound + 2 per-call fields",
             [&] { logger.info({"user", user, "status", 200}, "request {} handled in {} ms", 42, 7); });
@@ -145,7 +146,7 @@ int main(int argc, char **argv)
 
     // Per-call keys that are also bound: the quadratic path of the merge.
     {
-        jspdlog::json_logger root("bench", make_sink(), options_with(true, false));
+        const jspdlog::json_logger root("bench", make_sink(), options_with(true, false));
         const auto logger = root.with(bound_fields());
         run("jspdlog, 2 per-call fields overriding bound keys",
             [&] { logger.info({"region", "us", "env", "test"}, "request {} handled in {} ms", 42, 7); });
@@ -167,7 +168,7 @@ int main(int argc, char **argv)
 
     // Third-party code logging straight on the spdlog logger: the whole payload is escaped into the message.
     {
-        jspdlog::json_logger logger("bench", make_sink(), options_with(true, false));
+        const jspdlog::json_logger logger("bench", make_sink(), options_with(true, false));
         const auto &direct = logger.spdlog_logger();
         run("direct spdlog call through json_formatter", [&] { direct->info(text); });
     }
