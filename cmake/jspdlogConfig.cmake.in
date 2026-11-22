@@ -1,0 +1,24 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(spdlog CONFIG)
+
+# jspdlog is a single-header library, so the imported target is hand-rolled
+# here instead of going through install(EXPORT). This makes it work whether
+# spdlog was provided by find_package() or pulled via FetchContent at build
+# time.
+if(NOT TARGET jspdlog::jspdlog)
+    add_library(jspdlog::jspdlog INTERFACE IMPORTED)
+    set_target_properties(
+        jspdlog::jspdlog
+        PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@"
+            INTERFACE_LINK_LIBRARIES "spdlog::spdlog"
+            INTERFACE_COMPILE_FEATURES "cxx_std_17"
+            # {fmt} requires /utf-8 on MSVC. fmt and spdlog set it on their own targets, but their installed packages
+            # can lose it, so the installed jspdlog adds it too.
+            INTERFACE_COMPILE_OPTIONS "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/utf-8>"
+    )
+endif()
+
+check_required_components(jspdlog)

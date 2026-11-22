@@ -1,0 +1,265 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Cancel outdated PR runs. Push and tag runs always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pre-commit:
+    # Runs first so formatting and lint problems fail before the builds.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.x"
+
+      - name: Cache pre-commit environments
+        # The Python version is in the key, so a new runner Python gets fresh environments.
+        # The cache holds only lint tools, so it can't affect a release.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning]
+        with:
+          path: ~/.cache/pre-commit
+          key: >-
+            pre-commit-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{
+            hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            pre-commit-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-
+            pre-commit-${{ runner.os }}-
+
+      - name: Install pre-commit
+        run: pip install pre-commit==4.7.0
+
+      - name: Run pre-commit
+        run: pre-commit run --all-files --show-diff-on-failure --color=always
+
+  clang-ci:
+    # Clang 23 builds: ASan + UBSan, TSan, and coverage. The coverage leg also runs clang-tidy and uploads to Codecov.
+    needs: pre-commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write # clang-tidy PR comment
+      id-token: write # Codecov upload without a token
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [asan-ubsan, tsan, coverage]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Clang 23 + LLVM tools
+        # llvm.sh is kept in the repository so CI doesn't download and run a script. The presets name clang-23 directly.
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ci/llvm.sh
+          sudo ./scripts/ci/llvm.sh 23 all
+          clang-23 --version
+          clang-tidy-23 --version
+          llvm-cov-23 --version
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@a89e43e22a96abafcd7a62db652a65ecd33052c9 # v4.4.4
+
+      - name: Configure
+        run: cmake --preset "clang-$MODE"
+        env:
+          MODE: ${{ matrix.mode }}
+
+      - name: Build
+        run: cmake --build --preset "clang-$MODE"
+        env:
+          MODE: ${{ matrix.mode }}
+
+      - name: Run clang-tidy on PR changes
+        # Checks come from .clang-tidy. Findings go to a PR comment and the step summary; a later step fails the job.
+        if: matrix.mode == 'coverage'
+        id: cpp-linter
+        uses: cpp-linter/cpp-linter-action@774040af57f011a5fc47911f08ff0c3059d1835a # v2.24.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          version: "23"
+          style: ""
+          tidy-checks: ""
+          database: build/clang-coverage
+          extensions: cpp,hpp,h,cc
+          files-changed-only: true
+          lines-changed-only: true
+          tidy-review: false
+          thread-comments: true
+          step-summary: true
+
+      - name: Run tests
+        # The test preset sets the sanitizer and coverage environment.
+        run: ctest --preset "clang-$MODE"
+        env:
+          MODE: ${{ matrix.mode }}
+
+      - name: Merge coverage profiles + export lcov
+        if: matrix.mode == 'coverage'
+        run: scripts/ci/export-coverage.sh
+
+      - name: Upload coverage to Codecov
+        # Uses the Codecov GitHub App, no token. A failed upload fails the job instead of reporting zero coverage.
+        if: matrix.mode == 'coverage'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: ./coverage.lcov
+          fail_ci_if_error: true
+          verbose: true
+          use_oidc: true
+
+      - name: Fail on clang-tidy findings
+        # Last, so the tests and the coverage upload still run.
+        if: matrix.mode == 'coverage' && steps.cpp-linter.outputs.clang-tidy-checks-failed != '0'
+        env:
+          TIDY_FAILED: ${{ steps.cpp-linter.outputs.clang-tidy-checks-failed }}
+        run: |
+          echo "clang-tidy reported $TIDY_FAILED finding(s) on changed lines; see the step summary." >&2
+          exit 1
+
+  build-and-test:
+    # Release preset (warnings as errors) across compilers, C++17/20 and spdlog v1/v2.
+    needs: pre-commit
+    name: ${{ matrix.os }} / ${{ matrix.cxx }} / C++${{ matrix.std }} / spdlog ${{ matrix.spdlog || 'v2.x' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 ships gcc-11 and clang-15; ubuntu-latest (24.04) ships gcc-13 and clang-18.
+          - {os: ubuntu-22.04, cc: gcc-11, cxx: g++-11, std: 17}
+          - {os: ubuntu-22.04, cc: clang-15, cxx: clang++-15, std: 17}
+          - {os: ubuntu-latest, cc: gcc-13, cxx: g++-13, std: 20}
+          - {os: ubuntu-latest, cc: clang-18, cxx: clang++-18, std: 20}
+          - {os: macos-latest, cc: clang, cxx: clang++, std: 17}
+          - {os: macos-latest, cc: clang, cxx: clang++, std: 20}
+          # MSVC comes from the developer environment; cc/cxx are labels for the job name.
+          - {os: windows-latest, cc: msvc, cxx: msvc, std: 17}
+          - {os: windows-latest, cc: msvc, cxx: msvc, std: 20}
+          # spdlog v1.x: the oldest supported release and the current one.
+          - {os: ubuntu-22.04, cc: gcc-11, cxx: g++-11, std: 17, spdlog: v1.12.0}
+          - {os: ubuntu-latest, cc: clang-18, cxx: clang++-18, std: 20, spdlog: v1.17.0}
+          - {os: windows-latest, cc: msvc, cxx: msvc, std: 17, spdlog: v1.17.0}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CXX_STD: ${{ matrix.std }}
+      SPDLOG_TAG: ${{ matrix.spdlog }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install compiler (Ubuntu)
+        if: runner.os == 'Linux'
+        env:
+          CC_PKG: ${{ matrix.cc }}
+          CXX_PKG: ${{ matrix.cxx }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "$CC_PKG" "${CXX_PKG/clang++/clang}"
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@a89e43e22a96abafcd7a62db652a65ecd33052c9 # v4.4.4
+
+      - name: Set up MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Configure
+        env:
+          CC: ${{ runner.os != 'Windows' && matrix.cc || 'cl' }}
+          CXX: ${{ runner.os != 'Windows' && matrix.cxx || 'cl' }}
+        run: cmake --preset release -DCMAKE_CXX_STANDARD="$CXX_STD" ${SPDLOG_TAG:+-DJSPDLOG_SPDLOG_GIT_TAG=$SPDLOG_TAG}
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Test
+        run: ctest --preset release
+
+      - name: Run examples and check the output is JSON lines
+        run: |
+          set -euo pipefail
+          PY=python
+          if command -v python3 >/dev/null; then PY=python3; fi
+          for exe in build/release/example/example_0*; do
+            case "$exe" in *.pdb | *.ilk | *.manifest) continue ;; esac
+            [ -x "$exe" ] && [ -f "$exe" ] || continue
+            echo "::group::$exe"
+            "$exe" | tee example.out
+            "$PY" scripts/ci/check-json-lines.py example.out
+            echo "::endgroup::"
+          done
+
+  install-smoke:
+    needs: pre-commit
+    name: install + find_package consumer / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CC: ${{ matrix.os == 'windows-latest' && 'cl' || 'cc' }}
+      CXX: ${{ matrix.os == 'windows-latest' && 'cl' || 'c++' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@a89e43e22a96abafcd7a62db652a65ecd33052c9 # v4.4.4
+
+      - name: Set up MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Configure, build and install jspdlog
+        run: |
+          cmake --preset release -DJSPDLOG_BUILD_TESTS=OFF -DJSPDLOG_BUILD_EXAMPLES=OFF
+          cmake --build --preset release
+          cmake --install build/release --prefix "$RUNNER_TEMP/jspdlog-prefix"
+
+      - name: Build and run the install_smoke consumer
+        run: |-
+          cmake -S test/install_smoke -B build-smoke -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/jspdlog-prefix"
+          cmake --build build-smoke
+          ./build-smoke/jspdlog_install_smoke
