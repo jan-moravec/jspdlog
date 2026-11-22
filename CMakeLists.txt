@@ -19,8 +19,10 @@ endif()
 option(JSPDLOG_BUILD_TESTS "Build jspdlog unit tests" ${JSPDLOG_IS_TOP_LEVEL})
 option(JSPDLOG_BUILD_EXAMPLES "Build jspdlog examples" ${JSPDLOG_IS_TOP_LEVEL})
 option(JSPDLOG_INSTALL "Generate install rules for jspdlog" ${JSPDLOG_IS_TOP_LEVEL})
+option(JSPDLOG_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
+option(JSPDLOG_BUILD_BENCH "Build the benchmark program" OFF)
 option(JSPDLOG_WARNINGS_AS_ERRORS "Treat warnings in jspdlog's tests and examples as errors" OFF)
-# JSPDLOG_TEST_NLOHMANN_INTEROP is declared inside test/CMakeLists.txt so its
+# JSPDLOG_TEST_WITH_NLOHMANN is declared inside test/CMakeLists.txt so its
 # default tracks the live value of JSPDLOG_BUILD_TESTS across reconfigures
 # (option()'s first-seen default would otherwise stick).
 
@@ -108,7 +110,7 @@ if(JSPDLOG_INSTALL)
 endif()
 
 # --- Tests and examples -------------------------------------------------------
-if(JSPDLOG_BUILD_TESTS OR JSPDLOG_BUILD_EXAMPLES)
+if(JSPDLOG_BUILD_TESTS OR JSPDLOG_BUILD_EXAMPLES OR JSPDLOG_BUILD_BENCH)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CompilerWarnings.cmake)
 endif()
 
@@ -119,4 +121,8 @@ endif()
 
 if(JSPDLOG_BUILD_EXAMPLES)
     add_subdirectory(example)
+endif()
+
+if(JSPDLOG_BUILD_BENCH)
+    add_subdirectory(bench)
 endif()

@@ -1,0 +1,136 @@
+// Target 3: logger_line. Fuzzes everything a user configures: the logger name, every header key, the message key, the
+// time type, the line terminator and the message. Keys and names containing percent signs, quotes and control bytes
+// must never change the shape of the line.
+#include "fuzz_support.h"
+
+#include <set>
+
+namespace
+{
+
+using fuzz::ojson;
+
+struct header_key
+{
+    bool enabled = false;
+    std::string key;
+};
+
+} // namespace
+
+extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size)
+{
+    fuzz::reader r(fuzz::as_text(data, size));
+
+    const std::uint8_t flags = r.byte();
+    const std::uint8_t eol_choice = static_cast<std::uint8_t>(r.byte() % 3U);
+    const std::string name = r.string(16);
+
+    // Two equal keys would write a duplicate key, which is the caller's problem, so make them distinct.
+    std::set<std::string> used;
+    const auto next_key = [&](bool enabled) {
+        std::string key = r.string(8);
+        if (enabled)
+        {
+            while (!used.insert(key).second)
+            {
+                key += '~';
+            }
+        }
+        return header_key{enabled, std::move(key)};
+    };
+    const header_key timestamp = next_key((flags & 0x01U) != 0);
+    const header_key logger = next_key((flags & 0x02U) != 0);
+    const header_key level = next_key((flags & 0x04U) != 0);
+    const header_key process = next_key((flags & 0x08U) != 0);
+    const header_key thread = next_key((flags & 0x10U) != 0);
+    const header_key source = next_key((flags & 0x20U) != 0);
+    const header_key message_key = next_key(true);
+    const bool utc = (flags & 0x40U) != 0;
+    const std::string_view eol = eol_choice == 0 ? "" : (eol_choice == 1 ? "\n" : "\r\n");
+    const std::string message{r.rest()};
+
+    jspdlog::json_options options;
+    const auto optional_key = [](const header_key &k) {
+        return k.enabled ? std::optional<std::string>{k.key} : std::nullopt;
+    };
+    options.timestamp_key = optional_key(timestamp);
+    options.logger_key = optional_key(logger);
+    options.level_key = optional_key(level);
+    options.process_key = optional_key(process);
+    options.thread_key = optional_key(thread);
+    options.source_key = optional_key(source);
+    options.message_key = message_key.key;
+    options.time_type = utc ? spdlog::pattern_time_type::utc : spdlog::pattern_time_type::local;
+    options.eol = std::string{eol};
+
+    fuzz::harness h(name, options);
+    h.logger.info(message);
+
+    FUZZ_CHECK(h.sink->lines.size() == 1);
+    const std::string &line = h.sink->lines.front();
+
+    bool utf8 = fuzz::is_valid_utf8(name) && fuzz::is_valid_utf8(message);
+    for (const header_key *k : {&timestamp, &logger, &level, &process, &thread, &source, &message_key})
+    {
+        utf8 = utf8 && fuzz::is_valid_utf8(k->key);
+    }
+    if (!utf8)
+    {
+        // nlohmann cannot read invalid UTF-8; until a UTF-8 policy exists (ROADMAP 0.4) only the shape is checked.
+        fuzz::check_shape(line, eol);
+        return 0;
+    }
+
+    const ojson parsed = fuzz::parse_line(line, eol);
+
+    // Every enabled key is present, in the documented order, and nothing else is.
+    std::vector<std::string> expected_keys;
+    for (const header_key *k : {&timestamp, &logger, &level, &process, &thread, &source})
+    {
+        if (k->enabled)
+        {
+            expected_keys.push_back(k->key);
+        }
+    }
+    expected_keys.push_back(message_key.key);
+    FUZZ_CHECK(fuzz::keys_of(parsed) == expected_keys);
+
+    if (timestamp.enabled)
+    {
+        const auto &ts = parsed.at(timestamp.key);
+        FUZZ_CHECK(ts.is_string());
+        const std::string text = ts.get<std::string>();
+        FUZZ_CHECK(text.size() >= 20 && text[4] == '-' && text[7] == '-' && text[10] == 'T' && text[13] == ':');
+        if (utc)
+        {
+            FUZZ_CHECK(text.back() == 'Z');
+        }
+    }
+    if (logger.enabled)
+    {
+        FUZZ_CHECK(parsed.at(logger.key) == ojson(name));
+    }
+    if (level.enabled)
+    {
+        FUZZ_CHECK(parsed.at(level.key) == ojson("info"));
+    }
+    if (process.enabled)
+    {
+        FUZZ_CHECK(parsed.at(process.key).is_number_integer());
+    }
+    if (thread.enabled)
+    {
+        FUZZ_CHECK(parsed.at(thread.key).is_number_integer());
+    }
+    if (source.enabled)
+    {
+        const auto &src = parsed.at(source.key);
+        FUZZ_CHECK(src.is_object());
+        FUZZ_CHECK((fuzz::keys_of(src) == std::vector<std::string>{"file", "line", "function"}));
+        FUZZ_CHECK(src.at("file").get<std::string>().find_first_of("/\\") == std::string::npos);
+        FUZZ_CHECK(src.at("line").is_number_integer());
+    }
+    FUZZ_CHECK(parsed.at(message_key.key) == ojson(message));
+    return 0;
+}

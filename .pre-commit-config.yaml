@@ -1,3 +1,6 @@
+# Fuzz inputs are byte-exact; no hook may touch them.
+exclude: ^test/fuzz/(corpus|regressions)/
+
 repos:
 
   - repo: https://github.com/pre-commit/pre-commit-hooks

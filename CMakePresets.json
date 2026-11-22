@@ -38,6 +38,19 @@
             "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
         },
         {
+            "name": "bench",
+            "displayName": "Benchmark (Ninja)",
+            "description": "Release build of the benchmark program only, without tests or examples.",
+            "inherits": "_base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "JSPDLOG_BUILD_BENCH": "ON",
+                "JSPDLOG_BUILD_TESTS": "OFF",
+                "JSPDLOG_BUILD_EXAMPLES": "OFF",
+                "JSPDLOG_INSTALL": "OFF"
+            }
+        },
+        {
             "name": "_clang_ci_base",
             "hidden": true,
             "inherits": "_base",
@@ -69,6 +82,18 @@
             }
         },
         {
+            "name": "clang-fuzz",
+            "displayName": "Clang libFuzzer + AddressSanitizer + UndefinedBehaviorSanitizer",
+            "description": "Builds the libFuzzer targets under build/clang-fuzz/test/fuzz. The test preset replays the saved inputs only.",
+            "inherits": "_clang_ci_base",
+            "cacheVariables": {
+                "JSPDLOG_BUILD_FUZZERS": "ON",
+                "JSPDLOG_BUILD_EXAMPLES": "OFF",
+                "CMAKE_CXX_FLAGS": "-fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer",
+                "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+            }
+        },
+        {
             "name": "clang-coverage",
             "displayName": "Clang source-based coverage",
             "description": "Each test binary writes a .profraw under build/clang-coverage/profiles; scripts/ci/export-coverage.sh merges them into coverage.lcov.",
@@ -84,8 +109,10 @@
         { "name": "release", "configurePreset": "release" },
         { "name": "debug", "configurePreset": "debug" },
         { "name": "relwithdebinfo", "configurePreset": "relwithdebinfo" },
+        { "name": "bench", "configurePreset": "bench", "targets": ["jspdlog_bench"] },
         { "name": "clang-asan-ubsan", "configurePreset": "clang-asan-ubsan" },
         { "name": "clang-tsan", "configurePreset": "clang-tsan" },
+        { "name": "clang-fuzz", "configurePreset": "clang-fuzz" },
         { "name": "clang-coverage", "configurePreset": "clang-coverage" }
     ],
 
@@ -113,6 +140,16 @@
             "configurePreset": "clang-tsan",
             "inherits": "_test_base",
             "environment": { "TSAN_OPTIONS": "halt_on_error=1:second_deadlock_stack=1" }
+        },
+        {
+            "name": "clang-fuzz",
+            "configurePreset": "clang-fuzz",
+            "inherits": "_test_base",
+            "filter": { "include": { "label": "fuzz-replay" } },
+            "environment": {
+                "ASAN_OPTIONS": "detect_leaks=1:halt_on_error=1:abort_on_error=1:strict_string_checks=1:detect_stack_use_after_return=1",
+                "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1:abort_on_error=1"
+            }
         },
         {
             "name": "clang-coverage",
@@ -153,6 +190,14 @@
                 { "type": "configure", "name": "clang-tsan" },
                 { "type": "build", "name": "clang-tsan" },
                 { "type": "test", "name": "clang-tsan" }
+            ]
+        },
+        {
+            "name": "clang-fuzz",
+            "steps": [
+                { "type": "configure", "name": "clang-fuzz" },
+                { "type": "build", "name": "clang-fuzz" },
+                { "type": "test", "name": "clang-fuzz" }
             ]
         },
         {

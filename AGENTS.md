@@ -82,6 +82,9 @@ ctest --preset release -R json_options    # one Catch2 test case by name
   with the `debug` presets.
 - Memory or undefined-behavior-sensitive changes: `clang-asan-ubsan` (Linux).
 - Threading or async changes: `clang-tsan` (Linux).
+- Escaping, formatter or `fields` changes: also `cmake --workflow --preset clang-fuzz` (Linux), then run each target in
+  `test/fuzz` for 60 seconds as CONTRIBUTING.md describes. Add a minimized crash to `test/fuzz/regressions/<target>/`
+  and never edit files under `test/fuzz/corpus` or `test/fuzz/regressions` by hand: they are byte-exact.
 - Every change: `pre-commit run --all-files`.
 
 ## Common traps

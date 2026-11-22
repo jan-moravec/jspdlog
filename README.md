@@ -78,13 +78,15 @@ jspdlog is one header, [include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h), a
 With CMake, an installed spdlog of either major version is used if `find_package(spdlog CONFIG)` finds one. Otherwise
 spdlog is fetched at `JSPDLOG_SPDLOG_GIT_TAG` (default: a pinned v2.x commit; set for example `v1.17.0` for v1).
 
-| CMake option                    | Default            | Description                                                  |
-| ------------------------------- | ------------------ | ------------------------------------------------------------ |
-| `JSPDLOG_SPDLOG_GIT_TAG`        | pinned v2.x commit | spdlog tag or commit to fetch when none is installed.        |
-| `JSPDLOG_BUILD_TESTS`           | top-level only     | Build the Catch2 tests.                                      |
-| `JSPDLOG_BUILD_EXAMPLES`        | top-level only     | Build the programs in [example/](example).                   |
-| `JSPDLOG_INSTALL`               | top-level only     | Generate install rules for the header and the CMake package. |
-| `JSPDLOG_TEST_NLOHMANN_INTEROP` | `ON`               | Build the `raw_json` / nlohmann/json interop test.           |
+| CMake option                 | Default            | Description                                                       |
+| ---------------------------- | ------------------ | ----------------------------------------------------------------- |
+| `JSPDLOG_SPDLOG_GIT_TAG`     | pinned v2.x commit | spdlog tag or commit to fetch when none is installed.             |
+| `JSPDLOG_BUILD_TESTS`        | top-level only     | Build the Catch2 tests.                                           |
+| `JSPDLOG_BUILD_EXAMPLES`     | top-level only     | Build the programs in [example/](example).                        |
+| `JSPDLOG_INSTALL`            | top-level only     | Generate install rules for the header and the CMake package.      |
+| `JSPDLOG_TEST_WITH_NLOHMANN` | `ON`               | Build the tests that need nlohmann/json: interop and fuzz replay. |
+| `JSPDLOG_BUILD_FUZZERS`      | `OFF`              | Build the libFuzzer targets (Clang only).                         |
+| `JSPDLOG_BUILD_BENCH`        | `OFF`              | Build the benchmark program.                                      |
 
 ## Usage
 
@@ -496,6 +498,7 @@ valid JSON and strings are UTF-8. These can still produce invalid or surprising 
   that replaces the formatter (see [Working with spdlog](#working-with-spdlog));
 - field keys equal to a header key or the message key (duplicate keys);
 - bytes that are not valid UTF-8, which are passed through unchanged;
+- a `long double` beyond the range of `double`: it is a valid JSON number, but many parsers cannot read it;
 - a `json_logger` and a formatter installed from another module on one sink, where each module has its own copy of
   the header, such as Windows DLLs: the line stays valid JSON, but the fields appear inside the message;
 - a `spdlog::source_loc` whose file name is a temporary: the formatter caches the escaped name per pointer.

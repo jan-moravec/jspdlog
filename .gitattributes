@@ -17,3 +17,7 @@
 *.jpeg binary
 *.gif  binary
 *.pdf  binary
+
+# Fuzz seeds and crash reproducers are byte-exact inputs. A line-ending or EOF "fix" would change the input.
+test/fuzz/corpus/** -text
+test/fuzz/regressions/** -text

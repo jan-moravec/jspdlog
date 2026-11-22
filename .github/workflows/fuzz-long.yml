@@ -1,0 +1,43 @@
+name: fuzz-long
+
+# Deeper fuzzing than the pull request job: on demand with a chosen time, and weekly.
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Fuzzing time per target, in seconds
+        type: number
+        default: 1800
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    uses: ./.github/workflows/fuzz.yml
+    with:
+      seconds: ${{ inputs.seconds || 1800 }}
+
+  report:
+    # One issue per failed weekly run. The crashing input is in the run's artifacts; add it to
+    # test/fuzz/regressions/<target>/ with the fix.
+    needs: fuzz
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open an issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |-
+          gh issue create \
+            --title "Fuzz crash found by the weekly run" \
+            --body "A fuzz target failed. The reproducer is attached to the run: $RUN_URL" \
+            --label fuzzing
