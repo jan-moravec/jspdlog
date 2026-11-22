@@ -88,16 +88,6 @@
 #define JSPDLOG_ASSERT(cond, msg) assert((cond) && (msg))
 #endif
 
-/**
- * @brief Internal. The call site of a logging call, as a default argument evaluated where the call is written. It is
- * undefined at the end of this header.
- */
-#define JSPDLOG_DETAIL_HERE                                                                                            \
-    ::jspdlog::detail::site                                                                                            \
-    {                                                                                                                  \
-        __builtin_FILE(), __builtin_LINE(), __builtin_FUNCTION()                                                       \
-    }
-
 namespace jspdlog
 {
 
@@ -1021,9 +1011,23 @@ private:
     std::vector<std::string> keys_;
 };
 
-/** @brief A call site, filled in by default arguments at the caller. */
+/**
+ * @brief A call site, filled in by default arguments at the caller.
+ *
+ * The builtins are default arguments of a constructor that is not a template. GCC evaluates a builtin in the default
+ * argument of a function template where the template is written instead of where it is called, which a constructor
+ * default argument avoids.
+ */
 struct site
 {
+    /** @brief Captures the place where the site is default-constructed, which is the call of a logging function. */
+    explicit constexpr site(
+        const char *f = __builtin_FILE(), int l = __builtin_LINE(), const char *fn = __builtin_FUNCTION()
+    ) noexcept
+        : file(f), line(l), function(fn)
+    {
+    }
+
     /** @brief The source file, as the compiler spells it. */
     const char *file;
     /** @brief The line of the call. */
@@ -1081,25 +1085,34 @@ std::string_view message_view(const S &s) noexcept
  * is accepted and checked at run time.
  */
 template <typename... Args>
-struct basic_format_here
+class basic_format_here
 {
-    /** @brief The format string. */
-    spdlog::format_string_t<Args...> fmt;
-    /** @brief The call site. */
-    detail::site where;
-
+public:
     /** @brief Converts a string literal, capturing the call site of the logging function. */
     template <typename S, std::enable_if_t<std::is_convertible_v<const S &, spdlog::fmt_lib::string_view>, int> = 0>
-    FMT_CONSTEVAL basic_format_here(const S &s, detail::site w = JSPDLOG_DETAIL_HERE)
-        : fmt(s), where(w)
+    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor): a literal must convert
+    FMT_CONSTEVAL basic_format_here(const S &s, detail::site w = detail::site())
+        : fmt_(s), where_(w)
     {
     }
 
     /** @brief Converts fmt::runtime(...), capturing the call site of the logging function. */
-    basic_format_here(detail::runtime_format_string r, detail::site w = JSPDLOG_DETAIL_HERE)
-        : fmt(r), where(w)
+    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor): fmt::runtime must convert
+    basic_format_here(detail::runtime_format_string r, detail::site w = detail::site())
+        : fmt_(r), where_(w)
     {
     }
+
+    /** @brief The format string. */
+    [[nodiscard]] spdlog::format_string_t<Args...> format() const noexcept { return fmt_; }
+    /** @brief The call site. */
+    [[nodiscard]] detail::site where() const noexcept { return where_; }
+
+private:
+    /** @brief The format string. */
+    spdlog::format_string_t<Args...> fmt_;
+    /** @brief The call site. */
+    detail::site where_;
 };
 
 /** @brief The format-string parameter of a logging function, whose arguments are deduced from the other parameters. */
@@ -1217,7 +1230,7 @@ public:
     [[nodiscard]] const fields &context() const noexcept { return context_->values; }
 
     /** @brief Writes a line with fields only, without a message. */
-    void log(level lvl, const fields &f, detail::site where = JSPDLOG_DETAIL_HERE) const { log_fields_(lvl, f, where); }
+    void log(level lvl, const fields &f, detail::site where = detail::site()) const { log_fields_(lvl, f, where); }
 
     /** @brief Writes a formatted message. The format string is checked at compile time. */
     template <typename... Args>
@@ -1228,7 +1241,7 @@ public:
 
     /** @brief Writes a runtime string as the message. */
     template <typename S, detail::if_runtime_string<S> = 0>
-    void log(level lvl, const S &msg, detail::site where = JSPDLOG_DETAIL_HERE) const
+    void log(level lvl, const S &msg, detail::site where = detail::site()) const
     {
         log_str_(lvl, empty_fields_(), detail::message_view(msg), where);
     }
@@ -1242,7 +1255,7 @@ public:
 
     /** @brief Writes fields and a runtime string as the message. */
     template <typename S, detail::if_runtime_string<S> = 0>
-    void log(level lvl, const fields &f, const S &msg, detail::site where = JSPDLOG_DETAIL_HERE) const
+    void log(level lvl, const fields &f, const S &msg, detail::site where = detail::site()) const
     {
         log_str_(lvl, f, detail::message_view(msg), where);
     }
@@ -1259,11 +1272,11 @@ public:
         log_fmt_(lvl, empty_fields_(), fmt, std::forward<Args>(args)...);                                              \
     }                                                                                                                  \
     template <typename S, detail::if_runtime_string<S> = 0>                                                            \
-    void name(const S &msg, detail::site where = JSPDLOG_DETAIL_HERE) const                                            \
+    void name(const S &msg, detail::site where = detail::site()) const                                                 \
     {                                                                                                                  \
         log_str_(lvl, empty_fields_(), detail::message_view(msg), where);                                              \
     }                                                                                                                  \
-    void name(const fields &f, detail::site where = JSPDLOG_DETAIL_HERE) const                                         \
+    void name(const fields &f, detail::site where = detail::site()) const                                              \
     {                                                                                                                  \
         log_fields_(lvl, f, where);                                                                                    \
     }                                                                                                                  \
@@ -1273,7 +1286,7 @@ public:
         log_fmt_(lvl, f, fmt, std::forward<Args>(args)...);                                                            \
     }                                                                                                                  \
     template <typename S, detail::if_runtime_string<S> = 0>                                                            \
-    void name(const fields &f, const S &msg, detail::site where = JSPDLOG_DETAIL_HERE) const                           \
+    void name(const fields &f, const S &msg, detail::site where = detail::site()) const                                \
     {                                                                                                                  \
         log_str_(lvl, f, detail::message_view(msg), where);                                                            \
     }                                                                                                                  \
@@ -1410,9 +1423,9 @@ private:
     {
         if (should_log(lvl))
         {
-            emit_(lvl, f, fmt.where, detail::KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
+            emit_(lvl, f, fmt.where(), detail::KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
                 spdlog::memory_buf_t msg;
-                spdlog::fmt_lib::format_to(std::back_inserter(msg), fmt.fmt, std::forward<Args>(args)...);
+                spdlog::fmt_lib::format_to(std::back_inserter(msg), fmt.format(), std::forward<Args>(args)...);
                 append_message_(out, msg);
             });
         }
@@ -1493,5 +1506,3 @@ private:
 };
 
 } // namespace jspdlog
-
-#undef JSPDLOG_DETAIL_HERE

@@ -15,10 +15,10 @@ void charge_card(const jspdlog::json_logger &log)
 int main()
 {
     jspdlog::json_options options;
-    options.source_key = "source";
+    options.source_key.emplace("source");
     const jspdlog::json_logger logger("pay", std::make_shared<spdlog::sinks::stdout_color_sink_mt>(), options);
 
-    // {"timestamp":...,"logger":"pay","level":"info",...,"source":{"file":"08_source_location.cpp","line":10,
+    // {"timestamp":...,"logger":"pay","level":"info",...,"source":{"file":"08_source_location.cpp","line":11,
     //  "function":"charge_card"},"amount":12.5,"message":"charging"}
     charge_card(logger);
     return 0;
