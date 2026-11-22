@@ -18,7 +18,7 @@ with spdlog **v1.x (1.12 or newer)** and **v2.x**.
 
 - **No macros, no globals.** Loggers are plain objects that you create and pass around.
 - **Typed fields.** Numbers and booleans stay numbers and booleans, so log tools can filter on them.
-- **Context for inner code.** `with_properties()` gives a child logger that adds fields to every line it writes.
+- **Context for inner code.** `with()` gives a child logger that adds fields to every line it writes.
 - **Always valid JSON** for lines written through jspdlog: messages, keys, values and logger names are escaped.
 
 ## Contents
@@ -45,7 +45,7 @@ int main()
     logger.warn({"queue_depth", 42, "ok", true}, "slow path hit");
 
     // A child logger with bound fields. The parent is not changed.
-    auto request = logger.with_properties({"request_id", "abc-123"});
+    auto request = logger.with({"request_id", "abc-123"});
     request.info("request started");
 }
 ```
@@ -98,25 +98,32 @@ same forms with the level as data:
 
 ```cpp
 logger.info("loaded {} items", n);    // formatted message, checked at compile time
-logger.info(text);                    // any {fmt}-formattable value as the message
+logger.info(text);                    // a std::string, std::string_view or const char* as the message
 logger.info({"items", n});            // fields only, no message
 logger.info({"items", n}, "loaded");  // fields and a formatted message
-logger.info({"items", n}, text);      // fields and a value as the message
+logger.info({"items", n}, text);      // fields and a runtime string as the message
 logger.log(jspdlog::level::warn, "disk {}% full", pct);
 ```
 
-The message is always a JSON string: `info(42)` writes `"message":"42"`. Values that should keep their type belong in
-fields: `info({"value", 42})` writes `"value":42`.
+The message is always a JSON string. A string literal is a format string, checked at compile time; a `std::string`,
+`std::string_view` or `const char*` variable is written as it is, without interpreting braces. A single argument that
+is not a string, such as `info(42)`, does not compile: values that should keep their type belong in fields,
+`info({"value", 42})` writes `"value":42`. Other string types (`std::pmr::string`, `QString`, a `fmt::memory_buffer`)
+are converted by the caller, for example `info(fmt::to_string(buf))`. `fmt::runtime(s)` works with arguments.
+
+Every call also records its file, line and function. They are written when `json_options::source_key` is set, as
+`"source":{"file":"main.cpp","line":12,"function":"handle"}`. The function is the short name your compiler gives, so it
+can differ between compilers. No macro is needed: [08_source_location.cpp](example/08_source_location.cpp).
 
 Example: [01_console.cpp](example/01_console.cpp).
 
 ### Fields
 
-Fields are a `jspdlog::json_properties`, usually written as a braced list of keys and values:
+Fields are a `jspdlog::fields`, usually written as a braced list of keys and values:
 
 ```cpp
 logger.info({"user_id", 42, "admin", false, "ratio", 0.25, "name", "ada"}, "login");
-// ...,"admin":false,"name":"ada","ratio":0.25,"user_id":42,"message":"login"}
+// ...,"user_id":42,"admin":false,"ratio":0.25,"name":"ada","message":"login"}
 ```
 
 | Value type                                       | JSON                                             |
@@ -127,34 +134,41 @@ logger.info({"user_id", 42, "admin", false, "ratio", 0.25, "name", "ada"}, "logi
 | integers, including `int8_t` / `uint8_t`         | number                                           |
 | `float`, `double`, `long double`                 | number; `2.0` keeps `.0`; NaN and Inf are `null` |
 | `std::nullptr_t`                                 | `null`                                           |
-| `json_properties`                                | nested object                                    |
+| `jspdlog::fields`                                | nested object                                    |
 | `jspdlog::raw_json{"..."}`                       | inserted as is (an empty string is `null`)       |
 
-- Keys are written sorted byte by byte, which is alphabetical for ASCII keys.
-- Inserting a key that exists replaces its value. When sets are merged, the right-hand side wins.
+- Keys are written in the order they were first inserted. Inserting a key that exists replaces its value and keeps its
+  position. When sets are merged, the right-hand side wins.
+- Lines read: header, fields of outer loggers, fields of inner loggers, fields of the call, message. A key that appears
+  again keeps its first position, so `with({"step", "a"})` followed by `info({"step", "b"})` writes `step` once, where
+  the logger's field was.
+- Fields are meant to be small (a handful of keys); lookups scan the keys.
 - Wide characters and pointers other than `const char*` don't compile.
-- A key equal to a header key (`timestamp`, `level`, ...) or to `message` produces a duplicate key. Avoid them.
+- A key equal to a header key (`timestamp`, `level`, ...), to the source key or to `message` produces a duplicate key.
+  Avoid them. Debug builds check this through `JSPDLOG_ASSERT`, which defaults to `assert`; define it before including
+  jspdlog to use your own handler. Release builds do not check.
 - Values are serialized when the list is built, before the level check. Guard expensive fields:
   `if (logger.should_log(jspdlog::level::debug)) { ... }`.
 
 ### Context: child loggers
 
-`with_properties()` returns a copy of the logger that adds fields to every line it writes. This is how inner code adds
+`with()` returns a copy of the logger that adds fields to every line it writes. This is how inner code adds
 context without changing its caller's logger:
 
 ```cpp
 void handle(const jspdlog::json_logger &log, const request &req)
 {
-    const auto req_log = log.with_properties({"request_id", req.id, "user_id", req.user});
+    const auto req_log = log.with({"request_id", req.id, "user_id", req.user});
     req_log.info("started");
     process(req_log, req);  // everything inside carries request_id and user_id
 }
 ```
 
-Copies are cheap and share the underlying `spdlog::logger`, so the level, sinks and error handler are shared. The bound
-fields belong to each copy. The logging calls are `const`, so pass loggers as `const jspdlog::json_logger &`.
+Copies are cheap (two pointers) and share the underlying `spdlog::logger`, so the level, sinks and error handler are
+shared. The bound fields are immutable and shared too, which makes logging through copies and children from several
+threads safe. `context()` returns them. The logging calls are `const`, so pass loggers as `const jspdlog::json_logger &`.
 
-Example: [03_properties.cpp](example/03_properties.cpp).
+Example: [03_fields.cpp](example/03_fields.cpp).
 
 ### Arrays and objects from a JSON library
 
@@ -340,7 +354,7 @@ stderr is collected together with your JSON logs, install a handler that writes 
 
 ```cpp
 logger.spdlog_logger()->set_error_handler([](const std::string &msg) {
-    const jspdlog::json_properties line{"level", "error", "logger", "spdlog", "message", msg};
+    const jspdlog::fields line{"level", "error", "logger", "spdlog", "message", msg};
     std::fputs((line.to_json() + "\n").c_str(), stderr);
 });
 ```
@@ -389,7 +403,7 @@ json_logger, the options of the last call apply to that sink.
 | `SPDLOG_NO_EXCEPTIONS`  | Not supported; jspdlog's constructors throw on a null sink or logger.              |
 
 spdlog's MDC (the `%&` flag, spdlog 1.13+) is thread-local global state and is not included in jspdlog's lines. Use
-`with_properties()` instead.
+`with()` instead.
 
 ## API reference
 
@@ -411,14 +425,15 @@ public:
     static json_logger adopt(std::shared_ptr<spdlog::logger> logger, const json_options &options = {});
 
     // trace, debug, info, warn, error, critical: five forms each, all const. log(level, ...) takes the same forms.
-    void info(spdlog::format_string_t<Args...> fmt, Args &&...args) const;
-    void info(const T &value) const;
-    void info(const json_properties &props) const;
-    void info(const json_properties &props, spdlog::format_string_t<Args...> fmt, Args &&...args) const;
-    void info(const json_properties &props, const T &value) const;
+    // Each also takes the call site as a trailing default argument, which you never write.
+    void info(format_here_t<Args...> fmt, Args &&...args) const;   // a string literal, or fmt::runtime(...)
+    void info(const S &msg) const;                                  // S: std::string, std::string_view, const char*
+    void info(const fields &f) const;
+    void info(const fields &f, format_here_t<Args...> fmt, Args &&...args) const;
+    void info(const fields &f, const S &msg) const;
 
-    json_logger with_properties(json_properties props) const;  // new values win on collisions
-    const json_properties &properties() const noexcept;
+    json_logger with(const fields &f) const;  // new values win on collisions; keys keep their position
+    const fields &context() const noexcept;
 
     // Pass through to the shared spdlog::logger.
     const std::string &name() const noexcept;
@@ -442,16 +457,17 @@ struct json_options {
     std::optional<std::string> eol;  // nullopt: spdlog's default
 };
 
-class json_properties {
+class fields {
 public:
-    json_properties(K &&key, V &&value, Rest &&...rest);  // key, value, key, value, ...
-    void insert(std::string key, V value);
-    void merge(json_properties other);  // other wins on collisions
-    friend json_properties operator+(json_properties a, json_properties b);
+    fields(K &&key, V &&value, Rest &&...rest);  // key, value, key, value, ...
+    void insert(std::string_view key, V value);
+    void merge(const fields &other);  // other wins on collisions
+    friend fields operator+(fields a, const fields &b);
     bool empty() const;
     std::size_t size() const;
+    bool contains(std::string_view key) const;
     void clear();
-    std::string to_json() const;  // {"key":value,...}
+    std::string to_json() const;  // {"key":value,...} in insertion order
 };
 
 struct raw_json { std::string value; };

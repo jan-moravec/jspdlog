@@ -33,7 +33,14 @@ if(JSPDLOG_TEST_NLOHMANN_INTEROP)
     endif()
 endif()
 
-add_executable(jspdlog_tests test_formatter.cpp test_json_logger.cpp test_json_properties.cpp test_spdlog_interop.cpp)
+add_executable(
+    jspdlog_tests
+    test_formatter.cpp
+    test_json_logger.cpp
+    test_fields.cpp
+    test_source_location.cpp
+    test_spdlog_interop.cpp
+)
 target_link_libraries(jspdlog_tests PRIVATE jspdlog::jspdlog Catch2::Catch2WithMain)
 # Lets a test check that the header's version macros match project(VERSION).
 target_compile_definitions(jspdlog_tests PRIVATE JSPDLOG_TEST_PROJECT_VERSION="${PROJECT_VERSION}")
@@ -45,6 +52,23 @@ endif()
 jspdlog_set_warnings(jspdlog_tests)
 
 catch_discover_tests(jspdlog_tests)
+
+# Defines its own JSPDLOG_ASSERT, so it is its own executable.
+add_executable(jspdlog_assert_tests test_assert.cpp)
+target_link_libraries(jspdlog_assert_tests PRIVATE jspdlog::jspdlog Catch2::Catch2WithMain)
+jspdlog_set_warnings(jspdlog_assert_tests)
+catch_discover_tests(jspdlog_assert_tests)
+
+# Code that must not compile: each file is a target excluded from the build, and the test builds it and expects failure.
+foreach(case info_int info_vector odd_fields fields_int)
+    add_executable(compile_fail_${case} EXCLUDE_FROM_ALL compile_fail/${case}.cpp)
+    target_link_libraries(compile_fail_${case} PRIVATE jspdlog::jspdlog)
+    add_test(
+        NAME compile_fail.${case}
+        COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target compile_fail_${case}
+    )
+    set_tests_properties(compile_fail.${case} PROPERTIES WILL_FAIL TRUE)
+endforeach()
 
 if(JSPDLOG_TEST_NLOHMANN_INTEROP)
     add_executable(jspdlog_nlohmann_interop_test test_nlohmann_interop.cpp)

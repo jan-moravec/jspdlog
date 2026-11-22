@@ -24,10 +24,7 @@ TEST_CASE("raw_json: nlohmann arrays and objects round-trip into the log line", 
     const nlohmann::json features = {{"streaming", true}, {"limit", 10}};
 
     logger.info(
-        jspdlog::json_properties{
-            "items", jspdlog::raw_json{items.dump()}, "features", jspdlog::raw_json{features.dump()}
-        },
-        "ok"
+        jspdlog::fields{"items", jspdlog::raw_json{items.dump()}, "features", jspdlog::raw_json{features.dump()}}, "ok"
     );
 
     const std::string out = oss.str();
@@ -66,7 +63,7 @@ TEST_CASE("raw_json: pathological inputs still produce parseable JSON", "[intero
 
     const double nan = std::numeric_limits<double>::quiet_NaN();
     logger.info(
-        jspdlog::json_properties{
+        jspdlog::fields{
             "empty_payload",
             jspdlog::raw_json{""},
             "nan_value",

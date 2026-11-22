@@ -1,4 +1,4 @@
-// Bound properties on parent + per-call extras.
+// Bound fields on a parent logger, plus per-call extras. Fields keep the order they were first written in.
 
 #include <jspdlog/jspdlog.h>
 
@@ -8,9 +8,8 @@ int main()
 {
     const jspdlog::json_logger root("svc", std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
 
-    // with_properties() returns a child logger that shares the underlying
-    // spdlog logger and sinks, but carries an extra set of bound properties.
-    const auto request_logger = root.with_properties({"request_id", "abc-123", "user_id", 42});
+    // with() returns a child logger that shares the underlying spdlog logger and sinks, but carries bound fields.
+    const auto request_logger = root.with({"request_id", "abc-123", "user_id", 42});
 
     request_logger.info("request started");
     request_logger.warn({"latency_ms", 312}, "slow path hit");

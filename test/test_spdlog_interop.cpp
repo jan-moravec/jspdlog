@@ -100,8 +100,8 @@ TEST_CASE("interop: two json_loggers adopting one spdlog::logger both keep their
 {
     const test_support::fixture f;
     const auto shared = f.logger.spdlog_logger();
-    const auto a = jspdlog::json_logger::adopt(shared, deterministic_options()).with_properties({"a", 1});
-    const auto b = jspdlog::json_logger::adopt(shared, deterministic_options()).with_properties({"b", 2});
+    const auto a = jspdlog::json_logger::adopt(shared, deterministic_options()).with({"a", 1});
+    const auto b = jspdlog::json_logger::adopt(shared, deterministic_options()).with({"b", 2});
 
     a.info("x");
     CHECK(f.last() == R"({"logger":"t","level":"info","a":1,"message":"x"})");
@@ -250,12 +250,10 @@ TEST_CASE("interop: formatting errors go to the spdlog error handler", "[interop
     f.logger.spdlog_logger()->set_error_handler([&errors](const std::string &msg) { errors.push_back(msg); });
 
     CHECK_NOTHROW(f.logger.info("value {}", throws_when_formatted{}));
-    CHECK_NOTHROW(f.logger.info(throws_when_formatted{}));
     CHECK_NOTHROW(f.logger.info({"k", 1}, "value {}", throws_when_formatted{}));
-    CHECK_NOTHROW(f.logger.info({"k", 1}, throws_when_formatted{}));
 
     CHECK(f.sink->lines.empty());
-    REQUIRE(errors.size() == 4);
+    REQUIRE(errors.size() == 2);
     for (const auto &e : errors)
     {
         CHECK(e.find("formatter failed") != std::string::npos);
