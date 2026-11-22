@@ -26,10 +26,10 @@ it.
 /**
  * @brief Typed key/value fields for a log line, serialized when they are inserted.
  *
- * Pass them per call, usually as a braced list, or bind them to a child logger with json_logger::with_properties.
+ * Pass them per call, usually as a braced list, or bind them to a child logger with json_logger::with.
  * Values keep their JSON type, so numbers and booleans stay filterable as such.
  */
-class json_properties
+class fields
 ```
 
 ## Naming and style

@@ -31,7 +31,7 @@ These decide every feature below.
    or global thread pool, and has no mutable static variables of its own. Everything
    hangs off a logger object that the application owns.
 1. **Context is explicit.** Inner code receives a logger and derives a child
-   with more properties. There is no thread-local MDC.
+   with more fields. There is no thread-local MDC.
 1. **Every line is valid JSON**, whatever is passed in, including messages
    that reach the underlying spdlog logger without going through jspdlog.
 1. **Nothing happens when a level is off.** Level checks come before any
@@ -139,27 +139,26 @@ Milestones are development stages on `main`, not releases. The first tag is
 - [x] Sinks that write the raw message (`callback_sink`, `mongo_sink`,
   `kafka_sink`, syslog and systemd without formatting): a documented route
   per sink, no stripping helper (decision 8).
-- Source location without macros (C++17 builtins, C++20 consteval wrapper).
+- [x] Source location without macros (C++17 builtins as default arguments).
   The call site is always captured; it is written only when `source_key` is
   set (**off by default**), as `"source":{"file","line","function"}` with the
-  file's base name. The formatter already writes `msg.source` with the base
-  name; capture in `json_logger` calls is still to do.
+  file's base name.
 - [x] `message_key` option.
-- Renames: `json_properties` → `jspdlog::fields`, `with_properties()` →
-  `with()`.
-- `fields` keep **insertion order**, stored flat (vector of pre-serialized
+- [x] Renames: `json_properties` → `jspdlog::fields`, `with_properties()` →
+  `with()`, `properties()` → `context()`.
+- [x] `fields` keep **insertion order**, stored flat (vector of pre-serialized
   `,"k":v` entries); a replaced key keeps its position. Lines read outer
   context, inner context, per-call fields, message. *Breaking: today's output
   is sorted by key.*
-- Child loggers share an immutable, pre-serialized context through a
+- [x] Child loggers share an immutable, pre-serialized context through a
   `shared_ptr` instead of copying it.
 - [x] Single options struct for the formatter and the logger.
 - Fuzzing infrastructure and targets 1 to 4 and 6 (section 6), with a CI
   fuzz job.
-- `info(value)` accepts runtime strings only (`std::string`,
-  `std::string_view`, `const char*`); string literals still go to the
+- [x] `info(value)` accepts runtime strings only (`std::string`,
+  `std::string_view`, `const char*`, writable `char` buffers); string literals still go to the
   compile-time-checked format overload. Typed values belong in fields.
-- **Duplicate keys are the caller's responsibility.** Debug builds check that
+- [x] **Duplicate keys are the caller's responsibility.** Debug builds check that
   no field key equals an enabled header key, the message key or the source
   key, via an overridable `JSPDLOG_ASSERT` (defaults to `assert`). Bound
   context is checked once in `with()`, per-call fields on each call. Release

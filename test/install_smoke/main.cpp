@@ -14,7 +14,7 @@ int main()
     try
     {
         const jspdlog::json_logger logger("install_smoke", std::make_shared<spdlog::sinks::null_sink_mt>());
-        logger.info(jspdlog::json_properties{"ok", true}, "hello {}", "world");
+        logger.info(jspdlog::fields{"ok", true}, "hello {}", "world");
         return 0;
     }
     catch (const std::exception &e)

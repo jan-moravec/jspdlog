@@ -1,5 +1,5 @@
 // Async logging. Formatting happens on spdlog's worker thread; jspdlog has
-// already serialized the properties into the message payload, so nothing
+// already serialized the fields into the message payload, so nothing
 // captured by reference can dangle.
 
 #include <jspdlog/jspdlog.h>

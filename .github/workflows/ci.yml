@@ -110,6 +110,8 @@ jobs:
           tidy-checks: ""
           database: build/clang-coverage
           extensions: cpp,hpp,h,cc
+          # These files must not compile, so clang-tidy cannot analyze them.
+          ignore: ".github|test/compile_fail"
           files-changed-only: true
           lines-changed-only: true
           tidy-review: false

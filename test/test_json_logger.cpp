@@ -10,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using test_support::fixture;
@@ -38,8 +39,8 @@ TEST_CASE("json_logger: the five call shapes", "[json_logger]")
     f.logger.warn("{} + {}", 1, 2);
     CHECK(f.last() == R"({"logger":"t","level":"warning","message":"1 + 2"})");
 
-    f.logger.debug(1.5);
-    CHECK(f.last() == R"({"logger":"t","level":"debug","message":"1.5"})");
+    f.logger.debug(std::string{"runtime"});
+    CHECK(f.last() == R"({"logger":"t","level":"debug","message":"runtime"})");
 
     f.logger.trace({"k", 1});
     CHECK(f.last() == R"({"logger":"t","level":"trace","k":1})");
@@ -51,16 +52,37 @@ TEST_CASE("json_logger: the five call shapes", "[json_logger]")
     CHECK(f.last() == R"({"logger":"t","level":"critical","k":2,"message":"value form"})");
 }
 
-TEST_CASE("json_logger: values in the message slot are always strings", "[json_logger]")
+TEST_CASE("json_logger: runtime strings are messages, typed values are not", "[json_logger]")
 {
     fixture f;
-    f.logger.info(true);
-    CHECK(f.last() == R"({"logger":"t","level":"info","message":"true"})");
-    f.logger.info(42);
-    CHECK(f.last() == R"({"logger":"t","level":"info","message":"42"})");
     const char *c_string = "runtime";
     f.logger.info(c_string);
     CHECK(f.last() == R"({"logger":"t","level":"info","message":"runtime"})");
+    f.logger.info(std::string_view{"view {}"});
+    CHECK(f.last() == R"({"logger":"t","level":"info","message":"view {}"})");
+    f.logger.info(static_cast<const char *>(nullptr));
+    CHECK(f.last() == R"({"logger":"t","level":"info","message":""})");
+    f.logger.info({"k", 1}, std::string{"braces {} stay"});
+    CHECK(f.last() == R"({"logger":"t","level":"info","k":1,"message":"braces {} stay"})");
+    f.logger.info(spdlog::fmt_lib::runtime("{} and {}"), 1, 2);
+    CHECK(f.last() == R"({"logger":"t","level":"info","message":"1 and 2"})");
+}
+
+TEST_CASE("json_logger: a writable char buffer is a runtime string", "[json_logger]")
+{
+    fixture f;
+    // Must stay writable: a const char array would be a format string.
+    // NOLINTNEXTLINE(misc-const-correctness)
+    char buffer[32] = "filled {} at run time";
+    f.logger.info(buffer);
+    CHECK(f.last() == R"({"logger":"t","level":"info","message":"filled {} at run time"})");
+    f.logger.info({"k", 1}, buffer);
+    CHECK(f.last() == R"({"logger":"t","level":"info","k":1,"message":"filled {} at run time"})");
+
+    // NOLINTNEXTLINE(misc-const-correctness)
+    char unterminated[3] = {'a', 'b', 'c'};
+    f.logger.warn(unterminated);
+    CHECK(f.last() == R"({"logger":"t","level":"warning","message":"abc"})");
 }
 
 TEST_CASE("json_logger: log(level, ...) takes the level at runtime", "[json_logger]")
@@ -140,35 +162,47 @@ TEST_CASE("json_logger: logger names cannot break the pattern", "[json_logger]")
     }
 }
 
-TEST_CASE("json_logger: with_properties", "[json_logger]")
+TEST_CASE("json_logger: with", "[json_logger]")
 {
     fixture f;
-    auto child = f.logger.with_properties({"request_id", "abc", "user", 1});
+    auto child = f.logger.with({"request_id", "abc", "user", 1});
 
-    SECTION("child carries the bound properties, parent does not")
+    SECTION("child carries the bound fields, parent does not")
     {
         child.info("in child");
         CHECK(f.last() == R"({"logger":"t","level":"info","request_id":"abc","user":1,"message":"in child"})");
         f.logger.info("in parent");
         CHECK(f.last() == R"({"logger":"t","level":"info","message":"in parent"})");
-        CHECK(child.properties().size() == 2);
-        CHECK(f.logger.properties().empty());
+        CHECK(child.context().size() == 2);
+        CHECK(f.logger.context().empty());
     }
-    SECTION("properties-only call on a child")
+    SECTION("fields-only call on a child")
     {
-        child.info(jspdlog::json_properties{});
+        child.info(jspdlog::fields{});
         CHECK(f.last() == R"({"logger":"t","level":"info","request_id":"abc","user":1})");
     }
-    SECTION("per-call properties merge with, and override, bound ones")
+    SECTION("per-call fields merge with, and override, bound ones")
     {
         child.info({"user", 2, "a", true}, "merged");
-        CHECK(f.last() == R"({"logger":"t","level":"info","a":true,"request_id":"abc","user":2,"message":"merged"})");
+        CHECK(f.last() == R"({"logger":"t","level":"info","request_id":"abc","user":2,"a":true,"message":"merged"})");
     }
-    SECTION("nested with_properties: newer values win")
+    SECTION("a per-call field that replaces a bound one keeps the bound position")
     {
-        const auto grandchild = child.with_properties({"user", 3});
+        child.info({"extra", 1, "user", 9}, "x");
+        CHECK(f.last() == R"({"logger":"t","level":"info","request_id":"abc","user":9,"extra":1,"message":"x"})");
+    }
+    SECTION("nested with: newer values win")
+    {
+        const auto grandchild = child.with({"user", 3});
         grandchild.info("x");
         CHECK(f.last() == R"({"logger":"t","level":"info","request_id":"abc","user":3,"message":"x"})");
+    }
+    SECTION("a replaced key keeps its position in the child")
+    {
+        const auto grandchild = child.with({"new", true, "request_id", "r2"});
+        grandchild.info("x");
+        CHECK(f.last() == R"({"logger":"t","level":"info","request_id":"r2","user":1,"new":true,"message":"x"})");
+        CHECK(grandchild.context().size() == 3);
     }
     SECTION("children share the spdlog logger")
     {
@@ -210,9 +244,9 @@ TEST_CASE("json_options: header fields can be renamed and omitted", "[json_optio
         CHECK(f.last() == R"({"message":"hi"})");
         f.logger.info({"k", 1});
         CHECK(f.last() == R"({"k":1})");
-        f.logger.info(jspdlog::json_properties{});
+        f.logger.info(jspdlog::fields{});
         CHECK(f.last() == "{}");
-        f.logger.with_properties({"b", 2}).info("x");
+        f.logger.with({"b", 2}).info("x");
         CHECK(f.last() == R"({"b":2,"message":"x"})");
     }
 }
@@ -282,4 +316,15 @@ TEST_CASE("json_logger: construction", "[json_logger]")
     {
         CHECK_THROWS_AS(jspdlog::json_logger::adopt(nullptr), std::invalid_argument);
     }
+}
+
+TEST_CASE("json_logger: copies are small and share their context", "[json_logger]")
+{
+    STATIC_CHECK(sizeof(jspdlog::json_logger) <= 4 * sizeof(void *));
+    fixture f;
+    const auto child = f.logger.with({"a", 1});
+    auto copy = child;
+    copy.set_level(copy.log_level());
+    CHECK(&copy.context() == &child.context());
+    CHECK(&f.logger.context() != &child.context());
 }

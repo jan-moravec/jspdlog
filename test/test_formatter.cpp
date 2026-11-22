@@ -114,7 +114,7 @@ TEST_CASE("formatter: every header key off, with fields and message", "[formatte
     CHECK(f.last() == R"({"k":1})");
     f.logger.info("x");
     CHECK(f.last() == R"({"message":"x"})");
-    f.logger.info(jspdlog::json_properties{});
+    f.logger.info(jspdlog::fields{});
     CHECK(f.last() == "{}");
     f.logger.spdlog_logger()->info("direct");
     CHECK(f.last() == R"({"message":"direct"})");
@@ -177,9 +177,10 @@ TEST_CASE("formatter: source_key writes the base name of the call site", "[forma
     f.logger.spdlog_logger()->log(spdlog::source_loc{reused.c_str(), 2, "f"}, jspdlog::level::info, "b");
     CHECK(f.last().find(R"("file":"other.cpp","line":2)") != std::string::npos);
 
-    // A json_logger call has no call site yet.
+    // A json_logger call records its own call site.
     f.logger.info("z");
-    CHECK(f.last() == R"({"logger":"t","level":"info","message":"z"})");
+    CHECK(f.last().find(R"("source":{"file":"test_formatter.cpp","line":)") != std::string::npos);
+    CHECK(f.last().find(R"(,"message":"z"})") != std::string::npos);
 }
 
 TEST_CASE("formatter: source_key is off by default", "[formatter]")

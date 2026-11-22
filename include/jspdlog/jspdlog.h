@@ -67,9 +67,7 @@
 #include <cstdint>
 #include <cstring>
 #include <ctime>
-#include <functional>
 #include <iterator>
-#include <map>
 #include <memory>
 #include <optional>
 #include <random>
@@ -78,6 +76,17 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
+
+#ifndef JSPDLOG_ASSERT
+#include <cassert>
+/**
+ * @brief Called with a condition that must hold and a message. Debug builds use it to find field keys that clash with
+ * the keys of the line. Define it before including jspdlog to use your own handler, for example one that logs. With
+ * NDEBUG the default expands to nothing and the condition is not evaluated.
+ */
+#define JSPDLOG_ASSERT(cond, msg) assert((cond) && (msg))
+#endif
 
 namespace jspdlog
 {
@@ -116,7 +125,8 @@ struct json_options
     std::optional<std::string> thread_key = std::string{"thread"};
     /**
      * @brief Key of the call site, written as an object with file (the base name), line and function. Off by default.
-     * Lines without a call site, such as those from json_logger calls, have no such field.
+     * json_logger calls record their call site. Lines without one, such as those logged through a plain spdlog macro
+     * without source information, have no such field.
      */
     std::optional<std::string> source_key;
     /** @brief Key of the message. It is not optional, because a message from outside jspdlog needs a place to go. */
@@ -410,23 +420,6 @@ inline void patch_hex_size(spdlog::memory_buf_t &out, std::size_t at, std::size_
         out.data()[at + i] = HEX_DIGITS[(size >> shift) & NIBBLE_MASK];
     }
 }
-
-/** @brief std::remove_cvref_t for C++17. */
-template <typename T>
-using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<T>>;
-
-/**
- * @brief Whether a type can be logged as a message on its own.
- *
- * Anything {fmt} can format qualifies, except character arrays and pointers other than char pointers. String literals
- * go to the format-string overloads instead, so their placeholders are checked at compile time. Other pointers would
- * print as addresses.
- */
-template <typename T>
-inline constexpr bool is_loggable_value_v =
-    spdlog::fmt_lib::is_formattable<T>::value && !std::is_array_v<remove_cvref_t<T>> &&
-    (!std::is_pointer_v<remove_cvref_t<T>> ||
-     std::is_same_v<std::remove_cv_t<std::remove_pointer_t<remove_cvref_t<T>>>, char>);
 
 /**
  * @brief Hands spdlog the function that writes a line's fields and message.
@@ -726,73 +719,77 @@ inline void install_json_formatter(spdlog::sinks::sink &sink, const json_options
  * @brief Typed key/value fields for a log line, serialized when they are inserted.
  *
  * Pass them per call, usually as a braced list such as {"user_id", 42, "ok", true}, or bind them to a child logger with
- * json_logger::with_properties. Values keep their JSON type, so numbers and booleans stay filterable as such. Keys are
- * written sorted byte by byte, which is alphabetical for ASCII keys. Inserting a key that exists replaces its value,
+ * json_logger::with. Values keep their JSON type, so numbers and booleans stay filterable as such. Fields keep the
+ * order in which their keys were first inserted. Inserting a key that exists replaces its value and keeps its position,
  * and when two sets are merged the right-hand side wins.
  *
+ * Fields are meant to be small: a lookup scans the keys, which beats a map for the handful of keys a log line carries.
  * Values are serialized as soon as the set is built, so a braced list passed to a disabled level still costs its
  * serialization. Guard expensive fields with json_logger::should_log.
  *
- * A key equal to one of the logger's header keys or to message produces a duplicate key in the line. Avoiding that is
- * up to the caller.
+ * A key equal to one of the logger's header keys, to its source key or to its message key produces a duplicate key in
+ * the line. Avoiding that is up to the caller; debug builds check it through JSPDLOG_ASSERT.
  */
-class json_properties
+class fields
 {
 public:
     /** @brief Creates an empty set. Add fields with insert or merge. */
-    json_properties() = default;
+    fields() = default;
 
     /**
-     * @brief Creates fields from alternating keys and values. Keys may be anything convertible to std::string or
-     * std::string_view.
+     * @brief Creates fields from alternating keys and values. Keys may be anything convertible to std::string_view.
      */
     template <typename K, typename V, typename... Rest>
-    json_properties(K &&key, V &&value, Rest &&...rest)
+    fields(K &&key, V &&value, Rest &&...rest)
     {
-        static_assert(sizeof...(Rest) % 2 == 0, "json_properties: expected key/value pairs");
+        static_assert(sizeof...(Rest) % 2 == 0, "fields: expected key/value pairs");
         insert_pairs_(std::forward<K>(key), std::forward<V>(value), std::forward<Rest>(rest)...);
     }
 
-    /** @brief Inserts null. */
-    void insert(std::string key, std::nullptr_t) { set_(std::move(key), "null"); }
+    /**
+     * @brief Inserts null. The key is copied at once, so it may be a temporary; the same holds for every insert.
+     */
+    void insert(std::string_view key, std::nullptr_t) { set_(key, "null"); }
 
     /** @brief Inserts a string. A std::string converts to this overload. */
-    void insert(std::string key, std::string_view value)
+    void insert(std::string_view key, std::string_view value)
     {
         std::string encoded;
         encoded.reserve(value.size() + 2);
         detail::append_json_quoted(encoded, value);
-        set_(std::move(key), std::move(encoded));
+        set_(key, encoded);
     }
 
     /** @brief Inserts a C string, or null for a null pointer. */
-    void insert(std::string key, const char *value)
+    void insert(std::string_view key, const char *value)
     {
         if (value == nullptr)
         {
-            set_(std::move(key), "null");
+            set_(key, "null");
         }
         else
         {
-            insert(std::move(key), std::string_view{value});
+            insert(key, std::string_view{value});
         }
     }
 
     /** @brief Inserts true or false. */
-    void insert(std::string key, bool value) { set_(std::move(key), value ? "true" : "false"); }
+    void insert(std::string_view key, bool value) { set_(key, value ? "true" : "false"); }
 
     /**
      * @brief Inserts a one-character string. Signed and unsigned char, and so int8_t and uint8_t, are numbers instead.
      */
-    void insert(std::string key, char value) { insert(std::move(key), std::string_view{&value, 1}); }
+    void insert(std::string_view key, char value) { insert(key, std::string_view{&value, 1}); }
 
     /** @brief Inserts an integer of any width as a JSON number. */
     template <
         typename T,
         std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool> && !std::is_same_v<T, char>, int> = 0>
-    void insert(std::string key, T value)
+    void insert(std::string_view key, T value)
     {
-        set_(std::move(key), std::to_string(value));
+        std::string text;
+        detail::append_int(text, value);
+        set_(key, text);
     }
 
     /**
@@ -802,11 +799,11 @@ public:
      * infinity become null, because JSON has no token for them.
      */
     template <typename T, std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
-    void insert(std::string key, T value)
+    void insert(std::string_view key, T value)
     {
         if (!std::isfinite(value))
         {
-            set_(std::move(key), "null");
+            set_(key, "null");
             return;
         }
         std::string s = spdlog::fmt_lib::format("{}", value);
@@ -814,65 +811,73 @@ public:
         {
             s += ".0";
         }
-        set_(std::move(key), std::move(s));
+        set_(key, s);
     }
 
     /** @brief Inserts pre-serialized JSON unchanged, or null when it is empty. */
-    void insert(std::string key, raw_json value)
+    void insert(std::string_view key, const raw_json &value)
     {
-        set_(std::move(key), value.value.empty() ? std::string{"null"} : std::move(value.value));
+        set_(key, value.value.empty() ? std::string_view{"null"} : std::string_view{value.value});
     }
 
     /** @brief Inserts other fields as a nested JSON object. */
-    void insert(std::string key, const json_properties &value) { set_(std::move(key), value.to_json()); }
+    void insert(std::string_view key, const fields &value) { set_(key, value.to_json()); }
 
     /**
      * @brief Wide characters are rejected, because encoding them as UTF-8 is the caller's choice. Convert to a UTF-8
      * std::string first.
      */
-    void insert(std::string, wchar_t) = delete;
+    void insert(std::string_view, wchar_t) = delete;
     /** @brief Rejected like wchar_t. Convert to a UTF-8 std::string first. */
-    void insert(std::string, char16_t) = delete;
+    void insert(std::string_view, char16_t) = delete;
     /** @brief Rejected like wchar_t. Convert to a UTF-8 std::string first. */
-    void insert(std::string, char32_t) = delete;
+    void insert(std::string_view, char32_t) = delete;
 #ifdef __cpp_char8_t
     /** @brief Rejected, because a single UTF-8 code unit is not always a character. Use a std::string instead. */
-    void insert(std::string, char8_t) = delete;
+    void insert(std::string_view, char8_t) = delete;
 #endif
     /**
      * @brief Pointers other than C strings are rejected. Without this overload they would silently convert to bool.
      */
     template <typename T>
-    void insert(std::string, const T *) = delete;
+    void insert(std::string_view, const T *) = delete;
 
-    /** @brief Adds every field of other. Where both have a key, the value from other wins. */
-    void merge(json_properties other)
+    /**
+     * @brief Adds every field of other. Where both have a key, the value from other wins and the key keeps its
+     * position.
+     */
+    void merge(const fields &other)
     {
-        for (auto &[key, value] : other.members_)
+        if (&other == this)
         {
-            members_.insert_or_assign(key, std::move(value));
+            return;
+        }
+        for (const auto &e : other.entries_)
+        {
+            put_(e.key, std::string{e.text});
         }
     }
 
     /** @brief Returns the merge of both sets. Where both have a key, the value from rhs wins. */
-    friend json_properties operator+(json_properties lhs, json_properties rhs)
+    friend fields operator+(fields lhs, const fields &rhs)
     {
-        lhs.merge(std::move(rhs));
+        lhs.merge(rhs);
         return lhs;
     }
 
     /** @brief Whether there are no fields. */
-    [[nodiscard]] bool empty() const noexcept { return members_.empty(); }
+    [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
     /** @brief The number of distinct keys. */
-    [[nodiscard]] std::size_t size() const noexcept { return members_.size(); }
+    [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+    /** @brief Whether a key is present. */
+    [[nodiscard]] bool contains(std::string_view key) const noexcept { return find_(key) != nullptr; }
     /** @brief Removes every field. */
-    void clear() noexcept { members_.clear(); }
+    void clear() noexcept { entries_.clear(); }
 
-    /** @brief Returns the fields as a JSON object. An empty set gives {}. */
+    /** @brief Returns the fields as a JSON object in insertion order. An empty set gives {}. */
     [[nodiscard]] std::string to_json() const
     {
-        std::string out;
-        append_merged_(out, *this, json_properties{});
+        std::string out = fragment_();
         if (out.empty())
         {
             return "{}";
@@ -885,91 +890,294 @@ public:
 private:
     friend class json_logger;
 
+    /** @brief One field: the raw key for lookups and the serialized text ready to append. */
+    struct entry
+    {
+        /** @brief The key as given, for lookups and merges. */
+        std::string key;
+        /** @brief A comma, the quoted key, a colon and the value. */
+        std::string text;
+    };
+
     template <typename K, typename V, typename... Rest>
     void insert_pairs_(K &&key, V &&value, Rest &&...rest)
     {
-        if constexpr (std::is_convertible_v<std::decay_t<K>, std::string>)
-        {
-            insert(std::string(std::forward<K>(key)), std::forward<V>(value));
-        }
-        else
-        {
-            static_assert(
-                std::is_convertible_v<std::decay_t<K>, std::string_view>,
-                "json_properties: key must be convertible to std::string or std::string_view"
-            );
-            insert(std::string(std::string_view(key)), std::forward<V>(value));
-        }
+        static_assert(
+            std::is_convertible_v<std::decay_t<K>, std::string_view>,
+            "fields: key must be convertible to std::string_view"
+        );
+        insert(std::string_view(key), std::forward<V>(value));
         if constexpr (sizeof...(Rest) > 0)
         {
             insert_pairs_(std::forward<Rest>(rest)...);
         }
     }
 
-    /** @brief Stores a value that is already serialized. */
-    void set_(std::string key, std::string json) { members_.insert_or_assign(std::move(key), std::move(json)); }
-
-    /**
-     * @brief Appends a comma, the quoted key, a colon and the value for every field of lhs merged with rhs.
-     *
-     * Where both have a key, the value from rhs wins. Both maps are sorted, so one pass over each is enough.
-     */
-    template <typename Buffer>
-    static void append_merged_(Buffer &out, const json_properties &lhs, const json_properties &rhs)
+    /** @brief The entry with this key, or null. */
+    [[nodiscard]] const entry *find_(std::string_view key) const noexcept
     {
-        const auto emit = [&out](const std::string &key, const std::string &value) {
-            out.push_back(',');
-            detail::append_json_quoted(out, key);
-            out.push_back(':');
-            out.append(value.data(), value.data() + value.size());
-        };
-        auto l = lhs.members_.begin();
-        auto r = rhs.members_.begin();
-        while (l != lhs.members_.end() || r != rhs.members_.end())
+        for (const auto &e : entries_)
         {
-            if (r == rhs.members_.end() || (l != lhs.members_.end() && l->first < r->first))
+            if (e.key == key)
             {
-                emit(l->first, l->second);
-                ++l;
-            }
-            else
-            {
-                if (l != lhs.members_.end() && l->first == r->first)
-                {
-                    ++l; // The rhs value replaces this one.
-                }
-                emit(r->first, r->second);
-                ++r;
+                return &e;
             }
         }
+        return nullptr;
     }
 
-    /** @brief Maps each key to its serialized JSON value. */
-    std::map<std::string, std::string, std::less<>> members_;
+    /** @brief Stores a field whose text is ready. A key that exists keeps its position. */
+    void put_(std::string_view key, std::string text)
+    {
+        for (auto &e : entries_)
+        {
+            if (e.key == key)
+            {
+                e.text = std::move(text);
+                return;
+            }
+        }
+        entries_.push_back(entry{std::string{key}, std::move(text)});
+    }
+
+    /** @brief Stores a value that is already serialized. */
+    void set_(std::string_view key, std::string_view value)
+    {
+        std::string text;
+        text.reserve(key.size() + value.size() + 4);
+        text.push_back(',');
+        detail::append_json_quoted(text, key);
+        text.push_back(':');
+        detail::append(text, value);
+        put_(key, std::move(text));
+    }
+
+    /** @brief Every entry text joined, so each field starts with a comma. */
+    [[nodiscard]] std::string fragment_() const
+    {
+        std::string out;
+        for (const auto &e : entries_)
+        {
+            out += e.text;
+        }
+        return out;
+    }
+
+    /** @brief The fields in insertion order. */
+    std::vector<entry> entries_;
 };
+
+namespace detail
+{
+
+/**
+ * @brief The keys a logger writes itself, to find field keys that would duplicate them.
+ *
+ * It is stored in every build, so the layout of json_logger does not depend on NDEBUG.
+ */
+class reserved_keys
+{
+public:
+    /** @brief Creates an empty list. */
+    reserved_keys() = default;
+
+    /** @brief Collects the enabled header keys, the source key and the message key. */
+    explicit reserved_keys(const json_options &options)
+    {
+        const auto add = [this](const std::optional<std::string> &key) {
+            if (key)
+            {
+                keys_.push_back(*key);
+            }
+        };
+        add(options.timestamp_key);
+        add(options.logger_key);
+        add(options.level_key);
+        add(options.process_key);
+        add(options.thread_key);
+        add(options.source_key);
+        keys_.push_back(options.message_key);
+    }
+
+    /** @brief Whether any key of the fields is one of the reserved keys. Only top-level keys are compared. */
+    [[nodiscard]] bool clashes_with(const fields &f) const noexcept
+    {
+        return std::any_of(keys_.begin(), keys_.end(), [&f](const std::string &key) { return f.contains(key); });
+    }
+
+private:
+    /** @brief The reserved keys. */
+    std::vector<std::string> keys_;
+};
+
+/**
+ * @brief A call site, filled in by default arguments at the caller.
+ *
+ * The builtins are default arguments of a constructor that is not a template. GCC evaluates a builtin in the default
+ * argument of a function template where the template is written instead of where it is called, which a constructor
+ * default argument avoids.
+ */
+struct site
+{
+    /** @brief Captures the place where the site is default-constructed, which is the call of a logging function. */
+    explicit constexpr site(
+        const char *f = __builtin_FILE(), int l = __builtin_LINE(), const char *fn = __builtin_FUNCTION()
+    ) noexcept
+        : file_(f), line_(l), function_(fn)
+    {
+    }
+
+    /** @brief The source file, as the compiler spells it. */
+    [[nodiscard]] constexpr const char *file() const noexcept { return file_; }
+    /** @brief The line of the call. */
+    [[nodiscard]] constexpr int line() const noexcept { return line_; }
+    /** @brief The short name of the calling function, which depends on the compiler. */
+    [[nodiscard]] constexpr const char *function() const noexcept { return function_; }
+
+private:
+    /** @brief The source file. */
+    const char *file_;
+    /** @brief The line of the call. */
+    int line_;
+    /** @brief The name of the calling function. */
+    const char *function_;
+};
+
+/** @brief std::type_identity for C++17, used to keep a parameter out of template argument deduction. */
+template <typename T>
+struct type_identity
+{
+    /** @brief The type itself. */
+    using type = T;
+};
+
+/** @brief The type of fmt::runtime(...) in the {fmt} version in use. */
+using runtime_format_string = decltype(spdlog::fmt_lib::runtime(""));
+
+/**
+ * @brief Whether a type is a writable char array, such as a buffer filled at run time. String literals are const
+ * arrays, so they stay format strings.
+ */
+template <typename S>
+inline constexpr bool is_char_buffer_v = std::is_array_v<S> && std::is_same_v<std::remove_extent_t<S>, char>;
+
+/**
+ * @brief Whether a type is a string a call may pass as a message: a std::string, std::string_view, C string or
+ * writable char array.
+ */
+template <typename S>
+inline constexpr bool is_runtime_string_v =
+    std::is_same_v<S, std::string> || std::is_same_v<S, std::string_view> || std::is_same_v<S, const char *> ||
+    std::is_same_v<S, char *> || is_char_buffer_v<S>;
+
+/** @brief Enables an overload for runtime strings only. String literals go to the format-string overloads. */
+template <typename S>
+using if_runtime_string = std::enable_if_t<is_runtime_string_v<S>, int>;
+
+/** @brief Whether a single argument is neither a string nor a format string, so it cannot be a message. */
+template <typename T>
+inline constexpr bool is_rejected_message_v =
+    !is_runtime_string_v<T> && !std::is_array_v<T> && !std::is_same_v<T, runtime_format_string>;
+
+/**
+ * @brief Views a runtime string as a std::string_view. A null C string is an empty message, and a char array ends at
+ * its first null character or at its end, whichever comes first.
+ */
+template <typename S>
+std::string_view message_view(const S &s) noexcept
+{
+    if constexpr (std::is_pointer_v<S>)
+    {
+        return s != nullptr ? std::string_view{s} : std::string_view{};
+    }
+    else if constexpr (std::is_array_v<S>)
+    {
+        const char *const end = std::find(std::begin(s), std::end(s), '\0');
+        return std::string_view{std::begin(s), static_cast<std::size_t>(end - std::begin(s))};
+    }
+    else
+    {
+        return std::string_view{s};
+    }
+}
+
+} // namespace detail
+
+/**
+ * @brief A format string together with the place where it was written.
+ *
+ * Logging functions take it instead of a plain format string, so the call site is captured by default arguments and
+ * no macro is needed. The format string is checked at compile time where {fmt} can do so. Wrapping it in fmt::runtime
+ * is accepted and checked at run time.
+ */
+template <typename... Args>
+class basic_format_here
+{
+public:
+    /** @brief Converts a string literal, capturing the call site of the logging function. */
+    template <typename S, std::enable_if_t<std::is_convertible_v<const S &, spdlog::fmt_lib::string_view>, int> = 0>
+    // Implicit on purpose: a string literal or fmt::runtime must convert at the call.
+    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
+    FMT_CONSTEVAL basic_format_here(const S &s, detail::site w = detail::site())
+        : fmt_(s), where_(w)
+    {
+    }
+
+    /** @brief Converts fmt::runtime(...), capturing the call site of the logging function. */
+    // Implicit on purpose: a string literal or fmt::runtime must convert at the call.
+    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
+    basic_format_here(detail::runtime_format_string r, detail::site w = detail::site())
+        : fmt_(r), where_(w)
+    {
+    }
+
+    /** @brief The format string. */
+    [[nodiscard]] spdlog::format_string_t<Args...> format() const noexcept { return fmt_; }
+    /** @brief The call site. */
+    [[nodiscard]] detail::site where() const noexcept { return where_; }
+
+private:
+    /** @brief The format string. */
+    spdlog::format_string_t<Args...> fmt_;
+    /** @brief The call site. */
+    detail::site where_;
+};
+
+/** @brief The format-string parameter of a logging function, whose arguments are deduced from the other parameters. */
+template <typename... Args>
+using format_here_t = basic_format_here<typename detail::type_identity<Args>::type...>;
 
 /**
  * @brief A logger that writes one JSON object per line.
  *
- * Copies share the underlying spdlog::logger, so its level, sinks and error handler apply to every copy. Bound fields
- * belong to each copy and are copied with it: with_properties returns a child that adds fields to every line it writes,
- * which is how inner code adds context without affecting its caller.
+ * Copies share the underlying spdlog::logger, so its level, sinks and error handler apply to every copy. They also
+ * share the bound fields, which are immutable: with returns a child that adds fields to every line it writes, which is
+ * how inner code adds context without affecting its caller. Copying a json_logger copies two pointers.
  *
  * The logging calls are const and only read the json_logger, so inner code can take a const reference, and several
- * threads can log through one json_logger at once. Whether their lines are written safely is up to the sinks, as in
- * spdlog: use the _mt sinks when logging from several threads.
+ * threads can log through one json_logger, its copies and its children at once. Whether their lines are written safely
+ * is up to the sinks, as in spdlog: use the _mt sinks when logging from several threads.
  *
  * Each level has five call forms, also available through log with the level as the first argument:
  *
  * @code
  * logger.info("loaded {} items", n);    // formatted message
- * logger.info(text);                    // a value as the message
+ * logger.info(text);                    // a runtime string as the message
  * logger.info({"items", n});            // fields only, no message
  * logger.info({"items", n}, "loaded");  // fields and a formatted message
- * logger.info({"items", n}, text);      // fields and a value as the message
+ * logger.info({"items", n}, text);      // fields and a runtime string as the message
  * @endcode
  *
- * The message is always a JSON string. Put values that should keep their type in fields.
+ * The message is always a JSON string, and a single argument that is not a string is rejected at compile time: put
+ * values that should keep their type in fields. A string literal is a format string checked at compile time; a
+ * std::string, std::string_view, C string or writable char array is taken as it is. Convert other string types first.
+ *
+ * Every call records its file, line and function, and the formatter writes them when json_options::source_key is set.
+ * The function is the short name the compiler gives, which differs between compilers.
+ *
+ * Lines list the header fields, the bound fields of outer and inner loggers, the fields of the call and then the
+ * message. A key that appears again, in an inner logger or in a call, replaces the value and stays where it first
+ * appeared.
  *
  * The constructors and adopt install a json_formatter on every sink of the spdlog::logger. A sink shared with another
  * json_logger works; the options of the logger created last apply to both. A sink added to the spdlog::logger later, or
@@ -980,6 +1188,10 @@ private:
  * is used from another module than the one that installed the formatter. Mixing a formatter installed by one module
  * with a json_logger of another module on one sink is not supported on platforms where each module has its own token,
  * such as Windows DLLs: the line stays valid JSON, but the fields appear inside the message.
+ *
+ * Debug builds check that no field key equals a header key, the source key or the message key of this logger, through
+ * JSPDLOG_ASSERT. The keys of the options this logger was created with are used, even when a shared sink writes with
+ * the options of another logger.
  */
 class json_logger
 {
@@ -1023,100 +1235,91 @@ public:
     }
 
     /**
-     * @brief Returns a child logger that adds props to every line it writes.
+     * @brief Returns a child logger that adds f to every line it writes.
      *
      * The child shares this logger's spdlog::logger and keeps this logger's bound fields. Where both have a key, the
-     * value from props wins. This logger is not changed.
+     * value from f wins and the key keeps its position. This logger is not changed, and the child's fields are
+     * immutable, so any number of threads can log through the child, this logger and their copies at once.
      */
-    [[nodiscard]] json_logger with_properties(json_properties props) const
+    [[nodiscard]] json_logger with(const fields &f) const
     {
+        JSPDLOG_ASSERT(
+            !context_->reserved.clashes_with(f), "jspdlog: a field key equals a header, source or message key"
+        );
+        auto ctx = std::make_shared<context_data>(*context_);
+        ctx->values.merge(f);
+        ctx->fragment = ctx->values.fragment_();
         json_logger child = *this;
-        child.properties_.merge(std::move(props));
-        child.bound_.clear();
-        json_properties::append_merged_(child.bound_, child.properties_, empty_properties_());
+        child.context_ = std::move(ctx);
         return child;
     }
 
-    /** @brief The fields bound to this logger by with_properties. */
-    [[nodiscard]] const json_properties &properties() const noexcept { return properties_; }
+    /** @brief The fields bound to this logger by with. */
+    [[nodiscard]] const fields &context() const noexcept { return context_->values; }
 
     /** @brief Writes a line with fields only, without a message. */
-    void log(level lvl, const json_properties &props) const
-    {
-        if (should_log(lvl))
-        {
-            emit_(lvl, props, detail::KIND_FIELDS, [](spdlog::memory_buf_t & /*out*/) {});
-        }
-    }
+    void log(level lvl, const fields &f, detail::site where = detail::site()) const { log_fields_(lvl, f, where); }
 
     /** @brief Writes a formatted message. The format string is checked at compile time. */
     template <typename... Args>
-    void log(level lvl, spdlog::format_string_t<Args...> fmt, Args &&...args) const
+    void log(level lvl, format_here_t<Args...> fmt, Args &&...args) const
     {
-        log(lvl, empty_properties_(), fmt, std::forward<Args>(args)...);
+        log_fmt_(lvl, empty_fields_(), fmt, std::forward<Args>(args)...);
     }
 
-    /** @brief Writes a value formatted with {fmt} as the message, for example a runtime string. */
-    template <typename T, std::enable_if_t<detail::is_loggable_value_v<T>, int> = 0>
-    void log(level lvl, const T &msg) const
+    /** @brief Writes a runtime string as the message. */
+    template <typename S, detail::if_runtime_string<S> = 0>
+    void log(level lvl, const S &msg, detail::site where = detail::site()) const
     {
-        log(lvl, empty_properties_(), msg);
+        log_str_(lvl, empty_fields_(), detail::message_view(msg), where);
     }
 
     /** @brief Writes fields and a formatted message. */
     template <typename... Args>
-    void log(level lvl, const json_properties &props, spdlog::format_string_t<Args...> fmt, Args &&...args) const
+    void log(level lvl, const fields &f, format_here_t<Args...> fmt, Args &&...args) const
     {
-        if (should_log(lvl))
-        {
-            emit_(lvl, props, detail::KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
-                spdlog::memory_buf_t msg;
-                spdlog::fmt_lib::format_to(std::back_inserter(msg), fmt, std::forward<Args>(args)...);
-                append_message_(out, msg);
-            });
-        }
+        log_fmt_(lvl, f, fmt, std::forward<Args>(args)...);
     }
 
-    /** @brief Writes fields and a value formatted with {fmt} as the message. */
-    template <typename T, std::enable_if_t<detail::is_loggable_value_v<T>, int> = 0>
-    void log(level lvl, const json_properties &props, const T &msg) const
+    /** @brief Writes fields and a runtime string as the message. */
+    template <typename S, detail::if_runtime_string<S> = 0>
+    void log(level lvl, const fields &f, const S &msg, detail::site where = detail::site()) const
     {
-        if (should_log(lvl))
-        {
-            emit_(lvl, props, detail::KIND_MESSAGE, [&msg](spdlog::memory_buf_t &out) {
-                spdlog::memory_buf_t buf;
-                spdlog::fmt_lib::format_to(std::back_inserter(buf), "{}", msg);
-                append_message_(out, buf);
-            });
-        }
+        log_str_(lvl, f, detail::message_view(msg), where);
     }
 
-// Defines the five call forms for one level. Undefined right after use.
+    /** @brief Rejects a single argument that is not a string. Put typed values in fields. */
+    template <typename T, std::enable_if_t<detail::is_rejected_message_v<T>, int> = 0>
+    void log(level lvl, const T &) const = delete;
+
+// Defines the call forms for one level. Undefined right after use.
 #define JSPDLOG_DETAIL_LEVEL_FUNCTIONS(name, lvl)                                                                      \
     template <typename... Args>                                                                                        \
-    void name(spdlog::format_string_t<Args...> fmt, Args &&...args) const                                              \
+    void name(format_here_t<Args...> fmt, Args &&...args) const                                                        \
     {                                                                                                                  \
-        log(lvl, fmt, std::forward<Args>(args)...);                                                                    \
+        log_fmt_(lvl, empty_fields_(), fmt, std::forward<Args>(args)...);                                              \
     }                                                                                                                  \
-    template <typename T, std::enable_if_t<detail::is_loggable_value_v<T>, int> = 0>                                   \
-    void name(const T &msg) const                                                                                      \
+    template <typename S, detail::if_runtime_string<S> = 0>                                                            \
+    void name(const S &msg, detail::site where = detail::site()) const                                                 \
     {                                                                                                                  \
-        log(lvl, msg);                                                                                                 \
+        log_str_(lvl, empty_fields_(), detail::message_view(msg), where);                                              \
     }                                                                                                                  \
-    void name(const json_properties &props) const                                                                      \
+    void name(const fields &f, detail::site where = detail::site()) const                                              \
     {                                                                                                                  \
-        log(lvl, props);                                                                                               \
+        log_fields_(lvl, f, where);                                                                                    \
     }                                                                                                                  \
     template <typename... Args>                                                                                        \
-    void name(const json_properties &props, spdlog::format_string_t<Args...> fmt, Args &&...args) const                \
+    void name(const fields &f, format_here_t<Args...> fmt, Args &&...args) const                                       \
     {                                                                                                                  \
-        log(lvl, props, fmt, std::forward<Args>(args)...);                                                             \
+        log_fmt_(lvl, f, fmt, std::forward<Args>(args)...);                                                            \
     }                                                                                                                  \
-    template <typename T, std::enable_if_t<detail::is_loggable_value_v<T>, int> = 0>                                   \
-    void name(const json_properties &props, const T &msg) const                                                        \
+    template <typename S, detail::if_runtime_string<S> = 0>                                                            \
+    void name(const fields &f, const S &msg, detail::site where = detail::site()) const                                \
     {                                                                                                                  \
-        log(lvl, props, msg);                                                                                          \
-    }
+        log_str_(lvl, f, detail::message_view(msg), where);                                                            \
+    }                                                                                                                  \
+    template <typename T, std::enable_if_t<detail::is_rejected_message_v<T>, int> = 0>                                 \
+    void name(const T &) const = delete;
 
     JSPDLOG_DETAIL_LEVEL_FUNCTIONS(trace, level::trace)
     JSPDLOG_DETAIL_LEVEL_FUNCTIONS(debug, level::debug)
@@ -1160,11 +1363,33 @@ public:
     [[nodiscard]] const std::shared_ptr<spdlog::logger> &spdlog_logger() const noexcept { return logger_; }
 
 private:
+    /** @brief What a logger and its copies share: the bound fields and what is derived from them. Immutable. */
+    struct context_data
+    {
+        /** @brief The bound fields. */
+        fields values;
+        /** @brief The values serialized once, each field starting with a comma. */
+        std::string fragment;
+        /** @brief The token that starts every payload, the same as in the formatter this logger installed. */
+        detail::payload_token token{};
+        /** @brief The keys the logger writes itself, for the debug check. */
+        detail::reserved_keys reserved;
+    };
+
     /** @brief Installs a json_formatter on a logger that is known not to be null. */
     json_logger(std::shared_ptr<spdlog::logger> logger, const json_options &options)
-        : logger_(std::move(logger)), token_(detail::process_token())
+        : logger_(std::move(logger)), context_(make_context_(options))
     {
-        logger_->set_formatter(std::unique_ptr<spdlog::formatter>(new json_formatter(options, token_)));
+        logger_->set_formatter(std::unique_ptr<spdlog::formatter>(new json_formatter(options, context_->token)));
+    }
+
+    /** @brief Creates the empty context of a root logger. */
+    static std::shared_ptr<const context_data> make_context_(const json_options &options)
+    {
+        auto ctx = std::make_shared<context_data>();
+        ctx->token = detail::process_token();
+        ctx->reserved = detail::reserved_keys(options);
+        return ctx;
     }
 
     /** @brief Creates the spdlog::logger for one sink, rejecting a null sink. */
@@ -1199,9 +1424,9 @@ private:
     }
 
     /** @brief An empty set of fields, shared by the call forms without fields. */
-    static const json_properties &empty_properties_()
+    static const fields &empty_fields_()
     {
-        static const json_properties EMPTY;
+        static const fields EMPTY;
         return EMPTY;
     }
 
@@ -1211,44 +1436,101 @@ private:
         detail::append_json_quoted(out, std::string_view{msg.data(), msg.size()});
     }
 
+    /** @brief Writes a line with fields only. */
+    void log_fields_(level lvl, const fields &f, detail::site where) const
+    {
+        if (should_log(lvl))
+        {
+            emit_(lvl, f, where, detail::KIND_FIELDS, [](spdlog::memory_buf_t & /*out*/) {});
+        }
+    }
+
+    /** @brief Writes fields and a message formatted from a format string and its arguments. */
+    template <typename... Args>
+    void log_fmt_(level lvl, const fields &f, format_here_t<Args...> fmt, Args &&...args) const
+    {
+        if (should_log(lvl))
+        {
+            emit_(lvl, f, fmt.where(), detail::KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
+                spdlog::memory_buf_t msg;
+                spdlog::fmt_lib::format_to(std::back_inserter(msg), fmt.format(), std::forward<Args>(args)...);
+                append_message_(out, msg);
+            });
+        }
+    }
+
+    /** @brief Writes fields and a message taken as it is. */
+    void log_str_(level lvl, const fields &f, std::string_view msg, detail::site where) const
+    {
+        if (should_log(lvl))
+        {
+            emit_(lvl, f, where, detail::KIND_MESSAGE, [msg](spdlog::memory_buf_t &out) {
+                detail::append_json_quoted(out, msg);
+            });
+        }
+    }
+
     /**
      * @brief Logs a payload: the token, the kind, the size of the fields, the bound and per-call fields and then what
      * write_message appends. spdlog runs the serialization while it formats the line, inside its error handling.
      *
-     * The fields are an already escaped list, each entry starting with a comma. The message is appended as a quoted
-     * JSON string, so it is escaped once however many sinks the logger has.
+     * The fields are an already escaped list, each entry starting with a comma. A per-call field with the key of a
+     * bound field replaces its value at the bound field's position. The message is appended as a quoted JSON string,
+     * so it is escaped once however many sinks the logger has.
      */
     template <typename WriteMessage>
-    void emit_(level lvl, const json_properties &props, char kind, const WriteMessage &write_message) const
+    void emit_(level lvl, const fields &props, detail::site where, char kind, const WriteMessage &write_message) const
     {
+        const context_data &ctx = *context_;
         const auto write = [&](spdlog::memory_buf_t &out) {
-            detail::append(out, std::string_view{token_.data(), token_.size()});
+            if (!props.empty())
+            {
+                // Inside the deferred writer, so a handler that throws reaches spdlog's error handler.
+                JSPDLOG_ASSERT(
+                    !ctx.reserved.clashes_with(props), "jspdlog: a field key equals a header, source or message key"
+                );
+            }
+            detail::append(out, std::string_view{ctx.token.data(), ctx.token.size()});
             out.push_back(kind);
             const std::size_t size_at = out.size();
             detail::append(out, std::string_view{"00000000", detail::SIZE_DIGITS});
             const std::size_t fields_at = out.size();
             if (props.empty())
             {
-                detail::append(out, bound_);
+                detail::append(out, ctx.fragment);
             }
             else
             {
-                json_properties::append_merged_(out, properties_, props);
+                for (const auto &e : ctx.values.entries_)
+                {
+                    const fields::entry *over = props.find_(e.key);
+                    detail::append(out, over != nullptr ? over->text : e.text);
+                }
+                for (const auto &e : props.entries_)
+                {
+                    if (!ctx.values.contains(e.key))
+                    {
+                        detail::append(out, e.text);
+                    }
+                }
             }
             detail::patch_hex_size(out, size_at, out.size() - fields_at);
             write_message(out);
         };
-        logger_->log(lvl, "{}", detail::deferred_payload<decltype(write)>{&write});
+        // The line type is int in spdlog v1 and unsigned in v2.
+        using line_type = decltype(spdlog::source_loc{}.line);
+        logger_->log(
+            spdlog::source_loc{where.file(), static_cast<line_type>(where.line()), where.function()},
+            lvl,
+            "{}",
+            detail::deferred_payload<decltype(write)>{&write}
+        );
     }
 
     /** @brief The spdlog::logger shared by every copy. */
     std::shared_ptr<spdlog::logger> logger_;
-    /** @brief The token that starts every payload, the same as in the formatter this logger installed. */
-    detail::payload_token token_;
-    /** @brief Fields bound by with_properties. */
-    json_properties properties_;
-    /** @brief The bound fields serialized once, ready to append to every line. */
-    std::string bound_;
+    /** @brief The bound fields and what is derived from them, shared by every copy and never null. */
+    std::shared_ptr<const context_data> context_;
 };
 
 } // namespace jspdlog

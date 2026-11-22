@@ -95,7 +95,7 @@ dependencies are marked `SYSTEM`, so their warnings don't count.
 ```sh
 cmake --build --preset release
 ctest --preset release
-ctest --preset release -R with_properties   # by test name
+ctest --preset release -R with   # by test name
 ```
 
 The tests use Catch2 v3 and are registered with CTest per test case.
