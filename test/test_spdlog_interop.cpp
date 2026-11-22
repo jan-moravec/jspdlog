@@ -5,12 +5,18 @@
 
 #include "test_support.h"
 
+#include <spdlog/sinks/dup_filter_sink.h>
+#include <spdlog/spdlog.h>
+
 #include <catch2/catch_test_macros.hpp>
 
-#if !JSPDLOG_SPDLOG_V2
-#include <spdlog/spdlog.h>
+#if JSPDLOG_SPDLOG_V2
+#include <spdlog/sinks/async_sink.h>
+#else
+#include <spdlog/async.h>
 #endif
 
+#include <chrono>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -89,6 +95,153 @@ TEST_CASE("interop: a shared sink stays valid JSON when the loggers' options dif
         CHECK(sink->last() == R"({"logger":"b","level":"info","k":1,"message":"x"})");
     }
 }
+
+TEST_CASE("interop: two json_loggers adopting one spdlog::logger both keep their fields", "[interop]")
+{
+    const test_support::fixture f;
+    const auto shared = f.logger.spdlog_logger();
+    const auto a = jspdlog::json_logger::adopt(shared, deterministic_options()).with_properties({"a", 1});
+    const auto b = jspdlog::json_logger::adopt(shared, deterministic_options()).with_properties({"b", 2});
+
+    a.info("x");
+    CHECK(f.last() == R"({"logger":"t","level":"info","a":1,"message":"x"})");
+    b.info("y");
+    CHECK(f.last() == R"({"logger":"t","level":"info","b":2,"message":"y"})");
+}
+
+TEST_CASE("interop: a sink added later gets JSON lines from install_json_formatter", "[interop]")
+{
+    const test_support::fixture f;
+    const auto extra = std::make_shared<capture_sink>();
+    f.logger.spdlog_logger()->sinks().push_back(extra);
+    jspdlog::install_json_formatter(*extra, deterministic_options());
+
+    f.logger.info({"k", 1}, "x");
+    CHECK(f.last() == R"({"logger":"t","level":"info","k":1,"message":"x"})");
+    CHECK(extra->last() == f.last());
+    f.logger.spdlog_logger()->info("direct");
+    CHECK(extra->last() == R"({"logger":"t","level":"info","message":"direct"})");
+}
+
+TEST_CASE(
+    "interop: a plain spdlog logger sharing a sink writes valid lines once install_json_formatter ran", "[interop]"
+)
+{
+    const test_support::fixture f;
+    const auto plain = test_support::make_plain_logger("plain", f.sink);
+
+    plain->info("x {}", 1);
+    CHECK(f.last() == R"({"logger":"plain","level":"info","message":"x 1"})");
+    f.logger.info({"k", 1}, "y");
+    CHECK(f.last() == R"({"logger":"t","level":"info","k":1,"message":"y"})");
+}
+
+TEST_CASE("interop: install_json_formatter on a logger covers all of its sinks", "[interop]")
+{
+    const auto first = std::make_shared<capture_sink>();
+    const auto second = std::make_shared<capture_sink>();
+    spdlog::logger plain("third_party", {first, second});
+    jspdlog::install_json_formatter(plain, deterministic_options());
+
+    plain.info("hello");
+    const std::string expected = R"({"logger":"third_party","level":"info","message":"hello"})";
+    CHECK(first->last() == expected);
+    CHECK(second->last() == expected);
+}
+
+TEST_CASE("interop: the dup_filter_sink skip notice is valid JSON", "[interop]")
+{
+    const auto capture = std::make_shared<capture_sink>();
+    const auto dup = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(5));
+    dup->add_sink(capture);
+    const jspdlog::json_logger logger("t", dup, deterministic_options());
+
+    logger.info("same");
+    logger.info("same");
+    logger.info("same");
+    logger.info("different");
+
+    bool saw_notice = false;
+    for (const auto &line : capture->lines)
+    {
+        INFO(line);
+        CHECK(test_support::is_single_json_object(line));
+        saw_notice = saw_notice || line.find("duplicate messages") != std::string::npos;
+    }
+    CHECK(saw_notice);
+}
+
+#if JSPDLOG_SPDLOG_V2
+TEST_CASE("interop: an async_sink keeps the fields and the message", "[interop]")
+{
+    const auto capture = std::make_shared<capture_sink>();
+    spdlog::sinks::async_sink::config config;
+    config.sinks.push_back(capture);
+    const auto async = std::make_shared<spdlog::sinks::async_sink>(std::move(config));
+    jspdlog::json_logger logger("t", async, deterministic_options());
+    logger.set_level(jspdlog::level::trace);
+
+    logger.info({"k", 1}, "x");
+    logger.spdlog_logger()->info("direct");
+    async->wait_all();
+
+    REQUIRE(capture->lines.size() == 2);
+    CHECK(capture->lines[0] == R"({"logger":"t","level":"info","k":1,"message":"x"})");
+    CHECK(capture->lines[1] == R"({"logger":"t","level":"info","message":"direct"})");
+}
+#else
+TEST_CASE("interop: an async logger keeps the fields and the message", "[interop]")
+{
+    const auto capture = std::make_shared<capture_sink>();
+    {
+        auto pool = std::make_shared<spdlog::details::thread_pool>(64, 1);
+        auto async = std::make_shared<spdlog::async_logger>("t", capture, pool, spdlog::async_overflow_policy::block);
+        const auto logger = jspdlog::json_logger::adopt(async, deterministic_options());
+        logger.info({"k", 1}, "x");
+        async->info("direct");
+        pool.reset(); // The pool drains its queue before its worker stops.
+    }
+    REQUIRE(capture->lines.size() == 2);
+    CHECK(capture->lines[0] == R"({"logger":"t","level":"info","k":1,"message":"x"})");
+    CHECK(capture->lines[1] == R"({"logger":"t","level":"info","message":"direct"})");
+}
+
+TEST_CASE("interop: the spdlog v1 backtrace keeps every line valid", "[interop]")
+{
+    const test_support::fixture f;
+    f.logger.spdlog_logger()->enable_backtrace(4);
+    f.logger.debug({"k", 1}, "one");
+    f.logger.debug({"k", 1}, "two");
+    f.logger.debug({"k", 1}, "three");
+    f.logger.spdlog_logger()->dump_backtrace();
+
+    std::size_t with_fields = 0;
+    for (const auto &line : f.sink->lines)
+    {
+        INFO(line);
+        CHECK(test_support::is_single_json_object(line));
+        if (line.find(R"("k":1)") != std::string::npos)
+        {
+            ++with_fields;
+        }
+    }
+    CHECK(with_fields == 6); // Each line was written once live and once from the backtrace.
+    CHECK(f.sink->lines.size() == 8);
+}
+
+TEST_CASE("interop: spdlog::set_pattern on a registered logger replaces the formatter", "[interop]")
+{
+    test_support::fixture f("replaced");
+    spdlog::register_logger(f.logger.spdlog_logger());
+    spdlog::set_pattern("%v");
+
+    f.logger.info("x");
+    CHECK(f.last().rfind("jspdlog:", 0) == 0); // The payload protocol is visible, which is not JSON.
+
+    spdlog::drop("replaced");
+    spdlog::set_pattern("%+");
+}
+#endif
 
 TEST_CASE("interop: formatting errors go to the spdlog error handler", "[interop]")
 {

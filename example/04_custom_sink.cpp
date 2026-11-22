@@ -24,12 +24,11 @@ public:
 protected:
     void sink_it_(const spdlog::details::log_msg &msg) override
     {
-        // `formatter_` is the spdlog::pattern_formatter installed on this
-        // sink. It is a protected member of base_sink and is only reachable
-        // because we inherit from it; this is the way spdlog expects custom
-        // sinks to render the active pattern (including jspdlog's JSON
-        // pattern). Use it rather than msg.payload, which holds only the
-        // fields and message without the header.
+        // `formatter_` is the jspdlog::json_formatter installed on this sink.
+        // It is a protected member of base_sink and is only reachable because
+        // we inherit from it; this is the way spdlog expects custom sinks to
+        // render a line. Use it rather than msg.payload, which holds jspdlog's
+        // payload protocol (a token, the fields and the message), not JSON.
         spdlog::memory_buf_t formatted;
         base_sink<std::mutex>::formatter_->format(msg, formatted);
         lines.emplace_back(formatted.data(), formatted.size());

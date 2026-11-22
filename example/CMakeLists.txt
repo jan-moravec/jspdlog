@@ -35,3 +35,7 @@ endif()
 add_executable(example_06_nlohmann_raw_json 06_nlohmann_raw_json.cpp)
 target_link_libraries(example_06_nlohmann_raw_json PRIVATE jspdlog::jspdlog nlohmann_json::nlohmann_json)
 jspdlog_set_warnings(example_06_nlohmann_raw_json)
+
+add_executable(example_07_third_party 07_third_party.cpp)
+target_link_libraries(example_07_third_party PRIVATE jspdlog::jspdlog)
+jspdlog_set_warnings(example_07_third_party)

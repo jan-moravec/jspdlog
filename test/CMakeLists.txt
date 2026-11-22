@@ -19,14 +19,6 @@ endif()
 
 include(Catch)
 
-add_executable(jspdlog_tests test_json_logger.cpp test_json_properties.cpp test_spdlog_interop.cpp)
-target_link_libraries(jspdlog_tests PRIVATE jspdlog::jspdlog Catch2::Catch2WithMain)
-# Lets a test check that the header's version macros match project(VERSION).
-target_compile_definitions(jspdlog_tests PRIVATE JSPDLOG_TEST_PROJECT_VERSION="${PROJECT_VERSION}")
-jspdlog_set_warnings(jspdlog_tests)
-
-catch_discover_tests(jspdlog_tests)
-
 if(JSPDLOG_TEST_NLOHMANN_INTEROP)
     find_package(nlohmann_json 3 CONFIG QUIET)
     if(NOT nlohmann_json_FOUND)
@@ -39,7 +31,22 @@ if(JSPDLOG_TEST_NLOHMANN_INTEROP)
         )
         FetchContent_MakeAvailable(nlohmann_json)
     endif()
+endif()
 
+add_executable(jspdlog_tests test_formatter.cpp test_json_logger.cpp test_json_properties.cpp test_spdlog_interop.cpp)
+target_link_libraries(jspdlog_tests PRIVATE jspdlog::jspdlog Catch2::Catch2WithMain)
+# Lets a test check that the header's version macros match project(VERSION).
+target_compile_definitions(jspdlog_tests PRIVATE JSPDLOG_TEST_PROJECT_VERSION="${PROJECT_VERSION}")
+# The formatter tests parse each line with nlohmann/json when it is available and skip those checks otherwise.
+if(JSPDLOG_TEST_NLOHMANN_INTEROP)
+    target_link_libraries(jspdlog_tests PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_definitions(jspdlog_tests PRIVATE JSPDLOG_TEST_NLOHMANN=1)
+endif()
+jspdlog_set_warnings(jspdlog_tests)
+
+catch_discover_tests(jspdlog_tests)
+
+if(JSPDLOG_TEST_NLOHMANN_INTEROP)
     add_executable(jspdlog_nlohmann_interop_test test_nlohmann_interop.cpp)
     target_link_libraries(
         jspdlog_nlohmann_interop_test

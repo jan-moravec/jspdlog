@@ -40,7 +40,7 @@ These decide every feature below.
    may improve ergonomics but must not be required.
 1. **No JSON library dependency.** `raw_json` is the bridge to one.
 
-## 3. Where we are (0.1, pattern-based)
+## 3. Where we are (formatter core)
 
 The header ([include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h))
 provides `json_logger` (five call shapes per level plus `log(level, ...)`),
@@ -49,20 +49,16 @@ UTC, eol), typed `json_properties` with nesting, and `raw_json`. It works with
 spdlog 1.12 to 1.17 and v2.x from one header; the only differences it handles
 are listed in section 8.
 
-It bakes the JSON header into an spdlog pattern `{...%v}` and passes a
-pre-serialized fragment as the message. That works, but it has structural
-limits:
+A `json_formatter` renders every line from the spdlog message. `json_logger`
+passes it a payload with a process-wide token, the fields and the escaped
+message; any other payload is escaped into the message key, so every line is
+valid JSON whoever logged it. `install_json_formatter` extends that to
+loggers and sinks jspdlog does not wrap. Structural limits that remain:
 
-- A message that bypasses jspdlog (the registry, third-party code,
-  `spdlog_logger()->info(...)`) lands raw in `%v` and breaks the line.
-- Header fields can't be conditional, so source location can't be
-  "present when known".
-- Keys must be escaped twice (for JSON and for spdlog's `%` flags) and are
-  fixed at construction.
-- The options belong to each sink's pattern, so loggers sharing a sink share
+- The options belong to each sink's formatter, so loggers sharing a sink share
   the options of the one created last.
-- `%z` is wrong in UTC mode on spdlog < 1.13 (worked around with a literal
-  `Z`).
+- The call site is written when the message has one (macros,
+  `logger->log(source_loc, ...)`); `json_logger` calls do not capture it yet.
 - Per-call fields are serialized when the braced list is built, before the
   level check, so principle 5 holds only for the message. Lazy values
   (milestone 0.3.0) close this gap.
@@ -105,6 +101,9 @@ the renames listed in section 9.
 
 ## 5. Milestones
 
+Milestones are development stages on `main`, not releases. The first tag is
+`v1.0.0`.
+
 ### 0.1.0: baseline (current branch)
 
 - [x] API with construction-time `json_options`.
@@ -123,28 +122,29 @@ the renames listed in section 9.
 - [x] Doxygen comments in the header, checked in pre-commit.
 - [x] Tooling: presets with TSan, Clang 23 CI, zizmor, yamllint, ruff,
   Scorecard, `AGENTS.md`.
-- [ ] CI green on the full matrix, then tag `v0.1.0`.
+- [x] CI green on the full matrix.
 
 ### 0.2.0: formatter core (breaking)
 
-- `json_formatter : spdlog::formatter` renders the header from `log_msg`;
+- [x] `json_formatter : spdlog::formatter` renders the header from `log_msg`;
   the pinned pattern goes away.
-- One immutable, process-wide payload token, generated once at startup.
+- [x] One immutable, process-wide payload token, generated once at startup.
   Payloads without it are escaped into the message key. Wrapping the same
   spdlog logger twice keeps working.
-- `install_json_formatter(spdlog::logger&)` gives JSON output for loggers
+- [x] `install_json_formatter(spdlog::logger&)` gives JSON output for loggers
   jspdlog doesn't wrap. Documented pattern: install it on the default (v1) or
   global (v2) logger so that third-party spdlog output, `dup_filter_sink`'s
-  "Skipped" line and v1 backtrace markers become valid JSON too.
-- Sinks that write the raw message (`callback_sink`, `mongo_sink`,
-  `kafka_sink`, syslog and systemd without formatting) must not receive the
-  token. Decide between stripping it in a jspdlog-provided callback helper
-  and documenting them as unsupported.
+  "Skipped" line and v1 backtrace markers become valid JSON too. A sink
+  overload covers sinks added later.
+- [x] Sinks that write the raw message (`callback_sink`, `mongo_sink`,
+  `kafka_sink`, syslog and systemd without formatting): a documented route
+  per sink, no stripping helper (decision 8).
 - Source location without macros (C++17 builtins, C++20 consteval wrapper).
   The call site is always captured; it is written only when `source_key` is
   set (**off by default**), as `"source":{"file","line","function"}` with the
-  file's base name.
-- `message_key` option.
+  file's base name. The formatter already writes `msg.source` with the base
+  name; capture in `json_logger` calls is still to do.
+- [x] `message_key` option.
 - Renames: `json_properties` → `jspdlog::fields`, `with_properties()` →
   `with()`.
 - `fields` keep **insertion order**, stored flat (vector of pre-serialized
@@ -153,7 +153,7 @@ the renames listed in section 9.
   is sorted by key.*
 - Child loggers share an immutable, pre-serialized context through a
   `shared_ptr` instead of copying it.
-- Single options struct for the formatter and the logger.
+- [x] Single options struct for the formatter and the logger.
 - Fuzzing infrastructure and targets 1 to 4 and 6 (section 6), with a CI
   fuzz job.
 - `info(value)` accepts runtime strings only (`std::string`,
@@ -303,23 +303,30 @@ jspdlog's own fields.
 | Global logger         | `set_default_logger`                                                 | `set_global_logger`        | not used by jspdlog                                           |
 | Registry              | `register_logger`, `get`, global `set_pattern` etc.                  | removed                    | not used; README lists the safe and breaking calls            |
 | Async worker errors   | the logger's error handler                                           | `async_sink`'s own handler | documented in README                                          |
-| `%z` in UTC mode      | local offset before 1.13                                             | `+00:00`                   | literal `Z`                                                   |
 | Library form          | header-only or compiled                                              | compiled                   | transparent                                                   |
 
 The differences are small enough for **one header** with a few `#if`s;
 separate per-version headers aren't needed.
 
-## 9. Decisions (2026-11-21)
+## 9. Decisions (2026-11-21 and 2026-11-22)
 
-| #   | Question                           | Decision                                                                                                                                                                    |
-| --- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Key order                          | Insertion order: outer context, inner context, per-call fields, message. A replaced key keeps its position.                                                                 |
-| 2   | Source location                    | Always captured; written only when enabled (off by default); file base name.                                                                                                |
-| 3   | Fields that clash with header keys | Caller's responsibility. Debug-build `JSPDLOG_ASSERT`, like bounds checks in `std::vector`; no release cost.                                                                |
-| 4   | Value types                        | Keys are strings; values map to native JSON types wherever possible (section 5, milestone 0.3.0). The message is always a string; `info(value)` takes runtime strings only. |
-| 5   | Naming                             | `jspdlog::fields`, `logger.with(...)`.                                                                                                                                      |
-| 6   | Payload token                      | One immutable process-wide token. Accepted exception to "no global state": it is a constant, not configurable shared state. `adopt()` keeps installing the formatter.       |
-| 7   | Minimum spdlog                     | 1.12.                                                                                                                                                                       |
+| #   | Question                             | Decision                                                                                                                                                                    |
+| --- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Key order                            | Insertion order: outer context, inner context, per-call fields, message. A replaced key keeps its position.                                                                 |
+| 2   | Source location                      | Always captured; written only when enabled (off by default); file base name.                                                                                                |
+| 3   | Fields that clash with header keys   | Caller's responsibility. Debug-build `JSPDLOG_ASSERT`, like bounds checks in `std::vector`; no release cost.                                                                |
+| 4   | Value types                          | Keys are strings; values map to native JSON types wherever possible (section 5, milestone 0.3.0). The message is always a string; `info(value)` takes runtime strings only. |
+| 5   | Naming                               | `jspdlog::fields`, `logger.with(...)`.                                                                                                                                      |
+| 6   | Payload token                        | One immutable process-wide token. Accepted exception to "no global state": it is a constant, not configurable shared state. `adopt()` keeps installing the formatter.       |
+| 7   | Minimum spdlog                       | 1.12.                                                                                                                                                                       |
+| 8   | Raw-message sinks                    | A documented route per sink, no stripping helper; `mongo_sink` and `kafka_sink` unsupported.                                                                                |
+| 9   | Source `file`                        | Base name, written by the formatter from the first release of the formatter.                                                                                                |
+| 10  | Process id                           | Read per message, like spdlog; revisit only if the benchmark shows a real cost.                                                                                             |
+| 11  | Per-call key replacing a context key | Context position: a key stays where it first appeared.                                                                                                                      |
+| 12  | Getter name for bound fields         | `context()`.                                                                                                                                                                |
+| 13  | Deprecated aliases for 0.1 names     | None, clean rename.                                                                                                                                                         |
+| 14  | Test option name                     | `JSPDLOG_TEST_NLOHMANN_INTEROP` becomes `JSPDLOG_TEST_WITH_NLOHMANN`.                                                                                                       |
+| 15  | Releases                             | No tag before `v1.0.0`; milestones are stages on `main`.                                                                                                                    |
 
 ## 10. Quality gates (every milestone)
 

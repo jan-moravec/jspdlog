@@ -181,8 +181,8 @@ jspdlog::json_logger logger("app", sink, opts);
 // {"ts":"2026-05-13T07:00:00.000Z","logger":"app","level":"info","thread":5678,"message":"hi"}
 ```
 
-The header fields always come in the order timestamp, logger, level, process, thread. With all of them removed, a line
-holds only the fields and the message, or `{}`.
+The header fields always come in the order timestamp, logger, level, process, thread, source. They are followed by the
+fields and then the message. With all of them removed, a line holds only the fields and the message, or `{}`.
 
 ### Sinks
 
@@ -221,27 +221,46 @@ Several threads can log through the same `json_logger`. As in spdlog, use the `_
 
 ## Working with spdlog
 
-jspdlog is a thin layer, and almost all of spdlog stays available. A few spdlog features change the format behind
-jspdlog's back. This section explains which ones and why.
+jspdlog is a thin layer, and almost all of spdlog stays available. This section explains how the two fit together and
+which spdlog features change the output.
 
 ### How it works
 
 ```text
 logger.info({"k", 1}, "hi")
-  │  jspdlog serializes the fields and the message:  ,"k":1,"message":"hi"
+  │  jspdlog writes a payload: a token, the fields ,"k":1 and the escaped message "hi"
   ▼
 spdlog::logger                   level check, error handling, async queue
   ▼
-each sink's formatter            {"timestamp":...,"logger":"app","level":"info",...  ,"k":1,"message":"hi"  }
-                                  └── header fields from the pattern ──────────┘  └── from jspdlog ──┘
+each sink's json_formatter       {"timestamp":...,"logger":"app","level":"info",...,"k":1,"message":"hi"}
+                                  └── header fields, from the options ──┘ └── from the payload ──┘
 ```
 
-When you create a `json_logger` (or `adopt()` one), jspdlog installs a JSON pattern on every sink of the
-`spdlog::logger`. Two spdlog facts follow from this design:
+When you create a `json_logger` (or `adopt()` one), jspdlog installs a `json_formatter` on every sink of the
+`spdlog::logger`. The formatter renders the whole line from spdlog's message: the header fields, the call site when
+`source_key` is set, the fields and the message. Two facts follow:
 
-1. **The pattern lives on the sink, not on the logger.** Everything that shares a sink shares its pattern.
-1. **Only messages that jspdlog serialized fit the pattern.** A message passed to spdlog in any other way ends up in
-   the line unescaped.
+1. **The formatter lives on the sink, not on the logger.** Everything that shares a sink shares its formatter, and so
+   its options.
+1. **Every payload becomes valid JSON.** The payload of a `json_logger` call starts with a random token that is
+   created once per process. The formatter splits such a payload into fields and message. Any other payload, whether
+   from `spdlog_logger()->info(...)`, from `SPDLOG_INFO`, from third-party code or from spdlog itself, is escaped into
+   the message field. A damaged payload also ends up there, never as broken JSON.
+
+To get the same guarantee for loggers and sinks that jspdlog does not wrap, install the formatter yourself:
+
+```cpp
+// spdlog v1: the default logger, often used by libraries
+jspdlog::install_json_formatter(*spdlog::default_logger());
+// spdlog v2
+jspdlog::install_json_formatter(*spdlog::global_logger());
+
+// a sink added to a json_logger's spdlog::logger later
+jspdlog::install_json_formatter(*extra_sink, options);
+```
+
+`install_json_formatter` takes a `spdlog::logger&` or a `spdlog::sinks::sink&` and the same `json_options` as a
+`json_logger`. Example: [07_third_party.cpp](example/07_third_party.cpp).
 
 ### At a glance
 
@@ -249,48 +268,66 @@ When you create a `json_logger` (or `adopt()` one), jspdlog installs a JSON patt
 
 - any sink that formats lines: console, files, custom sinks derived from `base_sink`
 - levels, `flush_on()`, `flush()` and the error handler
-- async through `async_sink` (v2) or `adopt()` (v1)
-- several json_loggers sharing a sink, and `spdlog::logger::clone()`
+- async through `async_sink` (v2) or `adopt()` (v1); the payload, with its token, is copied to the worker
+- several json_loggers sharing a sink, several wrappers of one `spdlog::logger`, and `spdlog::logger::clone()`
+- logging through `spdlog_logger()`, `SPDLOG_LOGGER_INFO` and similar macros: the message is escaped
+- `dup_filter_sink`'s "Skipped N duplicate messages.." line and v1 `dump_backtrace()`: valid lines
 - registering in the spdlog v1 registry, `spdlog::get()`, registry levels
 
 #### Needs care
 
 - sinks that write the raw message instead of the formatted line
-- sinks shared with a plain spdlog logger, and sinks added after the json_logger was created
+- sinks added after the json_logger was created, and sinks shared with a plain spdlog logger
 - the default error handler, which writes plain text to stderr
 - the lifetime of the spdlog v1 async thread pool
 - `SPDLOG_LEVEL_NAMES`, which changes the `level` values
 
 #### Breaks the JSON output
 
-- `set_pattern()` or `set_formatter()` on the logger or its sinks, or globally on a registered logger (v1)
-- logging through `spdlog_logger()` directly, or pointing the default logger at it
-- `dup_filter_sink`'s "Skipped N duplicate messages.." line and v1 `dump_backtrace()` markers
+- `set_pattern()` or `set_formatter()` on the logger or its sinks, or globally on a registered logger (v1). They
+  replace the `json_formatter`, and the lines then show jspdlog's payload text, which starts with `jspdlog:`.
 
 ### Sinks
 
-- **Shared sinks.** Two json_loggers can share a sink: each line carries the name of the logger that wrote it. The
-  sink has one pattern, though, so the `json_options` of the logger created last apply to both. Use one set of options
+- **Shared sinks.** Two json_loggers can share a sink: each line carries the name of the logger that wrote it. The sink
+  has one formatter, though, so the `json_options` of the logger created last apply to both. Use one set of options
   per sink.
 
-- **Sinks shared with a plain spdlog logger** get whichever pattern was set last. One of the two loggers then writes
-  the wrong format. Give each its own sink.
+- **Sinks shared with a plain spdlog logger.** Call `install_json_formatter` on the plain logger (or the sink) after
+  the json_logger was created, and both write valid lines with the same options.
 
 - **Sinks added later**, through `spdlog_logger()->sinks().push_back(...)` or `dist_sink::add_sink`, keep spdlog's
-  default text pattern. Add all sinks before creating the json_logger, or create a new json_logger afterwards.
+  default text pattern. Call `install_json_formatter(*sink, options)` on the new sink.
 
-- **Sinks that write the raw message** instead of the formatted line receive jspdlog's internal fragment
-  (`,"k":1,"message":"hi"`) without the header fields:
+- **Sinks that write the raw message** instead of the formatted line see jspdlog's payload, not JSON. Each of them has
+  a route:
 
   | Sink                          | What to do                                                        |
   | ----------------------------- | ----------------------------------------------------------------- |
   | `syslog_sink`, `systemd_sink` | Create them with `enable_formatting = true`.                      |
   | `android_sink`                | Keep the default `use_raw_msg = false`.                           |
-  | `callback_sink`               | Not suitable. Write a sink derived from `base_sink` (example 04). |
-  | `mongo_sink`, `kafka_sink`    | Not suitable; they always send the raw message.                   |
-  | `ringbuffer_sink`             | Use the formatted lines, not the raw messages.                    |
+  | `ringbuffer_sink`             | Use `last_formatted()`, not `last_raw()`.                         |
+  | `callback_sink`               | Format in the callback with your own `json_formatter`, see below. |
+  | `qt_sinks`                    | Safe; they call the formatter.                                    |
+  | `mongo_sink`, `kafka_sink`    | Not supported; they always store the raw payload.                 |
 
-- **`dup_filter_sink`** writes its own "Skipped N duplicate messages.." line, which is not JSON in this version.
+  A `callback_sink` receives the raw message, so give the callback its own formatter:
+
+  ```cpp
+  auto formatter = std::make_shared<jspdlog::json_formatter>(options);
+  auto sink = std::make_shared<spdlog::sinks::callback_sink_mt>([formatter](const spdlog::details::log_msg &msg) {
+      spdlog::memory_buf_t line;
+      formatter->format(msg, line);  // callback_sink_mt calls this under its mutex
+      send(std::string_view{line.data(), line.size()});
+  });
+  ```
+
+  Don't share one `json_formatter` between sinks: like spdlog's formatters it keeps a timestamp cache and relies on the
+  sink's mutex. Don't send the raw payload of a jspdlog logger to a place that untrusted parties can read, because the
+  token is then visible and a message that starts with it would be taken for fields.
+
+- **Custom sinks** should render the line with `formatter_` (example 04). `msg.payload` holds the payload protocol
+  of jspdlog, not JSON, and the protocol may change between versions.
 
 ### Errors and the error handler
 
@@ -325,20 +362,20 @@ json_logger unless you connect the two.
 **spdlog v1** has a registry. A logger gets into it when you call `spdlog::register_logger()`, or automatically when it
 is created by a factory such as `spdlog::stdout_color_mt()` or `spdlog::create_async()`.
 
-| Registry call                                                  | Effect on a registered jspdlog logger                      |
-| -------------------------------------------------------------- | ---------------------------------------------------------- |
-| `register_logger`, `get`, `drop`                               | Safe. Logging through what `get` returns bypasses jspdlog. |
-| `set_level`, `flush_on`, `flush_every`, `cfg::load_env_levels` | Safe and useful: they manage levels and flushing.          |
-| `set_error_handler`                                            | Safe.                                                      |
-| `set_pattern`, `set_formatter`, `initialize_logger`            | **Breaks JSON**: replaces the pattern on its sinks.        |
-| a factory such as `create_async`, then `adopt()`               | Safe, because `adopt()` installs the pattern last.         |
+| Registry call                                                  | Effect on a registered jspdlog logger                        |
+| -------------------------------------------------------------- | ------------------------------------------------------------ |
+| `register_logger`, `get`, `drop`                               | Safe. Logging through what `get` returns writes valid lines. |
+| `set_level`, `flush_on`, `flush_every`, `cfg::load_env_levels` | Safe and useful: they manage levels and flushing.            |
+| `set_error_handler`                                            | Safe.                                                        |
+| `set_pattern`, `set_formatter`, `initialize_logger`            | **Breaks JSON**: replaces the formatter on its sinks.        |
+| a factory such as `create_async`, then `adopt()`               | Safe, because `adopt()` installs the formatter last.         |
 
 **spdlog v2** has no registry, only a global logger. `spdlog::set_pattern()` and the other global calls act on that
 logger only.
 
-**The default (v1) or global (v2) logger** is used by `spdlog::info(...)` and often by third-party libraries. Don't
-point it at a jspdlog logger's `spdlog::logger` in this version: those messages are not escaped and produce invalid
-lines. Keep the default logger separate, for example on stderr.
+**The default (v1) or global (v2) logger** is used by `spdlog::info(...)` and often by third-party libraries. Call
+`install_json_formatter` on it, as shown above, and their output becomes JSON lines too. If it shares a sink with a
+json_logger, the options of the last call apply to that sink.
 
 ### Compile-time settings
 
@@ -370,7 +407,7 @@ public:
     json_logger(std::string name, spdlog::sinks_init_list sinks, const json_options &options = {});
     template <typename It> json_logger(std::string name, It first, It last, const json_options &options = {});
 
-    // Wraps an existing logger and installs the JSON pattern on its sinks. Throws on a null logger.
+    // Wraps an existing logger and installs a json_formatter on its sinks. Throws on a null logger.
     static json_logger adopt(std::shared_ptr<spdlog::logger> logger, const json_options &options = {});
 
     // trace, debug, info, warn, error, critical: five forms each, all const. log(level, ...) takes the same forms.
@@ -399,6 +436,8 @@ struct json_options {
     std::optional<std::string> level_key = "level";
     std::optional<std::string> process_key = "process";
     std::optional<std::string> thread_key = "thread";
+    std::optional<std::string> source_key;  // {"file":...,"line":...,"function":...} when known; off by default
+    std::string message_key = "message";
     spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local;
     std::optional<std::string> eol;  // nullopt: spdlog's default
 };
@@ -417,21 +456,36 @@ public:
 
 struct raw_json { std::string value; };
 
+// Renders every spdlog message as one JSON object. One instance per sink.
+class json_formatter final : public spdlog::formatter {
+public:
+    explicit json_formatter(json_options options = {});
+    void format(const spdlog::details::log_msg &msg, spdlog::memory_buf_t &dest) override;
+    std::unique_ptr<spdlog::formatter> clone() const override;
+};
+
+void install_json_formatter(spdlog::logger &logger, const json_options &options = {});
+void install_json_formatter(spdlog::sinks::sink &sink, const json_options &options = {});
+
 }  // namespace jspdlog
 ```
 
 ## Guarantees and limits
 
-Every line written **through jspdlog** is one valid JSON object, as long as `raw_json` contents are valid JSON and
-strings are UTF-8. These can still produce invalid or surprising output:
+Every line written by a `json_formatter` is one valid JSON object, whoever logged it, as long as `raw_json` contents are
+valid JSON and strings are UTF-8. These can still produce invalid or surprising output:
 
-- messages that reach spdlog without going through jspdlog, and the other cases in
-  [Working with spdlog](#working-with-spdlog);
-- field keys equal to a header key or `message` (duplicate keys);
-- bytes that are not valid UTF-8, which are passed through unchanged.
+- sinks that write the raw message instead of the formatted line, and `set_pattern()` or `set_formatter()` on a sink
+  that replaces the formatter (see [Working with spdlog](#working-with-spdlog));
+- field keys equal to a header key or the message key (duplicate keys);
+- bytes that are not valid UTF-8, which are passed through unchanged;
+- a `json_logger` and a formatter installed from another module on one sink, where each module has its own copy of
+  the header, such as Windows DLLs: the line stays valid JSON, but the fields appear inside the message;
+- a `spdlog::source_loc` whose file name is a temporary: the formatter caches the escaped name per pointer.
 
-[ROADMAP.md](ROADMAP.md) describes the planned custom `spdlog::formatter`, which escapes messages that bypass jspdlog
-and adds source locations.
+The message is a single formatted string, and the call site is written only when `source_key` is set and the message
+has one: macros and `logger->log(source_loc, ...)` provide it. [ROADMAP.md](ROADMAP.md) describes the planned call-site
+capture for json_logger calls.
 
 ## FAQ
 
@@ -439,8 +493,8 @@ and adds source locations.
 
 **Which C++ standard?** C++17 or newer. CI covers C++17 and C++20 with GCC, Clang, AppleClang and MSVC.
 
-**Can I still use spdlog directly for other loggers?** Yes. Plain spdlog loggers work as before; just don't share
-their sinks with a json_logger.
+**Can I still use spdlog directly for other loggers?** Yes. Call `install_json_formatter` on them and their output
+becomes JSON lines, also when they share a sink with a json_logger.
 
 **How do I set the level from the environment?** On spdlog v1, register the logger and call
 `spdlog::cfg::load_env_levels()`. On v2, read the variable yourself and call `set_level()`.
