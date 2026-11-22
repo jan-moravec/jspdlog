@@ -13,12 +13,14 @@
  * //  "user_id":42,"message":"hello world"}
  * @endcode
  *
- * The header fields are part of an spdlog pattern that ends with the fields and the closing brace. jspdlog passes
- * spdlog an already escaped list of fields as the message, so every line written through jspdlog is a complete JSON
- * object. spdlog keeps the pattern on the sinks, so loggers that share a sink share its pattern. A message logged
- * directly on the underlying spdlog::logger bypasses the escaping, and so does a sink that writes the raw message
- * instead of the formatted line. Logging calls do not throw: a formatting error goes to the spdlog error handler, as in
- * spdlog.
+ * A json_formatter renders the whole line from the spdlog message: the header fields, the call site when asked for, the
+ * fields and the message. A json_logger hands it the fields and the message in a payload that starts with a random,
+ * process-wide token, and the formatter recognizes that token. Any other payload, such as a message logged directly on
+ * the underlying spdlog::logger, by a macro or by third-party code, is escaped into the message field. So every line
+ * that a json_formatter writes is one valid JSON object, whoever logged it. install_json_formatter gives the same
+ * guarantee to loggers and sinks that jspdlog does not wrap. A sink that writes the raw payload instead of the
+ * formatted line shows the payload protocol, which is not JSON. Logging calls do not throw: a formatting error goes to
+ * the spdlog error handler, as in spdlog.
  *
  * @copyright Copyright (c) 2026 Jan Moravec. Distributed under the MIT License, see LICENSE.
  */
@@ -53,18 +55,24 @@
 
 #include <spdlog/common.h>
 #include <spdlog/details/os.h>
+#include <spdlog/formatter.h>
 #include <spdlog/logger.h>
-#include <spdlog/pattern_formatter.h>
+#include <spdlog/sinks/sink.h>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <ctime>
 #include <functional>
 #include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -87,11 +95,12 @@ using level = spdlog::level::level_enum;
 #endif
 
 /**
- * @brief Settings fixed when a json_logger is created.
+ * @brief Settings of a json_logger or a json_formatter.
  *
  * The key members control the header fields, which always appear in this order: timestamp, logger, level, process,
- * thread. A string renames the field and an empty optional leaves it out. Keys are escaped, so any text is safe. With
- * every field left out, a line holds only the fields and the message.
+ * thread, source. They are followed by the fields and then the message. A string renames a field and an empty optional
+ * leaves it out. Keys are escaped, so any text is safe. With every optional field left out, a line holds only the
+ * fields and the message.
  */
 struct json_options
 {
@@ -105,6 +114,13 @@ struct json_options
     std::optional<std::string> process_key = std::string{"process"};
     /** @brief Key of the thread id, written as a number. */
     std::optional<std::string> thread_key = std::string{"thread"};
+    /**
+     * @brief Key of the call site, written as an object with file (the base name), line and function. Off by default.
+     * Lines without a call site, such as those from json_logger calls, have no such field.
+     */
+    std::optional<std::string> source_key;
+    /** @brief Key of the message. It is not optional, because a message from outside jspdlog needs a place to go. */
+    std::string message_key = "message";
 
     /** @brief Local time with its UTC offset, or UTC ending in Z. */
     spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local;
@@ -198,135 +214,201 @@ void append_json_quoted(Buffer &out, std::string_view s)
     out.push_back('"');
 }
 
-/**
- * @brief Appends text as a quoted JSON string that spdlog's pattern parser keeps literally.
- *
- * Percent signs are doubled so that a key containing them cannot turn into a pattern flag.
- */
-inline void append_pattern_literal(std::string &out, std::string_view s)
+/** @brief Appends text to a buffer unchanged. The buffer can be a std::string or an spdlog memory buffer. */
+template <typename Buffer>
+void append(Buffer &out, std::string_view s)
 {
-    std::string quoted;
-    append_json_quoted(quoted, s);
-    for (const char c : quoted)
+    out.append(s.data(), s.data() + s.size());
+}
+
+/** @brief Appends an integer in decimal. */
+template <typename Buffer, typename T>
+void append_int(Buffer &out, T value)
+{
+    static_assert(std::is_integral_v<T>, "append_int: expected an integer");
+    if constexpr (std::is_signed_v<T>)
     {
-        out.push_back(c);
-        if (c == '%')
-        {
-            out.push_back('%');
-        }
+        const spdlog::fmt_lib::format_int text(static_cast<long long>(value));
+        out.append(text.data(), text.data() + text.size());
+    }
+    else
+    {
+        const spdlog::fmt_lib::format_int text(static_cast<unsigned long long>(value));
+        out.append(text.data(), text.data() + text.size());
     }
 }
 
-/** @brief Pattern flag of name_flag. */
-inline constexpr char NAME_FLAG = 'N';
-/** @brief Pattern flag of fields_flag. */
-inline constexpr char FIELDS_FLAG = 'J';
+/** @brief Views spdlog's string view type as a std::string_view. */
+template <typename View>
+std::string_view view(const View &v) noexcept
+{
+    return std::string_view{v.data(), v.size()};
+}
+
+/** @brief The level of a message, whose member is named differently in spdlog v1 and v2. */
+inline level msg_level(const spdlog::details::log_msg &msg) noexcept
+{
+#if JSPDLOG_SPDLOG_V2
+    return msg.log_level;
+#else
+    return msg.level;
+#endif
+}
+
+/** @brief The name of a level as spdlog spells it, including names customized with SPDLOG_LEVEL_NAMES. */
+inline std::string_view level_name(level lvl) noexcept
+{
+#if JSPDLOG_SPDLOG_V2
+    return spdlog::to_string_view(lvl);
+#else
+    return view(spdlog::level::to_string_view(lvl));
+#endif
+}
+
+/** @brief The value of a lowercase hexadecimal digit, or -1 for any other character. */
+inline int hex_value(char c) noexcept
+{
+    static constexpr int FIRST_LETTER_VALUE = 10;
+    if (c >= '0' && c <= '9')
+    {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f')
+    {
+        return c - 'a' + FIRST_LETTER_VALUE;
+    }
+    return -1;
+}
+
+/** @brief Size of the token that starts every payload written by a json_logger. */
+inline constexpr std::size_t TOKEN_SIZE = 32;
+/** @brief Number of hexadecimal digits that give the size of the fields in a payload. */
+inline constexpr std::size_t SIZE_DIGITS = 8;
+/** @brief Size of the payload up to the first byte of the fields: token, kind and size. */
+inline constexpr std::size_t PAYLOAD_HEADER_SIZE = TOKEN_SIZE + 1 + SIZE_DIGITS;
+/** @brief Payload kind: fields only. */
+inline constexpr char KIND_FIELDS = 'F';
+/** @brief Payload kind: fields followed by a message. */
+inline constexpr char KIND_MESSAGE = 'M';
+/** @brief Largest fields size the payload can hold. */
+inline constexpr std::size_t MAX_FIELDS_SIZE = 0xffffffffU;
+
+/** @brief The token that marks a payload as written by a json_logger. */
+using payload_token = std::array<char, TOKEN_SIZE>;
 
 /**
- * @brief Pattern flag that writes the name of the logger that wrote the line, as a quoted JSON string.
+ * @brief Returns the token shared by every json_logger and json_formatter of the program.
  *
- * The name is read from each message rather than fixed in the pattern, because spdlog keeps the formatter on the sinks:
- * loggers that share a sink, including clones, share its pattern.
+ * It is random per run and never changes after the first call. A message from outside jspdlog can only be mistaken for
+ * a payload if it starts with the token.
  */
-class name_flag final : public spdlog::custom_flag_formatter
+inline const payload_token &process_token()
 {
-public:
-    void format(const spdlog::details::log_msg &msg, const std::tm & /*tm_time*/, spdlog::memory_buf_t &dest) override
-    {
-        append_json_quoted(dest, std::string_view{msg.logger_name.data(), msg.logger_name.size()});
-    }
+    static const payload_token TOKEN = [] {
+        static constexpr char ALPHABET[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        static constexpr std::size_t PREFIX_SIZE = 8;
+        static constexpr unsigned ALPHABET_MASK = 63U;
+        static constexpr std::size_t RANDOM_WORDS = 8;
+        std::array<std::uint32_t, RANDOM_WORDS + 2> seed{};
+        try
+        {
+            std::random_device rd;
+            for (std::size_t i = 0; i < RANDOM_WORDS; ++i)
+            {
+                seed[i] = rd();
+            }
+        }
+        catch (...) // NOLINT(bugprone-empty-catch): no entropy source, the values below still make the token unique
+        {
+        }
+        // Mixed in so that the token differs per run even when random_device is deterministic.
+        const int local = 0;
+        seed[RANDOM_WORDS] = static_cast<std::uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+        seed[RANDOM_WORDS + 1] = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(&local));
+        std::seed_seq seq(seed.begin(), seed.end());
+        std::mt19937_64 gen(seq);
+        payload_token t{};
+        std::memcpy(t.data(), "jspdlog:", PREFIX_SIZE);
+        for (std::size_t i = PREFIX_SIZE; i < TOKEN_SIZE; ++i)
+        {
+            t[i] = ALPHABET[gen() & ALPHABET_MASK];
+        }
+        return t;
+    }();
+    return TOKEN;
+}
 
-    [[nodiscard]] std::unique_ptr<spdlog::custom_flag_formatter> clone() const override
-    {
-        return std::make_unique<name_flag>();
-    }
+/** @brief What the formatter found in a payload. */
+struct parsed_payload
+{
+    /** @brief Whether the payload was written by a json_logger with the expected token. */
+    bool ours = false;
+    /** @brief The fields, each entry starting with a comma. May be empty. */
+    std::string_view fields;
+    /** @brief The message as a quoted JSON string, or empty when the line has no message. */
+    std::string_view message;
 };
 
 /**
- * @brief Pattern flag that writes the fields and message that json_logger serialized, which start with a comma.
+ * @brief Splits a payload into fields and message, or reports that it is not a payload of this process.
  *
- * Without header fields the leading comma is dropped. The decision belongs to the sink's pattern, not to the logger, so
- * loggers with different options can share a sink and still write valid JSON.
+ * Anything that does not match the protocol exactly is reported as foreign, so a damaged payload ends up escaped in the
+ * message instead of breaking the line.
  */
-class fields_flag final : public spdlog::custom_flag_formatter
+inline parsed_payload parse_payload(std::string_view p, const payload_token &token) noexcept
 {
-public:
-    /** @brief after_header tells whether the pattern writes header fields before this flag. */
-    explicit fields_flag(bool after_header)
-        : after_header_(after_header)
+    if (p.size() < PAYLOAD_HEADER_SIZE || std::memcmp(p.data(), token.data(), TOKEN_SIZE) != 0)
     {
+        return {};
     }
-
-    void format(const spdlog::details::log_msg &msg, const std::tm & /*tm_time*/, spdlog::memory_buf_t &dest) override
+    static constexpr unsigned NIBBLE_BITS = 4U;
+    const char kind = p[TOKEN_SIZE];
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < SIZE_DIGITS; ++i)
     {
-        const char *first = msg.payload.data();
-        const char *const last = first + msg.payload.size();
-        if (!after_header_ && first != last && *first == ',')
+        const int d = hex_value(p[TOKEN_SIZE + 1 + i]);
+        if (d < 0)
         {
-            ++first;
+            return {};
         }
-        dest.append(first, last);
+        n = (n << NIBBLE_BITS) | static_cast<std::size_t>(d);
     }
-
-    [[nodiscard]] std::unique_ptr<spdlog::custom_flag_formatter> clone() const override
+    const std::string_view rest = p.substr(PAYLOAD_HEADER_SIZE);
+    const bool kind_ok = (kind == KIND_FIELDS && n == rest.size()) || (kind == KIND_MESSAGE && n < rest.size());
+    if (!kind_ok)
     {
-        return std::make_unique<fields_flag>(after_header_);
+        return {};
     }
-
-private:
-    bool after_header_;
-};
+    const std::string_view fields = rest.substr(0, n);
+    const std::string_view message = rest.substr(n);
+    const bool fields_ok = fields.empty() || fields.front() == ',';
+    const bool message_ok = message.empty() || (message.size() >= 2 && message.front() == '"' && message.back() == '"');
+    if (!fields_ok || !message_ok)
+    {
+        return {};
+    }
+    return {true, fields, message};
+}
 
 /**
- * @brief Builds the spdlog pattern for a logger: the header fields followed by fields_flag and a closing brace.
+ * @brief Writes the size of the fields into the placeholder that precedes them in a payload.
  *
- * @return Whether the pattern has at least one header field.
+ * Throws std::length_error when the fields do not fit the fixed-width size.
  */
-inline bool make_json_pattern(std::string &out, const json_options &opts)
+inline void patch_hex_size(spdlog::memory_buf_t &out, std::size_t at, std::size_t size)
 {
-    out = "{";
-    bool any = false;
-    const auto key = [&](const std::string &k) {
-        if (any)
-        {
-            out.push_back(',');
-        }
-        append_pattern_literal(out, k);
-        out.push_back(':');
-        any = true;
-    };
-    if (opts.timestamp_key)
+    static constexpr char HEX_DIGITS[] = "0123456789abcdef";
+    static constexpr unsigned NIBBLE_BITS = 4U;
+    static constexpr unsigned NIBBLE_MASK = 0xFU;
+    if (size > MAX_FIELDS_SIZE)
     {
-        key(*opts.timestamp_key);
-        // UTC ends in a literal Z because spdlog before 1.13 prints the local offset in UTC mode.
-        out += opts.time_type == spdlog::pattern_time_type::utc ? R"("%Y-%m-%dT%H:%M:%S.%eZ")"
-                                                                : R"("%Y-%m-%dT%H:%M:%S.%e%z")";
+        throw std::length_error("jspdlog: fields larger than 4 GiB");
     }
-    if (opts.logger_key)
+    for (std::size_t i = 0; i < SIZE_DIGITS; ++i)
     {
-        key(*opts.logger_key);
-        out += '%';
-        out += NAME_FLAG;
+        const unsigned shift = NIBBLE_BITS * static_cast<unsigned>(SIZE_DIGITS - 1 - i);
+        out.data()[at + i] = HEX_DIGITS[(size >> shift) & NIBBLE_MASK];
     }
-    if (opts.level_key)
-    {
-        key(*opts.level_key);
-        out += R"("%l")";
-    }
-    if (opts.process_key)
-    {
-        key(*opts.process_key);
-        out += "%P";
-    }
-    if (opts.thread_key)
-    {
-        key(*opts.thread_key);
-        out += "%t";
-    }
-    out += '%';
-    out += FIELDS_FLAG;
-    out += '}';
-    return any;
 }
 
 /** @brief std::remove_cvref_t for C++17. */
@@ -382,6 +464,263 @@ struct fmt::formatter<jspdlog::detail::deferred_payload<Write>>
 
 namespace jspdlog
 {
+
+class json_logger;
+
+/**
+ * @brief An spdlog formatter that renders every message as one JSON object.
+ *
+ * The line holds the header fields chosen in json_options, the call site if source_key is set, the fields of a
+ * json_logger call and the message. A payload written by a json_logger is split into fields and message. Any other
+ * payload is escaped whole into the message field, so the line is valid JSON whoever logged it.
+ *
+ * Like spdlog's own formatters it keeps a timestamp cache and is called under the sink's mutex, so give each sink its
+ * own instance. Use install_json_formatter to install it, or call format from a callback sink.
+ *
+ * @code
+ * auto formatter = std::make_shared<jspdlog::json_formatter>(options);
+ * auto sink = std::make_shared<spdlog::sinks::callback_sink_mt>([formatter](const spdlog::details::log_msg &msg) {
+ *     spdlog::memory_buf_t line;
+ *     formatter->format(msg, line);
+ *     send(std::string_view{line.data(), line.size()});
+ * });
+ * @endcode
+ */
+class json_formatter final : public spdlog::formatter
+{
+public:
+    /** @brief Creates a formatter for the given options. */
+    explicit json_formatter(json_options options = {})
+        : json_formatter(std::move(options), detail::process_token())
+    {
+    }
+
+    /** @brief Appends one line, ending in the configured line terminator, to dest. */
+    void format(const spdlog::details::log_msg &msg, spdlog::memory_buf_t &dest) override
+    {
+        bool first = true;
+        const auto key = [&](const std::string &quoted_key_colon) {
+            if (!first)
+            {
+                dest.push_back(',');
+            }
+            first = false;
+            detail::append(dest, quoted_key_colon);
+        };
+
+        dest.push_back('{');
+        if (opts_.timestamp_key)
+        {
+            key(timestamp_key_);
+            append_timestamp_(msg, dest);
+        }
+        if (opts_.logger_key)
+        {
+            key(logger_key_);
+            detail::append_json_quoted(dest, detail::view(msg.logger_name));
+        }
+        if (opts_.level_key)
+        {
+            key(level_key_);
+            detail::append_json_quoted(dest, detail::level_name(detail::msg_level(msg)));
+        }
+        if (opts_.process_key)
+        {
+            key(process_key_);
+            detail::append_int(dest, spdlog::details::os::pid());
+        }
+        if (opts_.thread_key)
+        {
+            key(thread_key_);
+            detail::append_int(dest, msg.thread_id);
+        }
+        if (opts_.source_key && !msg.source.empty())
+        {
+            key(source_key_);
+            append_source_(msg.source, dest);
+        }
+
+        const std::string_view payload = detail::view(msg.payload);
+        const detail::parsed_payload parsed = detail::parse_payload(payload, token_);
+        if (parsed.ours)
+        {
+            std::string_view fields = parsed.fields;
+            if (first && !fields.empty())
+            {
+                fields.remove_prefix(1); // The first entry needs no comma.
+                first = false;
+            }
+            detail::append(dest, fields);
+            if (!parsed.message.empty())
+            {
+                key(message_key_);
+                detail::append(dest, parsed.message);
+            }
+        }
+        else
+        {
+            key(message_key_);
+            detail::append_json_quoted(dest, payload);
+        }
+        dest.push_back('}');
+        detail::append(dest, eol_);
+    }
+
+    /** @brief Returns a copy with the same options and token and an empty timestamp cache. */
+    [[nodiscard]] std::unique_ptr<spdlog::formatter> clone() const override
+    {
+        return std::unique_ptr<spdlog::formatter>(new json_formatter(opts_, token_));
+    }
+
+private:
+    friend class json_logger;
+
+    /** @brief Creates a formatter that recognizes payloads with the given token, and escapes the keys once. */
+    json_formatter(json_options options, const detail::payload_token &token)
+        : opts_(std::move(options)),
+          token_(token),
+          eol_(opts_.eol.value_or(spdlog::details::os::default_eol)),
+          message_key_(quote_key_(opts_.message_key))
+    {
+        const auto prepare = [](const std::optional<std::string> &key) {
+            return key ? quote_key_(*key) : std::string{};
+        };
+        timestamp_key_ = prepare(opts_.timestamp_key);
+        logger_key_ = prepare(opts_.logger_key);
+        level_key_ = prepare(opts_.level_key);
+        process_key_ = prepare(opts_.process_key);
+        thread_key_ = prepare(opts_.thread_key);
+        source_key_ = prepare(opts_.source_key);
+    }
+
+    /** @brief Returns the key as a quoted JSON string followed by a colon. */
+    static std::string quote_key_(const std::string &key)
+    {
+        std::string out;
+        detail::append_json_quoted(out, key);
+        out.push_back(':');
+        return out;
+    }
+
+    /** @brief Appends two decimal digits of a value from 0 to 99. */
+    template <typename Buffer>
+    static void append_2_(Buffer &out, int value)
+    {
+        static constexpr int BASE = 10;
+        out.push_back(static_cast<char>('0' + (value / BASE)));
+        out.push_back(static_cast<char>('0' + (value % BASE)));
+    }
+
+    /** @brief Appends the quoted RFC 3339 timestamp with milliseconds, rebuilding the cached part once per second. */
+    void append_timestamp_(const spdlog::details::log_msg &msg, spdlog::memory_buf_t &dest)
+    {
+        static constexpr int YEAR_BASE = 1900;
+        static constexpr int CENTURY = 100;
+        static constexpr int MINUTES_PER_HOUR = 60;
+        static constexpr int MILLIS_HUNDREDS = 100;
+        const auto since_epoch = msg.time.time_since_epoch();
+        // floor keeps the milliseconds in 0 to 999 for times before the epoch too.
+        const auto whole = std::chrono::floor<std::chrono::seconds>(since_epoch);
+        const auto millis =
+            static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(since_epoch - whole).count());
+        const std::time_t second = spdlog::log_clock::to_time_t(spdlog::log_clock::time_point{whole});
+        if (!cached_second_ || second != *cached_second_)
+        {
+            const bool utc = opts_.time_type == spdlog::pattern_time_type::utc;
+            const std::tm tm = utc ? spdlog::details::os::gmtime(second) : spdlog::details::os::localtime(second);
+            cached_prefix_.clear();
+            cached_prefix_.push_back('"');
+            append_2_(cached_prefix_, (tm.tm_year + YEAR_BASE) / CENTURY);
+            append_2_(cached_prefix_, (tm.tm_year + YEAR_BASE) % CENTURY);
+            cached_prefix_.push_back('-');
+            append_2_(cached_prefix_, tm.tm_mon + 1);
+            cached_prefix_.push_back('-');
+            append_2_(cached_prefix_, tm.tm_mday);
+            cached_prefix_.push_back('T');
+            append_2_(cached_prefix_, tm.tm_hour);
+            cached_prefix_.push_back(':');
+            append_2_(cached_prefix_, tm.tm_min);
+            cached_prefix_.push_back(':');
+            append_2_(cached_prefix_, tm.tm_sec);
+            cached_prefix_.push_back('.');
+            zone_.clear();
+            if (utc)
+            {
+                zone_ = "Z\"";
+            }
+            else
+            {
+                const int offset = spdlog::details::os::utc_minutes_offset(tm);
+                const int magnitude = offset < 0 ? -offset : offset;
+                zone_.push_back(offset < 0 ? '-' : '+');
+                append_2_(zone_, magnitude / MINUTES_PER_HOUR);
+                zone_.push_back(':');
+                append_2_(zone_, magnitude % MINUTES_PER_HOUR);
+                zone_.push_back('"');
+            }
+            cached_second_ = second;
+        }
+        detail::append(dest, cached_prefix_);
+        dest.push_back(static_cast<char>('0' + (millis / MILLIS_HUNDREDS)));
+        append_2_(dest, millis % MILLIS_HUNDREDS);
+        detail::append(dest, zone_);
+    }
+
+    /**
+     * @brief Appends the call site as an object, with the base name of the file.
+     *
+     * Nothing is cached, because a file name pointer may be reused for different text once a dynamic call site ends.
+     */
+    static void append_source_(const spdlog::source_loc &src, spdlog::memory_buf_t &dest)
+    {
+        std::string_view file{src.filename != nullptr ? src.filename : ""};
+        if (const auto slash = file.find_last_of("/\\"); slash != std::string_view::npos)
+        {
+            file.remove_prefix(slash + 1);
+        }
+        detail::append(dest, std::string_view{R"({"file":)"});
+        detail::append_json_quoted(dest, file);
+        detail::append(dest, std::string_view{R"(,"line":)"});
+        detail::append_int(dest, src.line);
+        detail::append(dest, std::string_view{R"(,"function":)"});
+        detail::append_json_quoted(dest, std::string_view{src.funcname != nullptr ? src.funcname : ""});
+        dest.push_back('}');
+    }
+
+    /** @brief The options the formatter was created with. */
+    json_options opts_;
+    /** @brief The token that marks payloads written by a json_logger. */
+    detail::payload_token token_;
+    /** @brief The line terminator. */
+    std::string eol_;
+    /** @brief The message key, quoted and followed by a colon. */
+    std::string message_key_;
+    /** @brief The header keys, quoted and followed by a colon. Empty for keys that are left out. */
+    std::string timestamp_key_, logger_key_, level_key_, process_key_, thread_key_, source_key_;
+    /** @brief The second of the cached timestamp part, empty before the first line. */
+    std::optional<std::time_t> cached_second_;
+    /** @brief The quoted date and time up to the decimal point. */
+    std::string cached_prefix_;
+    /** @brief The UTC offset, or Z, with the closing quote. */
+    std::string zone_;
+};
+
+/**
+ * @brief Makes a logger that jspdlog does not wrap write JSON lines.
+ *
+ * Plain messages become {"message":"..."} with the header fields of the options. Use it on the default logger or on
+ * third-party loggers. It replaces the formatter of every sink of the logger.
+ */
+inline void install_json_formatter(spdlog::logger &logger, const json_options &options = {})
+{
+    logger.set_formatter(std::make_unique<json_formatter>(options));
+}
+
+/** @brief The same for one sink, for example a sink added to a json_logger's spdlog::logger after construction. */
+inline void install_json_formatter(spdlog::sinks::sink &sink, const json_options &options = {})
+{
+    sink.set_formatter(std::make_unique<json_formatter>(options));
+}
 
 /**
  * @brief Typed key/value fields for a log line, serialized when they are inserted.
@@ -632,10 +971,15 @@ private:
  *
  * The message is always a JSON string. Put values that should keep their type in fields.
  *
- * The constructors and adopt install the JSON pattern on every sink of the spdlog::logger. A sink shared with another
- * json_logger works; the options of the logger created last apply to both. A sink shared with a plain spdlog logger, or
- * added to the spdlog::logger later, does not get JSON lines. Like spdlog, the logging calls do not throw: an exception
- * from a user formatter goes to the spdlog::logger's error handler and the line is dropped.
+ * The constructors and adopt install a json_formatter on every sink of the spdlog::logger. A sink shared with another
+ * json_logger works; the options of the logger created last apply to both. A sink added to the spdlog::logger later, or
+ * shared with a plain spdlog logger, needs install_json_formatter to get JSON lines. Like spdlog, the logging calls do
+ * not throw: an exception from a user formatter goes to the spdlog::logger's error handler and the line is dropped.
+ *
+ * A json_logger and the formatter it installs agree on the payload token, so they work together even when the logger
+ * is used from another module than the one that installed the formatter. Mixing a formatter installed by one module
+ * with a json_logger of another module on one sink is not supported on platforms where each module has its own token,
+ * such as Windows DLLs: the line stays valid JSON, but the fields appear inside the message.
  */
 class json_logger
 {
@@ -665,8 +1009,9 @@ public:
     /**
      * @brief Wraps an existing spdlog::logger, for example an async logger.
      *
-     * The formatter of the logger's sinks is replaced by jspdlog's, which affects everyone using that spdlog::logger or
-     * those sinks. Its level and error handler stay as they are. Throws std::invalid_argument if the logger is null.
+     * The formatter of the logger's sinks is replaced by a json_formatter, which affects everyone using that
+     * spdlog::logger or those sinks. Its level and error handler stay as they are. Throws std::invalid_argument if the
+     * logger is null.
      */
     [[nodiscard]] static json_logger adopt(std::shared_ptr<spdlog::logger> logger, const json_options &options = {})
     {
@@ -700,7 +1045,7 @@ public:
     {
         if (should_log(lvl))
         {
-            emit_(lvl, props, [](spdlog::memory_buf_t & /*out*/) {});
+            emit_(lvl, props, detail::KIND_FIELDS, [](spdlog::memory_buf_t & /*out*/) {});
         }
     }
 
@@ -724,7 +1069,7 @@ public:
     {
         if (should_log(lvl))
         {
-            emit_(lvl, props, [&](spdlog::memory_buf_t &out) {
+            emit_(lvl, props, detail::KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
                 spdlog::memory_buf_t msg;
                 spdlog::fmt_lib::format_to(std::back_inserter(msg), fmt, std::forward<Args>(args)...);
                 append_message_(out, msg);
@@ -738,7 +1083,7 @@ public:
     {
         if (should_log(lvl))
         {
-            emit_(lvl, props, [&msg](spdlog::memory_buf_t &out) {
+            emit_(lvl, props, detail::KIND_MESSAGE, [&msg](spdlog::memory_buf_t &out) {
                 spdlog::memory_buf_t buf;
                 spdlog::fmt_lib::format_to(std::back_inserter(buf), "{}", msg);
                 append_message_(out, buf);
@@ -808,29 +1153,18 @@ public:
     /**
      * @brief The underlying spdlog::logger, for settings jspdlog does not wrap, such as the error handler.
      *
-     * Setting a pattern or formatter on it or on its sinks, or logging through it directly, produces lines that are not
-     * valid JSON. Adding a sink to it later gives that sink spdlog's default pattern.
+     * Logging through it directly is safe: the message is escaped into the message field. Setting a pattern or
+     * formatter on it or on its sinks replaces the json_formatter, and the lines then show the payload protocol. Call
+     * install_json_formatter on a sink added to it later.
      */
     [[nodiscard]] const std::shared_ptr<spdlog::logger> &spdlog_logger() const noexcept { return logger_; }
 
 private:
-    /** @brief Installs the JSON pattern on a logger that is known not to be null. */
+    /** @brief Installs a json_formatter on a logger that is known not to be null. */
     json_logger(std::shared_ptr<spdlog::logger> logger, const json_options &options)
-        : logger_(std::move(logger))
+        : logger_(std::move(logger)), token_(detail::process_token())
     {
-        std::string pattern;
-        const bool has_header = detail::make_json_pattern(pattern, options);
-        spdlog::pattern_formatter::custom_flags flags;
-        flags[detail::NAME_FLAG] = std::make_unique<detail::name_flag>();
-        flags[detail::FIELDS_FLAG] = std::make_unique<detail::fields_flag>(has_header);
-        logger_->set_formatter(
-            std::make_unique<spdlog::pattern_formatter>(
-                std::move(pattern),
-                options.time_type,
-                options.eol.value_or(spdlog::details::os::default_eol),
-                std::move(flags)
-            )
-        );
+        logger_->set_formatter(std::unique_ptr<spdlog::formatter>(new json_formatter(options, token_)));
     }
 
     /** @brief Creates the spdlog::logger for one sink, rejecting a null sink. */
@@ -871,30 +1205,37 @@ private:
         return EMPTY;
     }
 
-    /** @brief Appends the message key and the message as a quoted JSON string. */
+    /** @brief Appends the message as a quoted JSON string. The formatter adds the key. */
     static void append_message_(spdlog::memory_buf_t &out, const spdlog::memory_buf_t &msg)
     {
-        static constexpr std::string_view MESSAGE_SEPARATOR = R"(,"message":)";
-        out.append(MESSAGE_SEPARATOR.data(), MESSAGE_SEPARATOR.data() + MESSAGE_SEPARATOR.size());
         detail::append_json_quoted(out, std::string_view{msg.data(), msg.size()});
     }
 
     /**
-     * @brief Logs the bound and per-call fields followed by what write_message appends, each part starting with a
-     * comma. spdlog runs the serialization while it formats the line, inside its error handling.
+     * @brief Logs a payload: the token, the kind, the size of the fields, the bound and per-call fields and then what
+     * write_message appends. spdlog runs the serialization while it formats the line, inside its error handling.
+     *
+     * The fields are an already escaped list, each entry starting with a comma. The message is appended as a quoted
+     * JSON string, so it is escaped once however many sinks the logger has.
      */
     template <typename WriteMessage>
-    void emit_(level lvl, const json_properties &props, const WriteMessage &write_message) const
+    void emit_(level lvl, const json_properties &props, char kind, const WriteMessage &write_message) const
     {
         const auto write = [&](spdlog::memory_buf_t &out) {
+            detail::append(out, std::string_view{token_.data(), token_.size()});
+            out.push_back(kind);
+            const std::size_t size_at = out.size();
+            detail::append(out, std::string_view{"00000000", detail::SIZE_DIGITS});
+            const std::size_t fields_at = out.size();
             if (props.empty())
             {
-                out.append(bound_.data(), bound_.data() + bound_.size());
+                detail::append(out, bound_);
             }
             else
             {
                 json_properties::append_merged_(out, properties_, props);
             }
+            detail::patch_hex_size(out, size_at, out.size() - fields_at);
             write_message(out);
         };
         logger_->log(lvl, "{}", detail::deferred_payload<decltype(write)>{&write});
@@ -902,6 +1243,8 @@ private:
 
     /** @brief The spdlog::logger shared by every copy. */
     std::shared_ptr<spdlog::logger> logger_;
+    /** @brief The token that starts every payload, the same as in the formatter this logger installed. */
+    detail::payload_token token_;
     /** @brief Fields bound by with_properties. */
     json_properties properties_;
     /** @brief The bound fields serialized once, ready to append to every line. */
