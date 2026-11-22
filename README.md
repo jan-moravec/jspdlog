@@ -245,7 +245,7 @@ When you create a `json_logger` (or `adopt()` one), jspdlog installs a JSON patt
 
 ### At a glance
 
-**Safe**
+#### Safe
 
 - any sink that formats lines: console, files, custom sinks derived from `base_sink`
 - levels, `flush_on()`, `flush()` and the error handler
@@ -253,7 +253,7 @@ When you create a `json_logger` (or `adopt()` one), jspdlog installs a JSON patt
 - several json_loggers sharing a sink, and `spdlog::logger::clone()`
 - registering in the spdlog v1 registry, `spdlog::get()`, registry levels
 
-**Needs care**
+#### Needs care
 
 - sinks that write the raw message instead of the formatted line
 - sinks shared with a plain spdlog logger, and sinks added after the json_logger was created
@@ -261,7 +261,7 @@ When you create a `json_logger` (or `adopt()` one), jspdlog installs a JSON patt
 - the lifetime of the spdlog v1 async thread pool
 - `SPDLOG_LEVEL_NAMES`, which changes the `level` values
 
-**Breaks the JSON output**
+#### Breaks the JSON output
 
 - `set_pattern()` or `set_formatter()` on the logger or its sinks, or globally on a registered logger (v1)
 - logging through `spdlog_logger()` directly, or pointing the default logger at it
