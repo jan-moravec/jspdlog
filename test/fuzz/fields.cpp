@@ -302,7 +302,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     const ojson parsed = fuzz::parse_line(text, "\n");
     FUZZ_CHECK(parsed.dump() == expected.dump());
 
-    // The sibling that was not given per-call fields still writes only the bound ones.
+    // Per-call fields do not stick: the next call on the same logger writes only the bound ones.
     h.sink->lines.clear();
     grandchild.info("bound only");
     ojson bound_only = ojson::object();

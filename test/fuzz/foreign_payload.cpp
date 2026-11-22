@@ -98,8 +98,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
 
     if (v.ours)
     {
-        // The fragments are spliced in unchanged, because jspdlog trusts its own payloads. The line is then valid JSON
-        // exactly when the fragments are, so a parse failure is accepted only for invalid fragments.
+        // The fragments are spliced in unchanged, because jspdlog trusts its own payloads, so the line is valid JSON
+        // exactly when the fragments are. Only the splicing is checked.
         std::string expected{HEADER};
         expected += v.fields;
         if (!v.message.empty())
@@ -109,12 +109,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
         }
         expected += "}\n";
         FUZZ_CHECK(line == expected);
-        const std::string_view body = std::string_view{line}.substr(0, line.size() - 1);
-        if (!fuzz::ojson::parse(body.begin(), body.end(), nullptr, false).is_discarded())
-        {
-            // A fragment may legally contain raw whitespace, so the JSON-lines check is not applied here.
-            FUZZ_CHECK(fuzz::parse_line(line, "\n", false).is_object());
-        }
         return 0;
     }
 

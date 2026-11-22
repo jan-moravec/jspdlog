@@ -13,6 +13,12 @@
 #include <string>
 #include <vector>
 
+#ifndef _WIN32
+#include <sys/wait.h>
+
+#include <unistd.h>
+#endif
+
 using test_support::deterministic_options;
 using test_support::fixture;
 
@@ -258,6 +264,37 @@ TEST_CASE("formatter: process and thread are numbers", "[formatter]")
             line, std::regex(R"re(^\{"logger":"name","level":"info","pid":\d+,"tid":\d+,"message":"x"\}\n$)re")
         )
     );
+}
+
+TEST_CASE("formatter: process is the id of the current process", "[formatter]")
+{
+    auto opts = no_header_options();
+    opts.process_key = "pid";
+    jspdlog::json_formatter formatter(opts);
+    const auto expected = [](auto pid) {
+        return R"({"pid":)" + std::to_string(pid) +
+               R"(,"message":"x"})"
+               "\n";
+    };
+    // Twice, so the second line comes from the cache.
+    CHECK(format_payload(formatter, "x") == expected(spdlog::details::os::pid()));
+    CHECK(format_payload(formatter, "x") == expected(spdlog::details::os::pid()));
+
+#ifndef _WIN32
+    // A forked child must not write the parent's cached id. The child reports through its exit status only.
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0)
+    {
+        const bool own = format_payload(formatter, "x") == expected(::getpid());
+        ::_exit(own ? 0 : 1);
+    }
+    int status = 0;
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
+    CHECK(format_payload(formatter, "x") == expected(::getpid()));
+#endif
 }
 
 TEST_CASE("formatter: eol is appended", "[formatter]")

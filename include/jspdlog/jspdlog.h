@@ -61,6 +61,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -77,6 +78,10 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#ifndef _WIN32
+#include <pthread.h>
+#endif
 
 #ifndef JSPDLOG_ASSERT
 #include <cassert>
@@ -348,6 +353,37 @@ inline const payload_token &process_token()
     return TOKEN;
 }
 
+/**
+ * @brief Returns the id of the current process, as written under json_options::process_key.
+ *
+ * On POSIX systems getpid is a system call, which would cost more than the rest of a short line, so the id is read once
+ * and cached. A handler registered with pthread_atfork clears the cache in the child after fork, so a forked child
+ * writes its own id. A child created without the fork function of the C library, for example by a raw clone system
+ * call, would keep the parent's id. If the handler cannot be registered, the id is read on every call. On Windows the
+ * call is cheap and is not cached.
+ */
+inline std::size_t process_id() noexcept
+{
+#ifdef _WIN32
+    return static_cast<std::size_t>(spdlog::details::os::pid());
+#else
+    static std::atomic<std::size_t> cached{0};
+    static const bool CACHEABLE =
+        ::pthread_atfork(nullptr, nullptr, [] { cached.store(0, std::memory_order_relaxed); }) == 0;
+    if (!CACHEABLE)
+    {
+        return static_cast<std::size_t>(spdlog::details::os::pid());
+    }
+    std::size_t pid = cached.load(std::memory_order_relaxed);
+    if (pid == 0)
+    {
+        pid = static_cast<std::size_t>(spdlog::details::os::pid());
+        cached.store(pid, std::memory_order_relaxed);
+    }
+    return pid;
+#endif
+}
+
 /** @brief What the formatter found in a payload. */
 struct parsed_payload
 {
@@ -520,7 +556,7 @@ public:
         if (opts_.process_key)
         {
             key(process_key_);
-            detail::append_int(dest, spdlog::details::os::pid());
+            detail::append_int(dest, detail::process_id());
         }
         if (opts_.thread_key)
         {
