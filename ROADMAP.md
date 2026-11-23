@@ -153,8 +153,8 @@ Milestones are development stages on `main`, not releases. The first tag is
 - [x] Child loggers share an immutable, pre-serialized context through a
   `shared_ptr` instead of copying it.
 - [x] Single options struct for the formatter and the logger.
-- Fuzzing infrastructure and targets 1 to 4 and 6 (section 6), with a CI
-  fuzz job.
+- [x] Fuzzing infrastructure and targets 1 to 4 and 6 (section 6), with a CI
+  fuzz job, plus a benchmark program that CI runs and reports without gating.
 - [x] `info(value)` accepts runtime strings only (`std::string`,
   `std::string_view`, `const char*`, writable `char` buffers); string literals still go to the
   compile-time-checked format overload. Typed values belong in fields.
@@ -238,19 +238,11 @@ jspdlog's own fields.
 
 ### Setup
 
-- **libFuzzer** with ASan and UBSan, built by a `clang-fuzz` preset (Clang 23,
-  Linux). Targets live in `test/fuzz/<target>.cpp`.
-- **Replay as ordinary tests.** Each target is also linked with a small driver
-  that runs its saved inputs, so every compiler in the CI matrix (including
-  MSVC and GCC) replays them as CTest cases with the label `fuzz-replay`.
-- **Saved inputs.** A small seed corpus per target in
-  `test/fuzz/corpus/<target>/`, and minimized crash inputs in
-  `test/fuzz/regressions/<target>/`, which stay forever as regression tests.
-  Both are byte-exact: `.gitattributes` marks them `-text` and pre-commit
-  excludes them from whitespace fixers.
-- **Oracle.** Output is parsed with a strict JSON parser (nlohmann/json, already
-  a test dependency). Parsing must succeed, every line must be exactly one
-  object, and the parsed values must match what was logged.
+How to build, run and extend the targets, and the rules for saved inputs, is in
+[CONTRIBUTING.md](CONTRIBUTING.md#fuzzing). In short: libFuzzer with ASan and
+UBSan from the `clang-fuzz` preset, every saved input replayed as a CTest case
+with the label `fuzz-replay` on every compiler, and an oracle that parses each
+line with nlohmann/json.
 
 ### Targets
 
@@ -320,7 +312,7 @@ separate per-version headers aren't needed.
 | 7   | Minimum spdlog                       | 1.12.                                                                                                                                                                       |
 | 8   | Raw-message sinks                    | A documented route per sink, no stripping helper; `mongo_sink` and `kafka_sink` unsupported.                                                                                |
 | 9   | Source `file`                        | Base name, written by the formatter from 0.2.0 on.                                                                                                                          |
-| 10  | Process id                           | Read per message, like spdlog; revisit only if the benchmark shows a real cost.                                                                                             |
+| 10  | Process id                           | Cached, because getpid is a system call on Linux; a pthread_atfork handler clears it in a forked child.                                                                     |
 | 11  | Per-call key replacing a context key | Context position: a key stays where it first appeared.                                                                                                                      |
 | 12  | Getter name for bound fields         | `context()`.                                                                                                                                                                |
 | 13  | Deprecated aliases for 0.1 names     | None, clean rename.                                                                                                                                                         |

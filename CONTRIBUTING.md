@@ -13,6 +13,8 @@ also read [AGENTS.md](AGENTS.md), the short binding summary of the build and com
   - [Build options](#build-options)
 - [Running tests](#running-tests)
 - [Sanitizers and coverage](#sanitizers-and-coverage)
+- [Fuzzing](#fuzzing)
+- [Benchmarks](#benchmarks)
 - [Code style and pre-commit](#code-style-and-pre-commit)
 - [Pull requests](#pull-requests)
 - [Release process](#release-process)
@@ -53,7 +55,9 @@ cmake --workflow --preset release
 | `relwithdebinfo`   | `RelWithDebInfo` | Optimized with debug info, for profiling.                  |
 | `clang-asan-ubsan` | `RelWithDebInfo` | Clang 23, AddressSanitizer and UndefinedBehaviorSanitizer. |
 | `clang-tsan`       | `RelWithDebInfo` | Clang 23, ThreadSanitizer.                                 |
+| `clang-fuzz`       | `RelWithDebInfo` | Clang 23, libFuzzer targets with ASan and UBSan.           |
 | `clang-coverage`   | `RelWithDebInfo` | Clang 23, source-based coverage.                           |
+| `bench`            | `Release`        | The benchmark program only, no tests or examples.          |
 
 Every configure preset has matching build, test and workflow presets. All presets treat warnings in the tests and
 examples as errors (`JSPDLOG_WARNINGS_AS_ERRORS=ON`).
@@ -76,14 +80,16 @@ With the Visual Studio generator, add `-G "Visual Studio 17 2022" -A x64` to the
 `JSPDLOG_BUILD_TESTS`, `JSPDLOG_BUILD_EXAMPLES` and `JSPDLOG_INSTALL` default to `ON` only when jspdlog is the top-level
 project, so an embedding project gets a quiet build.
 
-| Option                          | Description                                                                        |
-| ------------------------------- | ---------------------------------------------------------------------------------- |
-| `JSPDLOG_BUILD_TESTS`           | Build the Catch2 tests.                                                            |
-| `JSPDLOG_BUILD_EXAMPLES`        | Build the programs under `example/`.                                               |
-| `JSPDLOG_INSTALL`               | Generate install rules for the header and the CMake package.                       |
-| `JSPDLOG_TEST_NLOHMANN_INTEROP` | Build the `raw_json` / nlohmann/json interop test. Default `ON`.                   |
-| `JSPDLOG_WARNINGS_AS_ERRORS`    | Treat warnings in the tests and examples as errors. Default `OFF`; presets set it. |
-| `JSPDLOG_SPDLOG_GIT_TAG`        | spdlog tag or commit to fetch when no installed spdlog is found.                   |
+| Option                       | Description                                                                               |
+| ---------------------------- | ----------------------------------------------------------------------------------------- |
+| `JSPDLOG_BUILD_TESTS`        | Build the Catch2 tests.                                                                   |
+| `JSPDLOG_BUILD_EXAMPLES`     | Build the programs under `example/`.                                                      |
+| `JSPDLOG_INSTALL`            | Generate install rules for the header and the CMake package.                              |
+| `JSPDLOG_TEST_WITH_NLOHMANN` | Build the tests that need nlohmann/json: interop and fuzz replay. Default `ON`.           |
+| `JSPDLOG_BUILD_FUZZERS`      | Build the libFuzzer targets (Clang only). Default `OFF`; the `clang-fuzz` preset sets it. |
+| `JSPDLOG_BUILD_BENCH`        | Build the benchmark program. Default `OFF`; the `bench` preset sets it.                   |
+| `JSPDLOG_WARNINGS_AS_ERRORS` | Treat warnings in the tests and examples as errors. Default `OFF`; presets set it.        |
+| `JSPDLOG_SPDLOG_GIT_TAG`     | spdlog tag or commit to fetch when no installed spdlog is found.                          |
 
 The tests and examples compile with a strict warning set ([cmake/CompilerWarnings.cmake](cmake/CompilerWarnings.cmake)):
 `/W4 /permissive-` on MSVC, and `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Wold-style-cast` and
@@ -126,6 +132,75 @@ scripts/ci/export-coverage.sh   # merges the profiles into coverage.lcov and pri
 The sanitizer test presets stop at the first finding, so CTest reports it as a failure. Coverage counts the header only;
 dependencies, tests and examples are filtered out.
 
+## Fuzzing
+
+jspdlog promises that every line is one valid JSON object, whatever the input. The fuzz targets in
+[test/fuzz](test/fuzz) test that with inputs nobody writes by hand. There are five libFuzzer targets:
+
+| Target            | What it checks                                                                                      |
+| ----------------- | --------------------------------------------------------------------------------------------------- |
+| `escape`          | The escaped string decodes back to the input bytes, valid UTF-8 or not.                             |
+| `fields`          | Operations on `fields`, `with()` and per-call fields against a short reference model.               |
+| `logger_line`     | Fuzzed logger name, header keys, time type, line terminator and message: one object per line.       |
+| `foreign_payload` | Payloads logged straight on the `spdlog::logger`, with prefixes of the payload token: no injection. |
+| `numbers`         | Every integer width, `float`, `double` and `long double` round-trip; NaN and infinity are `null`.   |
+
+### Run a target
+
+libFuzzer runs on Linux with Clang (natively, under WSL, or in CI):
+
+```sh
+cmake --preset clang-fuzz
+cmake --build --preset clang-fuzz --target fuzz_escape
+mkdir -p work/escape
+build/clang-fuzz/test/fuzz/fuzz_escape work/escape test/fuzz/corpus/escape -max_total_time=60
+```
+
+The working corpus (`work/`) is yours; the checked-in corpus is read-only input. A crash writes `crash-*` to the current
+directory (or to `-artifact_prefix`) and the run stops. `cmake --workflow --preset clang-fuzz` builds everything and
+replays the saved inputs.
+
+### Saved inputs and replay
+
+Every file in `test/fuzz/corpus/<target>/` (small seeds) and `test/fuzz/regressions/<target>/` (minimized crashing inputs) is
+also a CTest case on every compiler of the CI matrix, including MSVC and GCC, labelled `fuzz-replay`:
+
+```sh
+ctest --preset release -L fuzz-replay
+```
+
+Both folders are byte-exact. `.gitattributes` marks them `-text` and pre-commit skips them, so never run a formatter or
+an editor over them.
+
+### Rules
+
+- A fuzz finding is fixed with its minimized input added to `test/fuzz/regressions/<target>/`, so it replays in every
+  build. Minimize it with `fuzz_<target> -minimize_crash=1 -runs=10000 crash-<hash>`.
+- Targets are deterministic and fast: no sleeps, no files, no network, no threads.
+- The oracle must not give false alarms. A failing oracle is fixed before merging, not ignored. Until the UTF-8 policy of
+  0.4, jspdlog passes invalid UTF-8 through and nlohmann/json rejects it, so targets parse a line only when every string
+  in it is valid UTF-8 and otherwise check its shape.
+- Keep each corpus under about 50 small files. Shrink one with `fuzz_<target> -merge=1 new_corpus work/<target> test/fuzz/corpus/<target>` and copy the result back.
+- Change `escape`, the formatter or `fields`? Run `clang-fuzz` for 60 seconds per target before opening the PR.
+
+### In CI
+
+The `fuzz` job fuzzes each target for 60 seconds on every pull request and uploads the reproducer on a crash. The
+`fuzz-long` workflow takes the time per target as an input (default 1800 seconds) and also runs weekly, opening an issue
+on a crash.
+
+## Benchmarks
+
+```sh
+cmake --preset bench
+cmake --build --preset bench
+build/bench/bench/jspdlog_bench [iterations]
+```
+
+The program prints a Markdown table with the cost of one log call per case, single-threaded, into a sink that formats
+and discards. The `bench` job of the CI workflow prints it in the job summary for GCC 13 and Clang 23. It never fails
+on numbers, because CI machines are too noisy for thresholds: compare cases within one run, not across runs.
+
 ## Code style and pre-commit
 
 - **Naming follows spdlog.** Types, functions, members and locals are `snake_case`; template parameters are `CamelCase`;
@@ -154,7 +229,7 @@ versions.
 
 - Open the PR against `main`. Squash-merge is the default, so write the PR title as a commit subject.
 - Every job of the [CI workflow](.github/workflows/ci.yml) must pass: `pre-commit`, the `clang-ci` matrix (ASan + UBSan,
-  TSan, coverage), the `build-and-test` matrix and `install-smoke`.
+  TSan, coverage), `fuzz`, the `build-and-test` matrix, `install-smoke` and `bench`.
 - Keep changes focused. A reformat, a dependency bump and a behavior change are three PRs.
 - If the change affects users, add a [CHANGELOG.md](CHANGELOG.md) entry under `## [Unreleased]`. Until the first
   release the changelog stays empty, so skip this step.

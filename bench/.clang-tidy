@@ -1,0 +1,15 @@
+# Benchmark overrides.
+#
+# The benchmark is a program that prints a table with printf. Its iteration counts and the arguments of the logged
+# calls (42, 7) are literals chosen for readability, and the sink exposes a byte counter that main reads.
+
+InheritParentConfig: true
+
+Checks: >
+  -cppcoreguidelines-avoid-magic-numbers,
+  -readability-magic-numbers,
+  -cppcoreguidelines-pro-type-vararg,
+  -cert-err33-c,
+  -bugprone-exception-escape,
+  -misc-non-private-member-variables-in-classes,
+  -cppcoreguidelines-non-private-member-variables-in-classes

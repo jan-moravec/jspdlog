@@ -2,7 +2,7 @@ include(FetchContent)
 
 # Declared here (rather than in the top-level CMakeLists) so the default
 # tracks the current value of JSPDLOG_BUILD_TESTS even across reconfigures.
-option(JSPDLOG_TEST_NLOHMANN_INTEROP "Build the nlohmann/json <-> raw_json interop test (fetches nlohmann/json)" ON)
+option(JSPDLOG_TEST_WITH_NLOHMANN "Build the tests that need nlohmann/json: interop and fuzz replay (fetches it)" ON)
 
 find_package(Catch2 3 CONFIG QUIET)
 if(NOT Catch2_FOUND)
@@ -19,7 +19,7 @@ endif()
 
 include(Catch)
 
-if(JSPDLOG_TEST_NLOHMANN_INTEROP)
+if(JSPDLOG_TEST_WITH_NLOHMANN)
     find_package(nlohmann_json 3 CONFIG QUIET)
     if(NOT nlohmann_json_FOUND)
         FetchContent_Declare(
@@ -45,7 +45,7 @@ target_link_libraries(jspdlog_tests PRIVATE jspdlog::jspdlog Catch2::Catch2WithM
 # Lets a test check that the header's version macros match project(VERSION).
 target_compile_definitions(jspdlog_tests PRIVATE JSPDLOG_TEST_PROJECT_VERSION="${PROJECT_VERSION}")
 # The formatter tests parse each line with nlohmann/json when it is available and skip those checks otherwise.
-if(JSPDLOG_TEST_NLOHMANN_INTEROP)
+if(JSPDLOG_TEST_WITH_NLOHMANN)
     target_link_libraries(jspdlog_tests PRIVATE nlohmann_json::nlohmann_json)
     target_compile_definitions(jspdlog_tests PRIVATE JSPDLOG_TEST_NLOHMANN=1)
 endif()
@@ -78,7 +78,7 @@ foreach(case info_int info_vector odd_fields fields_int)
     set_tests_properties(compile_fail.${case} PROPERTIES WILL_FAIL TRUE)
 endforeach()
 
-if(JSPDLOG_TEST_NLOHMANN_INTEROP)
+if(JSPDLOG_TEST_WITH_NLOHMANN)
     add_executable(jspdlog_nlohmann_interop_test test_nlohmann_interop.cpp)
     target_link_libraries(
         jspdlog_nlohmann_interop_test
@@ -92,3 +92,8 @@ endif()
 # that has to find_package() jspdlog from an installed tree. It is driven from
 # CI as a top-level configure, not added as a subdirectory here, because the
 # find_package would otherwise fail before jspdlog is installed.
+
+# Fuzz targets, replayed as ordinary tests. They parse every line with nlohmann/json.
+if(JSPDLOG_TEST_WITH_NLOHMANN)
+    add_subdirectory(fuzz)
+endif()

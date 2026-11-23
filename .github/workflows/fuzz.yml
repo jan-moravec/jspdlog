@@ -1,0 +1,73 @@
+name: fuzz
+
+# Reusable: ci.yml runs it on every pull request, fuzz-long.yml for deeper manual and weekly runs.
+on:
+  workflow_call:
+    inputs:
+      seconds:
+        description: Fuzzing time per target, in seconds
+        type: number
+        default: 60
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz / ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [escape, fields, logger_line, foreign_payload, numbers]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Clang 23 + LLVM tools
+        # The same step as the clang-ci job. It also installs the libFuzzer runtime.
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ci/llvm.sh
+          sudo ./scripts/ci/llvm.sh 23 all
+          clang-23 --version
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@a89e43e22a96abafcd7a62db652a65ecd33052c9 # v4.4.4
+
+      - name: Configure
+        run: cmake --preset clang-fuzz
+
+      - name: Build
+        run: cmake --build --preset clang-fuzz --target "fuzz_$TARGET" "fuzz_replay_$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+
+      - name: Replay the saved inputs
+        run: ctest --preset clang-fuzz -R "fuzz_replay.$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+
+      - name: Fuzz
+        # The working corpus is work/, not the checked-in corpus, so CI never writes into the repository.
+        run: |
+          set -euo pipefail
+          mkdir -p "work/$TARGET" artifacts
+          "build/clang-fuzz/test/fuzz/fuzz_$TARGET" "work/$TARGET" "test/fuzz/corpus/$TARGET" \
+            -max_total_time="$SECONDS_PER_TARGET" -artifact_prefix="artifacts/" -print_final_stats=1
+        env:
+          TARGET: ${{ matrix.target }}
+          SECONDS_PER_TARGET: ${{ inputs.seconds }}
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:detect_stack_use_after_return=1
+          UBSAN_OPTIONS: print_stacktrace=1
+
+      - name: Upload the reproducer
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: artifacts/
+          if-no-files-found: ignore

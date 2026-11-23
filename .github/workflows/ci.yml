@@ -147,6 +147,69 @@ jobs:
           echo "clang-tidy reported $TIDY_FAILED finding(s) on changed lines; see the step summary." >&2
           exit 1
 
+  fuzz:
+    # Each libFuzzer target runs for 60 seconds under ASan and UBSan. Its saved inputs also replay in every build.
+    needs: pre-commit
+    uses: ./.github/workflows/fuzz.yml
+    with:
+      seconds: 60
+
+  bench:
+    # Prints the benchmark table in the job summary. It never fails on numbers; CI machines are too noisy.
+    needs: pre-commit
+    name: bench / ${{ matrix.cxx }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {cc: gcc-13, cxx: g++-13}
+          - {cc: clang-23, cxx: clang++-23}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Clang 23
+        if: startsWith(matrix.cc, 'clang')
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ci/llvm.sh
+          sudo ./scripts/ci/llvm.sh 23 all
+
+      - name: Install GCC 13
+        if: startsWith(matrix.cc, 'gcc')
+        env:
+          CXX_PKG: ${{ matrix.cxx }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "$CXX_PKG"
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@a89e43e22a96abafcd7a62db652a65ecd33052c9 # v4.4.4
+
+      - name: Configure
+        run: cmake --preset bench
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+
+      - name: Build
+        run: cmake --build --preset bench
+
+      - name: Run and report
+        env:
+          COMPILER: ${{ matrix.cxx }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Benchmark, $COMPILER"
+            echo
+            build/bench/bench/jspdlog_bench
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
   build-and-test:
     # Release preset (warnings as errors) across compilers, C++17/20 and spdlog v1/v2.
     needs: pre-commit
