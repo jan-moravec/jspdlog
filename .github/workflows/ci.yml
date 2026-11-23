@@ -85,7 +85,7 @@ jobs:
           llvm-cov-23 --version
 
       - name: Install CMake and Ninja
-        uses: lukka/get-cmake@a89e43e22a96abafcd7a62db652a65ecd33052c9 # v4.4.4
+        uses: lukka/get-cmake@16e8153a8b4918849d92aad131befe67a3705daa # v4.5.0
 
       - name: Configure
         run: cmake --preset "clang-$MODE"
@@ -101,7 +101,7 @@ jobs:
         # Checks come from .clang-tidy. Findings go to a PR comment and the step summary; a later step fails the job.
         if: matrix.mode == 'coverage'
         id: cpp-linter
-        uses: cpp-linter/cpp-linter-action@774040af57f011a5fc47911f08ff0c3059d1835a # v2.24.0
+        uses: cpp-linter/cpp-linter-action@71cf8e84d4876ee304e3330f314df15b9da49c67 # v2.24.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -188,7 +188,7 @@ jobs:
           sudo apt-get install -y "$CXX_PKG"
 
       - name: Install CMake and Ninja
-        uses: lukka/get-cmake@a89e43e22a96abafcd7a62db652a65ecd33052c9 # v4.4.4
+        uses: lukka/get-cmake@16e8153a8b4918849d92aad131befe67a3705daa # v4.5.0
 
       - name: Configure
         run: cmake --preset bench
@@ -256,7 +256,7 @@ jobs:
           sudo apt-get install -y "$CC_PKG" "${CXX_PKG/clang++/clang}"
 
       - name: Install CMake and Ninja
-        uses: lukka/get-cmake@a89e43e22a96abafcd7a62db652a65ecd33052c9 # v4.4.4
+        uses: lukka/get-cmake@16e8153a8b4918849d92aad131befe67a3705daa # v4.5.0
 
       - name: Set up MSVC environment
         if: runner.os == 'Windows'
@@ -310,7 +310,7 @@ jobs:
           persist-credentials: false
 
       - name: Install CMake and Ninja
-        uses: lukka/get-cmake@a89e43e22a96abafcd7a62db652a65ecd33052c9 # v4.4.4
+        uses: lukka/get-cmake@16e8153a8b4918849d92aad131befe67a3705daa # v4.5.0
 
       - name: Set up MSVC environment
         if: runner.os == 'Windows'
