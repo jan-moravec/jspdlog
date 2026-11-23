@@ -231,8 +231,7 @@ versions.
 - Every job of the [CI workflow](.github/workflows/ci.yml) must pass: `pre-commit`, the `clang-ci` matrix (ASan + UBSan,
   TSan, coverage), `fuzz`, the `build-and-test` matrix, `install-smoke` and `bench`.
 - Keep changes focused. A reformat, a dependency bump and a behavior change are three PRs.
-- If the change affects users, add a [CHANGELOG.md](CHANGELOG.md) entry under `## [Unreleased]`. Until the first
-  release the changelog stays empty, so skip this step.
+- If the change affects users, add a [CHANGELOG.md](CHANGELOG.md) entry under `## [Unreleased]`.
 
 ## Release process
 
@@ -242,8 +241,8 @@ jspdlog is header-only; a release is a tag and a GitHub Release.
 1. Pick the version following [SemVer](https://semver.org/). While the version is 0.x, a minor version may break the API.
 1. Update the version in [CMakeLists.txt](CMakeLists.txt) (`project(jspdlog VERSION X.Y.Z)`) and the
    `JSPDLOG_VERSION_MAJOR/MINOR/PATCH` macros in [include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h).
-1. Rename `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) to `## [X.Y.Z] - YYYY-MM-DD`. For the first release, write
-   that section from scratch, summarizing what the release contains.
+1. Rename `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) to `## [X.Y.Z] - YYYY-MM-DD`, add a new empty
+   `## [Unreleased]` above it, and update the comparison links at the bottom.
 1. Merge a "Release vX.Y.Z" PR.
 1. Tag the merge commit: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
 1. On GitHub, draft a release from the tag with the CHANGELOG section as the notes.

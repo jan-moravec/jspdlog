@@ -40,14 +40,14 @@ These decide every feature below.
    may improve ergonomics but must not be required.
 1. **No JSON library dependency.** `raw_json` is the bridge to one.
 
-## 3. Where we are (formatter core)
+## 3. Where we are (0.2.0)
 
 The header ([include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h))
 provides `json_logger` (five call shapes per level plus `log(level, ...)`),
-`with_properties`, `adopt`, `json_options` (rename or omit header fields,
-UTC, eol), typed `json_properties` with nesting, and `raw_json`. It works with
-spdlog 1.12 to 1.17 and v2.x from one header; the only differences it handles
-are listed in section 8.
+child loggers with `with()`, `adopt`, `json_options` (rename or omit header
+fields, message key, call site, UTC, eol), typed `jspdlog::fields` with
+nesting, and `raw_json`. It works with spdlog 1.12 to 1.17 and v2.x from one
+header; the only differences it handles are listed in section 8.
 
 A `json_formatter` renders every line from the spdlog message. `json_logger`
 passes it a payload with a process-wide token, the fields and the escaped
@@ -57,8 +57,6 @@ loggers and sinks jspdlog does not wrap. Structural limits that remain:
 
 - The options belong to each sink's formatter, so loggers sharing a sink share
   the options of the one created last.
-- The call site is written when the message has one (macros,
-  `logger->log(source_loc, ...)`); `json_logger` calls do not capture it yet.
 - Per-call fields are serialized when the braced list is built, before the
   level check, so principle 5 holds only for the message. Lazy values
   (milestone 0.3.0) close this gap.
@@ -101,8 +99,8 @@ the renames listed in section 9.
 
 ## 5. Milestones
 
-Milestones are development stages on `main`, not releases. The first tag is
-`v1.0.0`.
+Each milestone is tagged `v0.N.0` when it is complete. The API may break
+between minor versions until `v1.0.0`.
 
 ### 0.1.0: baseline
 
@@ -317,7 +315,7 @@ separate per-version headers aren't needed.
 | 12  | Getter name for bound fields         | `context()`.                                                                                                                                                                |
 | 13  | Deprecated aliases for 0.1 names     | None, clean rename.                                                                                                                                                         |
 | 14  | Test option name                     | `JSPDLOG_TEST_NLOHMANN_INTEROP` becomes `JSPDLOG_TEST_WITH_NLOHMANN`.                                                                                                       |
-| 15  | Releases                             | No tag before `v1.0.0`; milestones are stages on `main`.                                                                                                                    |
+| 15  | Releases                             | Each milestone is tagged `v0.N.0` when complete; the API may break between minor versions until `v1.0.0`.                                                                   |
 
 ## 10. Quality gates (every milestone)
 
