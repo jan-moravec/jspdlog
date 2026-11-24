@@ -1730,6 +1730,12 @@ void write_value(json_writer &w, const T &v)
             "fields object or with()"
         );
     }
+    else if constexpr (std::is_class_v<value_type> && std::is_invocable_v<value_type &>)
+    {
+        static_assert(
+            dependent_false_v<value_type>, "jspdlog: a lazy value is called as const; remove mutable from the lambda"
+        );
+    }
     else
     {
         static_assert(
@@ -1930,7 +1936,7 @@ public:
     {
         static_assert(sizeof...(Rest) % 2 == 0, "fields: expected key/value pairs");
         static_assert(
-            sizeof...(Rest) / 2 + 1 <= CAPACITY,
+            (sizeof...(Rest) / 2) + 1 <= CAPACITY,
             "jspdlog: a braced list holds at most 16 fields; build a jspdlog::fields object for more"
         );
         add_(key, value, rest...);
@@ -1993,7 +1999,12 @@ public:
     }
 
 private:
-    /** @brief One key and value of a braced list. */
+    /**
+     * @brief One key and value of a braced list.
+     *
+     * The members have no initializers, so refs_ stays uninitialized and a call writes only the entries it uses.
+     */
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init,hicpp-member-init)
     struct ref
     {
         /** @brief The key, viewed in place. */
@@ -2043,7 +2054,7 @@ private:
         static_assert(
             std::is_convertible_v<const K &, std::string_view>, "fields: key must be convertible to std::string_view"
         );
-        refs_[size_++] = ref{std::string_view(key), std::addressof(value), &write_ref_<V>};
+        refs_[size_++] = ref{std::string_view(key), static_cast<const void *>(std::addressof(value)), &write_ref_<V>};
         if constexpr (sizeof...(Rest) > 0)
         {
             add_(rest...);

@@ -12,6 +12,7 @@
 using test_support::fixture;
 
 // Defined here, with the default active level, and called from test_active_level.cpp.
+// NOLINTNEXTLINE(misc-use-internal-linkage): called from test_active_level.cpp
 bool default_unit_debug_macro_writes();
 bool default_unit_debug_macro_writes()
 {
@@ -24,6 +25,7 @@ bool default_unit_debug_macro_writes()
 namespace
 {
 
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): counted by next()
 int evaluations = 0;
 int next()
 {

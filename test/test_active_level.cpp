@@ -15,6 +15,7 @@ bool default_unit_debug_macro_writes();
 namespace
 {
 
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): counted by next()
 int evaluations = 0;
 int next()
 {
@@ -25,7 +26,7 @@ int next()
 
 TEST_CASE("active level: calls below it are removed, calls at or above it are written", "[active_level]")
 {
-    test_support::fixture f; // the runtime level is trace
+    const test_support::fixture f; // the runtime level is trace
     evaluations = 0;
 
     JSPDLOG_TRACE(f.logger, {"v", next()}, "trace {}", next());

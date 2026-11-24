@@ -39,6 +39,7 @@ namespace
 {
 
 // Counts how often it is serialized.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): written by jspdlog_serialize
 int counted_serializations = 0;
 struct counted
 {
@@ -419,7 +420,7 @@ TEST_CASE("lazy: values of every kind, returned by reference or by value", "[laz
         {"a",
          [&]() -> const std::string & { return stored; },
          "b",
-         [captured] { return captured; },
+         [captured] { return std::string(captured); },
          "c",
          [] { return std::vector<int>{1, 2}; },
          "d",
@@ -519,7 +520,8 @@ TEST_CASE("lazy: a lazy value that throws drops the line and reaches the error h
 
 namespace
 {
-std::thread::id lazy_thread; // set by the lazy value of the async tests
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): set by the lazy value of the async tests
+std::thread::id lazy_thread;
 } // namespace
 
 #if JSPDLOG_SPDLOG_V2

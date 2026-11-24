@@ -86,6 +86,7 @@ foreach(
     fields_lazy
     lazy_as_message
     lazy_returns_callable
+    lazy_mutable
     removed_call_typechecked
 )
     foreach(kind fail control)

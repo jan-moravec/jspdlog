@@ -81,6 +81,9 @@ CheckOptions:
   - { key: cppcoreguidelines-special-member-functions.AllowSoleDefaultDtor, value: true }
   - { key: cppcoreguidelines-special-member-functions.AllowMissingMoveFunctionsWhenCopyIsDeleted, value: true }
   - { key: modernize-avoid-c-arrays.AllowStringArrays, value: false }
+  # do { ... } while (false) is how the JSPDLOG_* macros become one statement; report it
+  # only where it is written, not at every macro call.
+  - { key: cppcoreguidelines-avoid-do-while.IgnoreMacros, value: true }
 
   # ------- Identifier naming -------
   # jspdlog mirrors spdlog's snake_case API throughout. Every user-facing
