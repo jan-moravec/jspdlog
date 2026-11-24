@@ -39,11 +39,15 @@ add_executable(
     test_json_logger.cpp
     test_fields.cpp
     test_lazy.cpp
+    test_macros.cpp
+    test_active_level.cpp
     test_value_types.cpp
     test_source_location.cpp
     test_spdlog_interop.cpp
 )
 target_link_libraries(jspdlog_tests PRIVATE jspdlog::jspdlog Catch2::Catch2WithMain)
+# One unit with another active level in the same executable, which checks that only the macros read the setting.
+set_source_files_properties(test_active_level.cpp PROPERTIES COMPILE_DEFINITIONS JSPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO)
 # Lets a test check that the header's version macros match project(VERSION).
 target_compile_definitions(jspdlog_tests PRIVATE JSPDLOG_TEST_PROJECT_VERSION="${PROJECT_VERSION}")
 # The formatter tests parse each line with nlohmann/json when it is available and skip those checks otherwise.
@@ -82,6 +86,7 @@ foreach(
     fields_lazy
     lazy_as_message
     lazy_returns_callable
+    removed_call_typechecked
 )
     foreach(kind fail control)
         add_executable(compile_${kind}_${case} EXCLUDE_FROM_ALL compile_fail/${case}.cpp)

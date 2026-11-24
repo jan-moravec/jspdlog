@@ -2553,3 +2553,145 @@ private:
 };
 
 } // namespace jspdlog
+
+#ifndef JSPDLOG_ACTIVE_LEVEL
+/**
+ * @brief The lowest level that the JSPDLOG_* macros keep, one of the SPDLOG_LEVEL_* values from trace (0) to off (6).
+ *
+ * A macro below it is removed at compile time: its arguments are type-checked but never run, and optimizing compilers
+ * emit nothing for it. Define it before including jspdlog, for example as a compile definition of a release build.
+ * It is independent of SPDLOG_ACTIVE_LEVEL, which jspdlog does not read, and only the macros read it, so translation
+ * units with different values link together without violating the one definition rule.
+ */
+#define JSPDLOG_ACTIVE_LEVEL SPDLOG_LEVEL_TRACE
+#endif
+
+// Unique local names, so a macro inside a lazy value of another macro does not shadow the outer one. MSVC with edit and
+// continue makes __LINE__ unusable for pasting and does not warn about __COUNTER__. GCC and Clang accept __LINE__ in
+// any mode, while Clang 21 and newer warn about __COUNTER__ under -Wpedantic. Two macros that start on one line and
+// nest share a name, which is only a shadowing warning.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define JSPDLOG_DETAIL_UNIQUE __COUNTER__
+#else
+#define JSPDLOG_DETAIL_UNIQUE __LINE__
+#endif
+#define JSPDLOG_DETAIL_CAT2(a, b) a##b
+#define JSPDLOG_DETAIL_CAT(a, b) JSPDLOG_DETAIL_CAT2(a, b)
+
+// MSVC reports a condition that is constant once the level is known (C4127), which is the point of these macros, and
+// the code it guards as unreachable (C4702).
+#ifdef _MSC_VER
+#define JSPDLOG_DETAIL_BEGIN_CONSTANT_CONDITION __pragma(warning(push)) __pragma(warning(disable : 4127 4702))
+#define JSPDLOG_DETAIL_END_CONSTANT_CONDITION __pragma(warning(pop))
+#else
+#define JSPDLOG_DETAIL_BEGIN_CONSTANT_CONDITION
+#define JSPDLOG_DETAIL_END_CONSTANT_CONDITION
+#endif
+
+// A macro and not a function: a function whose body depends on JSPDLOG_ACTIVE_LEVEL would differ between translation
+// units compiled with different values, which violates the one definition rule.
+#if JSPDLOG_ACTIVE_LEVEL <= SPDLOG_LEVEL_TRACE
+#define JSPDLOG_DETAIL_ENABLED(lvl) true
+#else
+#define JSPDLOG_DETAIL_ENABLED(lvl) (static_cast<int>(lvl) >= JSPDLOG_ACTIVE_LEVEL)
+#endif
+
+// The logger and the level are evaluated once. Nothing else in the call runs unless the level is on.
+#define JSPDLOG_DETAIL_LOG(id, logger, lvl, ...)                                                                       \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        JSPDLOG_DETAIL_BEGIN_CONSTANT_CONDITION                                                                        \
+        const ::jspdlog::json_logger &JSPDLOG_DETAIL_CAT(jspdlog_logger_, id) = (logger);                              \
+        const ::jspdlog::level JSPDLOG_DETAIL_CAT(jspdlog_level_, id) = (lvl);                                         \
+        if (JSPDLOG_DETAIL_ENABLED(JSPDLOG_DETAIL_CAT(jspdlog_level_, id)) &&                                          \
+            JSPDLOG_DETAIL_CAT(jspdlog_logger_, id).should_log(JSPDLOG_DETAIL_CAT(jspdlog_level_, id)))                \
+        {                                                                                                              \
+            JSPDLOG_DETAIL_CAT(jspdlog_logger_, id).log(JSPDLOG_DETAIL_CAT(jspdlog_level_, id), __VA_ARGS__);          \
+        }                                                                                                              \
+        JSPDLOG_DETAIL_END_CONSTANT_CONDITION                                                                          \
+    } while (false)
+
+// A level below JSPDLOG_ACTIVE_LEVEL: the call is type-checked and its arguments count as used, but it never runs.
+// This is if (false) and not an empty statement, so a variable that only logging uses does not become unused.
+#define JSPDLOG_DETAIL_REMOVED(logger, lvl, ...)                                                                       \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        JSPDLOG_DETAIL_BEGIN_CONSTANT_CONDITION                                                                        \
+        if (false)                                                                                                     \
+        {                                                                                                              \
+            (logger).log(lvl, __VA_ARGS__);                                                                            \
+        }                                                                                                              \
+        JSPDLOG_DETAIL_END_CONSTANT_CONDITION                                                                          \
+    } while (false)
+
+/**
+ * @brief Logs through a json_logger at a level that may be a variable, evaluating nothing else when it is off.
+ *
+ * The arguments after the level are anything that json_logger::log takes: a format string and its arguments, a runtime
+ * string, or a braced list of fields with or without a message. None of them is evaluated when the level is below the
+ * logger's level or below JSPDLOG_ACTIVE_LEVEL, so use it for format arguments that are costly to build. The logger
+ * and the level are evaluated once. The macro is a statement. The recorded source line is the line of the macro.
+ *
+ * @code
+ * JSPDLOG_LOG(logger, level, {"plan", explain(q)}, "planned {}", describe(q));
+ * @endcode
+ */
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): the arguments must not be evaluated when the level is off
+#define JSPDLOG_LOG(logger, lvl, ...) JSPDLOG_DETAIL_LOG(JSPDLOG_DETAIL_UNIQUE, logger, lvl, __VA_ARGS__)
+
+#if JSPDLOG_ACTIVE_LEVEL <= SPDLOG_LEVEL_TRACE
+/** @brief Like JSPDLOG_LOG at the trace level, and removed at compile time when JSPDLOG_ACTIVE_LEVEL is above trace. */
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): the arguments must not be evaluated when the level is off
+#define JSPDLOG_TRACE(logger, ...) JSPDLOG_LOG(logger, ::jspdlog::level::trace, __VA_ARGS__)
+#else
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): the arguments must not be evaluated when the level is off
+#define JSPDLOG_TRACE(logger, ...) JSPDLOG_DETAIL_REMOVED(logger, ::jspdlog::level::trace, __VA_ARGS__)
+#endif
+
+#if JSPDLOG_ACTIVE_LEVEL <= SPDLOG_LEVEL_DEBUG
+/** @brief Like JSPDLOG_LOG at the debug level, and removed at compile time when JSPDLOG_ACTIVE_LEVEL is above debug. */
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): the arguments must not be evaluated when the level is off
+#define JSPDLOG_DEBUG(logger, ...) JSPDLOG_LOG(logger, ::jspdlog::level::debug, __VA_ARGS__)
+#else
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): the arguments must not be evaluated when the level is off
+#define JSPDLOG_DEBUG(logger, ...) JSPDLOG_DETAIL_REMOVED(logger, ::jspdlog::level::debug, __VA_ARGS__)
+#endif
+
+#if JSPDLOG_ACTIVE_LEVEL <= SPDLOG_LEVEL_INFO
+/** @brief Like JSPDLOG_LOG at the info level, and removed at compile time when JSPDLOG_ACTIVE_LEVEL is above info. */
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): the arguments must not be evaluated when the level is off
+#define JSPDLOG_INFO(logger, ...) JSPDLOG_LOG(logger, ::jspdlog::level::info, __VA_ARGS__)
+#else
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): the arguments must not be evaluated when the level is off
+#define JSPDLOG_INFO(logger, ...) JSPDLOG_DETAIL_REMOVED(logger, ::jspdlog::level::info, __VA_ARGS__)
+#endif
+
+#if JSPDLOG_ACTIVE_LEVEL <= SPDLOG_LEVEL_WARN
+/** @brief Like JSPDLOG_LOG at the warn level, and removed at compile time when JSPDLOG_ACTIVE_LEVEL is above warn. */
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): the arguments must not be evaluated when the level is off
+#define JSPDLOG_WARN(logger, ...) JSPDLOG_LOG(logger, ::jspdlog::level::warn, __VA_ARGS__)
+#else
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): the arguments must not be evaluated when the level is off
+#define JSPDLOG_WARN(logger, ...) JSPDLOG_DETAIL_REMOVED(logger, ::jspdlog::level::warn, __VA_ARGS__)
+#endif
+
+#if JSPDLOG_ACTIVE_LEVEL <= SPDLOG_LEVEL_ERROR
+/** @brief Like JSPDLOG_LOG at the error level, and removed at compile time when JSPDLOG_ACTIVE_LEVEL is above error. */
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): the arguments must not be evaluated when the level is off
+#define JSPDLOG_ERROR(logger, ...) JSPDLOG_LOG(logger, ::jspdlog::level::err, __VA_ARGS__)
+#else
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): the arguments must not be evaluated when the level is off
+#define JSPDLOG_ERROR(logger, ...) JSPDLOG_DETAIL_REMOVED(logger, ::jspdlog::level::err, __VA_ARGS__)
+#endif
+
+#if JSPDLOG_ACTIVE_LEVEL <= SPDLOG_LEVEL_CRITICAL
+/**
+ * @brief Like JSPDLOG_LOG at the critical level, and removed at compile time when JSPDLOG_ACTIVE_LEVEL is above
+ * critical.
+ */
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): the arguments must not be evaluated when the level is off
+#define JSPDLOG_CRITICAL(logger, ...) JSPDLOG_LOG(logger, ::jspdlog::level::critical, __VA_ARGS__)
+#else
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): the arguments must not be evaluated when the level is off
+#define JSPDLOG_CRITICAL(logger, ...) JSPDLOG_DETAIL_REMOVED(logger, ::jspdlog::level::critical, __VA_ARGS__)
+#endif
