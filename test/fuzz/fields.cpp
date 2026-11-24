@@ -46,7 +46,7 @@ struct model
         ojson object = ojson::object();
         for (const auto &item : items)
         {
-            object[item.first] = item.second;
+            object[fuzz::written_text(item.first)] = item.second;
         }
         return object;
     }
@@ -66,7 +66,8 @@ public:
     {
     }
 
-    // False once any key or string value was not valid UTF-8: the line cannot be parsed then, only shape-checked.
+    // False once any key or string value is one that the build copies as invalid UTF-8, which the line then holds: it
+    // cannot be parsed, only shape-checked. Always true unless the pass policy is on.
     bool all_utf8 = true;
 
     // Reads up to max_ops operations. A merge or a nested value reads a smaller set recursively.
@@ -91,7 +92,7 @@ private:
         {
             k = fuzz::avoid_reserved_key(std::move(k), RESERVED_KEYS);
         }
-        all_utf8 = all_utf8 && fuzz::is_valid_utf8(k);
+        all_utf8 = all_utf8 && fuzz::parseable(k);
         return k;
     }
 
@@ -104,9 +105,9 @@ private:
         {
             const std::string k = key_(depth == 0);
             const std::string v = r_.string(16);
-            all_utf8 = all_utf8 && fuzz::is_valid_utf8(v);
+            all_utf8 = all_utf8 && fuzz::parseable(v);
             out.f.insert(k, std::string_view{v});
-            out.m.put(k, ojson(v));
+            out.m.put(k, ojson(fuzz::written_text(v)));
             break;
         }
         case 1:
@@ -297,7 +298,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     const built d = b.build(0, 6);  // passed per call
     const bool with_message = (r.byte() & 1U) != 0;
     const std::string message = r.string(24);
-    const bool utf8 = b.all_utf8 && fuzz::is_valid_utf8(message);
+    const bool utf8 = b.all_utf8 && fuzz::parseable(message);
 
     // 1. Each set on its own, and the operators that combine sets.
     check_set(a, utf8);
@@ -346,11 +347,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     expected["level"] = "info";
     for (const auto &item : line.items)
     {
-        expected[item.first] = item.second;
+        expected[fuzz::written_text(item.first)] = item.second;
     }
     if (with_message)
     {
-        expected["message"] = message;
+        expected["message"] = fuzz::written_text(message);
     }
     const ojson parsed = fuzz::parse_line(text, "\n");
     FUZZ_CHECK(parsed.dump() == expected.dump());
@@ -363,7 +364,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     bound_only["level"] = "info";
     for (const auto &item : bound.items)
     {
-        bound_only[item.first] = item.second;
+        bound_only[fuzz::written_text(item.first)] = item.second;
     }
     bound_only["message"] = "bound only";
     FUZZ_CHECK(fuzz::parse_line(h.sink->last(), "\n").dump() == bound_only.dump());

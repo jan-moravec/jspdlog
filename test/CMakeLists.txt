@@ -42,6 +42,7 @@ add_executable(
     test_macros.cpp
     test_active_level.cpp
     test_value_types.cpp
+    test_utf8.cpp
     test_source_location.cpp
     test_spdlog_interop.cpp
 )
@@ -64,6 +65,31 @@ add_executable(jspdlog_assert_tests test_assert.cpp)
 target_link_libraries(jspdlog_assert_tests PRIVATE jspdlog::jspdlog Catch2::Catch2WithMain)
 jspdlog_set_warnings(jspdlog_assert_tests)
 catch_discover_tests(jspdlog_assert_tests)
+
+# test_utf8.cpp again, once per other UTF-8 policy and once with line separator escaping. These targets do not link
+# jspdlog::jspdlog, whose interface definitions would clash with the policy defined here.
+function(jspdlog_add_utf8_variant name)
+    cmake_parse_arguments(ARG "" "POLICY;SEPARATORS" "" ${ARGN})
+    add_executable(${name} test_utf8.cpp)
+    target_include_directories(${name} PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    target_compile_features(${name} PRIVATE cxx_std_17)
+    target_link_libraries(${name} PRIVATE spdlog::spdlog Catch2::Catch2WithMain)
+    target_compile_definitions(${name} PRIVATE JSPDLOG_UTF8_POLICY=JSPDLOG_UTF8_${ARG_POLICY})
+    if(ARG_SEPARATORS)
+        target_compile_definitions(${name} PRIVATE JSPDLOG_ESCAPE_LINE_SEPARATORS=1)
+    endif()
+    if(JSPDLOG_TEST_WITH_NLOHMANN)
+        target_link_libraries(${name} PRIVATE nlohmann_json::nlohmann_json)
+        target_compile_definitions(${name} PRIVATE JSPDLOG_TEST_NLOHMANN=1)
+    endif()
+    jspdlog_set_warnings(${name})
+    catch_discover_tests(${name} TEST_PREFIX "${name}: ")
+endfunction()
+
+jspdlog_add_utf8_variant(jspdlog_utf8_escape_tests POLICY ESCAPE)
+jspdlog_add_utf8_variant(jspdlog_utf8_pass_tests POLICY PASS)
+jspdlog_add_utf8_variant(jspdlog_utf8_separator_tests POLICY REPLACE SEPARATORS ON)
+jspdlog_add_utf8_variant(jspdlog_utf8_pass_separator_tests POLICY PASS SEPARATORS ON)
 
 # Code that must not compile: each file is a target excluded from the build, and the test builds it and expects failure.
 # A control target builds the same file with the offending line replaced by a valid one and must succeed, so a failure

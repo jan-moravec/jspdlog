@@ -21,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -229,6 +230,41 @@ int main(int argc, char **argv)
         });
         const auto now = std::chrono::system_clock::now();
         run("jspdlog, per-call time_point", [&] { logger.info({"at", now}, "done"); });
+    }
+
+    // Text: 64-byte messages that are ASCII, valid UTF-8 with 2-byte characters, and Latin-1 text that is not UTF-8.
+    // The UTF-8 policy of the build decides what the last one costs.
+    {
+        const jspdlog::json_logger logger("bench", make_sink(), options_with(true, false));
+        const std::string ascii(64, 'a');
+        std::string two_byte;
+        std::string latin1;
+        for (int i = 0; i < 32; ++i)
+        {
+            two_byte += "a\xC3\xA9";
+            latin1 += "a\xE9";
+        }
+        latin1.resize(64, 'a');
+        run("message 64 B ASCII", [&] { logger.info(ascii); });
+        run("message 64 B with 2-byte UTF-8", [&] { logger.info(two_byte); });
+        run("message 64 B Latin-1 bytes (invalid UTF-8)", [&] { logger.info(latin1); });
+    }
+
+    // The timestamp styles, with the message only.
+    {
+        const std::pair<const char *, jspdlog::timestamp_format> styles[] = {
+            {"timestamp rfc3339 milliseconds", jspdlog::timestamp_format::rfc3339_millis},
+            {"timestamp rfc3339 microseconds", jspdlog::timestamp_format::rfc3339_micros},
+            {"timestamp rfc3339 nanoseconds", jspdlog::timestamp_format::rfc3339_nanos},
+            {"timestamp epoch milliseconds", jspdlog::timestamp_format::epoch_millis},
+        };
+        for (const auto &style : styles)
+        {
+            jspdlog::json_options options = options_with(true, false);
+            options.timestamp_style = style.second;
+            const jspdlog::json_logger logger("bench", make_sink(), options);
+            run(style.first, [&] { logger.info("request {} handled in {} ms", 42, 7); });
+        }
     }
 
     const double baseline = results.front().ns_per_call;

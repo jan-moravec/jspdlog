@@ -77,7 +77,7 @@ struct builder
     std::string text(std::size_t max_size)
     {
         std::string s = r.string(max_size);
-        all_utf8 = all_utf8 && fuzz::is_valid_utf8(s);
+        all_utf8 = all_utf8 && fuzz::parseable(s);
         return s;
     }
 
@@ -129,7 +129,7 @@ struct builder
             case 1:
             {
                 std::string s = text(8);
-                set(variant{s}, fuzz::ojson(s));
+                set(variant{s}, fuzz::ojson(fuzz::written_text(s)));
                 break;
             }
             default:
@@ -164,7 +164,7 @@ struct builder
             fuzz::ojson model = fuzz::ojson::object();
             for (const auto &entry : v)
             {
-                model[entry.first] = number_or_null(entry.second);
+                model[fuzz::written_text(entry.first)] = number_or_null(entry.second);
             }
             set(v, model);
             break;
@@ -185,7 +185,7 @@ struct builder
         {
             const bool b = (r.byte() & 1U) != 0;
             const std::string s = text(8);
-            set(std::make_tuple(b, s, nullptr), fuzz::ojson::array({b, s, nullptr}));
+            set(std::make_tuple(b, s, nullptr), fuzz::ojson::array({b, fuzz::written_text(s), nullptr}));
             break;
         }
         case 6:
@@ -251,7 +251,7 @@ struct builder
             fuzz::ojson model = fuzz::ojson::array();
             for (const auto &entry : v)
             {
-                model.push_back(fuzz::ojson::array({entry.first, entry.second}));
+                model.push_back(fuzz::ojson::array({entry.first, fuzz::written_text(entry.second)}));
             }
             set(v, model);
             break;
@@ -266,7 +266,9 @@ struct builder
             f.insert(key, value);
             f.insert("n", number);
             f.insert("flag", flag);
-            n.model = fuzz::ojson::object({{key, value}, {"n", number}, {"flag", flag}});
+            n.model = fuzz::ojson::object(
+                {{fuzz::written_text(key), fuzz::written_text(value)}, {"n", number}, {"flag", flag}}
+            );
             n.write_leaf = [f](jspdlog::json_writer &w) { w.value(f); };
             break;
         }
@@ -292,12 +294,12 @@ struct builder
             for (unsigned i = 0; i < count && nodes_left > 0; ++i)
             {
                 std::string key = text(6);
-                if (n.model.contains(key))
+                if (n.model.contains(fuzz::written_text(key)))
                 {
-                    continue; // keys are unique
+                    continue; // keys are unique as written: two invalid keys can be replaced by the same text
                 }
                 node child = build(depth + 1);
-                n.model[key] = child.model;
+                n.model[fuzz::written_text(key)] = child.model;
                 n.keys.push_back(std::move(key));
                 n.children.push_back(std::move(child));
             }

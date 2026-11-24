@@ -21,10 +21,11 @@
  * fields and the message. A json_logger hands it the fields and the message in a payload that starts with a random,
  * process-wide token, and the formatter recognizes that token. Any other payload, such as a message logged directly on
  * the underlying spdlog::logger, by a macro or by third-party code, is escaped into the message field. So every line
- * that a json_formatter writes is one valid JSON object, whoever logged it. install_json_formatter gives the same
- * guarantee to loggers and sinks that jspdlog does not wrap. A sink that writes the raw payload instead of the
- * formatted line shows the payload protocol, which is not JSON. Logging calls do not throw: a formatting error goes to
- * the spdlog error handler, as in spdlog.
+ * that a json_formatter writes is one valid JSON object, whoever logged it, and valid UTF-8: invalid bytes in any
+ * string follow JSPDLOG_UTF8_POLICY, which replaces them by default. install_json_formatter gives the same guarantee to
+ * loggers and sinks that jspdlog does not wrap. A sink that writes the raw payload instead of the formatted line shows
+ * the payload protocol, which is not JSON. Logging calls do not throw: a formatting error goes to the spdlog error
+ * handler, as in spdlog.
  *
  * @copyright Copyright (c) 2026 Jan Moravec. Distributed under the MIT License, see LICENSE.
  */
@@ -101,6 +102,39 @@
 #define JSPDLOG_ASSERT(cond, msg) assert((cond) && (msg))
 #endif
 
+/** @brief JSPDLOG_UTF8_POLICY value: invalid UTF-8 is replaced by U+FFFD, one per maximal invalid subsequence. */
+#define JSPDLOG_UTF8_REPLACE 0
+/** @brief JSPDLOG_UTF8_POLICY value: each invalid byte is written as a JSON u00XX escape of its value. */
+#define JSPDLOG_UTF8_ESCAPE 1
+/** @brief JSPDLOG_UTF8_POLICY value: invalid bytes are copied unchanged. The line is then not valid JSON for strict
+ * parsers. */
+#define JSPDLOG_UTF8_PASS 2
+
+#ifndef JSPDLOG_UTF8_POLICY
+/**
+ * @brief What jspdlog does with invalid UTF-8 in any string it writes: keys, values, messages, logger names and call
+ * sites. Define it to JSPDLOG_UTF8_ESCAPE or JSPDLOG_UTF8_PASS before including jspdlog, the same in every translation
+ * unit, or set the CMake cache variable JSPDLOG_UTF8_POLICY. The default is JSPDLOG_UTF8_REPLACE. Unlike
+ * JSPDLOG_ACTIVE_LEVEL, which only the statement macros read, inline functions of the header read this setting, so
+ * translation units that disagree break the one-definition rule.
+ */
+#define JSPDLOG_UTF8_POLICY JSPDLOG_UTF8_REPLACE
+#endif
+
+#if JSPDLOG_UTF8_POLICY != JSPDLOG_UTF8_REPLACE && JSPDLOG_UTF8_POLICY != JSPDLOG_UTF8_ESCAPE &&                       \
+    JSPDLOG_UTF8_POLICY != JSPDLOG_UTF8_PASS
+#error "JSPDLOG_UTF8_POLICY must be JSPDLOG_UTF8_REPLACE, JSPDLOG_UTF8_ESCAPE or JSPDLOG_UTF8_PASS"
+#endif
+
+#ifndef JSPDLOG_ESCAPE_LINE_SEPARATORS
+/**
+ * @brief When nonzero, U+2028 and U+2029 are written as JSON u2028 and u2029 escapes. They are valid in JSON but end a
+ * line in JavaScript source before ES2019, which matters for consumers that embed lines in scripts. Off by default.
+ * Like JSPDLOG_UTF8_POLICY it must be the same in every translation unit.
+ */
+#define JSPDLOG_ESCAPE_LINE_SEPARATORS 0
+#endif
+
 namespace jspdlog
 {
 
@@ -116,22 +150,47 @@ using spdlog::level;
 using level = spdlog::level::level_enum;
 #endif
 
+/** @brief How the timestamp is written. */
+enum class timestamp_format
+{
+    /** @brief RFC 3339 string with milliseconds, "2026-11-23T08:00:00.123+01:00". The default. */
+    rfc3339_millis,
+    /** @brief RFC 3339 string with microseconds. */
+    rfc3339_micros,
+    /** @brief RFC 3339 string with nanoseconds. The digits below the clock's resolution are zero. */
+    rfc3339_nanos,
+    /** @brief Milliseconds since the Unix epoch, as a number. time_type does not apply. */
+    epoch_millis,
+};
+
 /**
  * @brief Settings of a json_logger or a json_formatter.
  *
- * The key members control the header fields, which always appear in this order: timestamp, logger, level, process,
- * thread, source. They are followed by the fields and then the message. A string renames a field and an empty optional
- * leaves it out. Keys are escaped, so any text is safe. With every optional field left out, a line holds only the
- * fields and the message.
+ * The key members control the header fields, which always appear in this order: timestamp, logger, level, severity,
+ * process, thread, source. They are followed by the fields and then the message. A string renames a field and an empty
+ * optional leaves it out. Keys are escaped, so any text is safe. With every optional field left out, a line holds only
+ * the fields and the message.
  */
 struct json_options
 {
-    /** @brief Key of the RFC 3339 timestamp with milliseconds. */
+    /** @brief Key of the timestamp, written as chosen by timestamp_style. */
     std::optional<std::string> timestamp_key = std::string{"timestamp"};
     /** @brief Key of the logger name. */
     std::optional<std::string> logger_key = std::string{"logger"};
-    /** @brief Key of the level name, as spdlog spells it (for example warning). */
+    /** @brief Key of the level name, as spdlog spells it (for example warning) unless level_names says otherwise. */
     std::optional<std::string> level_key = std::string{"level"};
+    /**
+     * @brief Names written under level_key, indexed by level from trace to off. An empty optional uses spdlog's names,
+     * including names set with SPDLOG_LEVEL_NAMES.
+     */
+    std::optional<std::array<std::string, 7>> level_names;
+    /** @brief Key of a numeric severity, written right after the level. Off by default. */
+    std::optional<std::string> severity_key;
+    /**
+     * @brief The numbers written under severity_key, indexed like level_names. The default is the OpenTelemetry
+     * severity number of each level's range: TRACE 1, DEBUG 5, INFO 9, WARN 13, ERROR 17, FATAL 21; off is 0.
+     */
+    std::array<int, 7> severity_numbers = {1, 5, 9, 13, 17, 21, 0};
     /** @brief Key of the process id, written as a number. */
     std::optional<std::string> process_key = std::string{"process"};
     /** @brief Key of the thread id, written as a number. */
@@ -145,7 +204,10 @@ struct json_options
     /** @brief Key of the message. It is not optional, because a message from outside jspdlog needs a place to go. */
     std::string message_key = "message";
 
-    /** @brief Local time with its UTC offset, or UTC ending in Z. */
+    /** @brief How the timestamp is written. */
+    timestamp_format timestamp_style = timestamp_format::rfc3339_millis;
+
+    /** @brief Local time with its UTC offset, or UTC ending in Z. Does not apply to epoch_millis. */
     spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local;
 
     /**
@@ -158,8 +220,9 @@ struct json_options
 /**
  * @brief A JSON value that is already serialized, written to the line unchanged.
  *
- * Use it to log arrays or objects produced by a JSON library. jspdlog does not check the text, so the caller must make
- * sure it is valid JSON. An empty value is written as null.
+ * Use it to log arrays or objects produced by a JSON library. jspdlog does not check the text, neither as JSON nor as
+ * UTF-8, so the caller must make sure it is valid JSON. The UTF-8 policy does not apply to it. An empty value is
+ * written as null.
  *
  * @code
  * logger.info({"items", jspdlog::raw_json{items.dump()}}, "loaded");
@@ -175,25 +238,153 @@ struct raw_json
 namespace detail
 {
 
+/** @brief The result of checking one UTF-8 sequence. */
+struct utf8_step
+{
+    /** @brief Whether the bytes form one valid code point. */
+    bool valid;
+    /** @brief Bytes consumed: the sequence, or the maximal invalid subpart (at least one byte). */
+    std::size_t size;
+};
+
+/**
+ * @brief Checks the sequence that starts at p, a byte of 0x80 or more, where end is the end of the text.
+ *
+ * An invalid sequence consumes its maximal subpart, as the Unicode standard recommends for U+FFFD substitution.
+ */
+inline utf8_step next_utf8(const unsigned char *p, const unsigned char *end) noexcept
+{
+    const unsigned b0 = p[0];
+    // Expected length and the valid range of the second byte, from the Unicode table of well-formed byte sequences.
+    std::size_t len = 0;
+    unsigned lo = 0x80U;
+    unsigned hi = 0xBFU;
+    if (b0 >= 0xC2U && b0 <= 0xDFU)
+    {
+        len = 2;
+    }
+    else if (b0 == 0xE0U)
+    {
+        len = 3;
+        lo = 0xA0U;
+    }
+    else if (b0 >= 0xE1U && b0 <= 0xECU)
+    {
+        len = 3;
+    }
+    else if (b0 == 0xEDU)
+    {
+        len = 3;
+        hi = 0x9FU;
+    }
+    else if (b0 >= 0xEEU && b0 <= 0xEFU)
+    {
+        len = 3;
+    }
+    else if (b0 == 0xF0U)
+    {
+        len = 4;
+        lo = 0x90U;
+    }
+    else if (b0 >= 0xF1U && b0 <= 0xF3U)
+    {
+        len = 4;
+    }
+    else if (b0 == 0xF4U)
+    {
+        len = 4;
+        hi = 0x8FU;
+    }
+    else
+    {
+        return {false, 1}; // 80 to C1 and F5 to FF never start a sequence.
+    }
+    for (std::size_t i = 1; i < len; ++i)
+    {
+        if (p + i == end)
+        {
+            return {false, i};
+        }
+        const unsigned b = p[i];
+        const unsigned min = i == 1 ? lo : 0x80U;
+        const unsigned max = i == 1 ? hi : 0xBFU;
+        if (b < min || b > max)
+        {
+            return {false, i};
+        }
+    }
+    return {true, len};
+}
+
 /**
  * @brief Appends text to a buffer as a quoted JSON string.
  *
- * Quotes, backslashes and control characters are escaped. Other bytes are copied unchanged, so the text should be
- * UTF-8. The buffer can be a std::string or an spdlog memory buffer.
+ * Quotes, backslashes and control characters are escaped. Bytes of 0x80 or more are checked as UTF-8, and invalid ones
+ * follow JSPDLOG_UTF8_POLICY: replaced, escaped or copied. The buffer can be a std::string or an spdlog memory buffer.
  */
 template <typename Buffer>
 void append_json_quoted(Buffer &out, std::string_view s)
 {
     static constexpr char HEX_DIGITS[] = "0123456789abcdef";
     static constexpr unsigned FIRST_PRINTABLE = 0x20U; // Bytes below this are control characters.
+    static constexpr unsigned FIRST_NON_ASCII = 0x80U;
     static constexpr unsigned NIBBLE_BITS = 4U;
     static constexpr unsigned NIBBLE_MASK = 0xFU;
+    // Whether bytes of 0x80 or more need a look: the pass policy copies them unless line separators are escaped.
+    static constexpr bool CHECK_UTF8 = JSPDLOG_UTF8_POLICY != JSPDLOG_UTF8_PASS || JSPDLOG_ESCAPE_LINE_SEPARATORS != 0;
+    static constexpr std::size_t SEPARATOR_SIZE = 3; // U+2028 and U+2029 are E2 80 A8 and E2 80 A9.
     out.push_back('"');
     const char *run = s.data(); // Start of the bytes not yet copied.
     const char *const end = s.data() + s.size();
+    [[maybe_unused]] const auto put = [&out](std::string_view text) {
+        out.append(text.data(), text.data() + text.size());
+    };
+    [[maybe_unused]] const auto put_u00 = [&out](unsigned c) {
+        out.push_back('\\');
+        out.push_back('u');
+        out.push_back('0');
+        out.push_back('0');
+        out.push_back(HEX_DIGITS[c >> NIBBLE_BITS]);
+        out.push_back(HEX_DIGITS[c & NIBBLE_MASK]);
+    };
     for (const char *p = run; p != end; ++p)
     {
         const unsigned c = static_cast<unsigned char>(*p);
+        if (c >= FIRST_NON_ASCII)
+        {
+            if constexpr (CHECK_UTF8)
+            {
+                const auto *const up = reinterpret_cast<const unsigned char *>(p);
+                const utf8_step step = next_utf8(up, reinterpret_cast<const unsigned char *>(end));
+                const bool separator = JSPDLOG_ESCAPE_LINE_SEPARATORS != 0 && step.valid &&
+                                       step.size == SEPARATOR_SIZE && up[0] == 0xE2U && up[1] == 0x80U &&
+                                       (up[2] == 0xA8U || up[2] == 0xA9U);
+                if (separator)
+                {
+                    out.append(run, p);
+                    put(up[2] == 0xA8U ? std::string_view{"\\u2028"} : std::string_view{"\\u2029"});
+                    run = p + step.size;
+                }
+                else if (!step.valid && JSPDLOG_UTF8_POLICY != JSPDLOG_UTF8_PASS)
+                {
+                    out.append(run, p);
+                    if constexpr (JSPDLOG_UTF8_POLICY == JSPDLOG_UTF8_REPLACE)
+                    {
+                        put(std::string_view{"\xEF\xBF\xBD"});
+                    }
+                    else
+                    {
+                        for (std::size_t i = 0; i < step.size; ++i)
+                        {
+                            put_u00(up[i]);
+                        }
+                    }
+                    run = p + step.size;
+                }
+                p += step.size - 1; // Valid sequences, and bytes that pass, stay in the copied run.
+            }
+            continue;
+        }
         if (c >= FIRST_PRINTABLE && c != '"' && c != '\\')
         {
             continue;
@@ -559,7 +750,12 @@ public:
         if (opts_.level_key)
         {
             key(level_key_);
-            detail::append_json_quoted(dest, detail::level_name(detail::msg_level(msg)));
+            detail::append(dest, level_texts_[level_index_(msg)]);
+        }
+        if (opts_.severity_key)
+        {
+            key(severity_key_);
+            detail::append(dest, severity_texts_[level_index_(msg)]);
         }
         if (opts_.process_key)
         {
@@ -625,9 +821,29 @@ private:
         timestamp_key_ = prepare(opts_.timestamp_key);
         logger_key_ = prepare(opts_.logger_key);
         level_key_ = prepare(opts_.level_key);
+        severity_key_ = prepare(opts_.severity_key);
         process_key_ = prepare(opts_.process_key);
         thread_key_ = prepare(opts_.thread_key);
         source_key_ = prepare(opts_.source_key);
+        for (std::size_t i = 0; i < LEVEL_COUNT; ++i)
+        {
+            const std::string_view name = opts_.level_names
+                                              ? std::string_view{(*opts_.level_names)[i]}
+                                              : detail::level_name(static_cast<level>(static_cast<int>(i)));
+            detail::append_json_quoted(level_texts_[i], name);
+            severity_texts_[i] = std::to_string(opts_.severity_numbers[i]);
+        }
+    }
+
+    /** @brief The number of levels, from trace to off. */
+    static constexpr std::size_t LEVEL_COUNT = 7;
+    static_assert(static_cast<std::size_t>(level::off) == LEVEL_COUNT - 1, "level::off must be the last of 7 levels");
+
+    /** @brief The index of the level of a message in the level tables, which is the level's number. */
+    static std::size_t level_index_(const spdlog::details::log_msg &msg) noexcept
+    {
+        const auto index = static_cast<std::size_t>(detail::msg_level(msg));
+        return index < LEVEL_COUNT ? index : LEVEL_COUNT - 1;
     }
 
     /** @brief Returns the key as a quoted JSON string followed by a colon. */
@@ -648,18 +864,41 @@ private:
         out.push_back(static_cast<char>('0' + (value % BASE)));
     }
 
-    /** @brief Appends the quoted RFC 3339 timestamp with milliseconds, rebuilding the cached part once per second. */
+    /** @brief Appends exactly digits decimal digits of value, with leading zeros. */
+    template <typename Buffer>
+    static void append_digits_(Buffer &out, std::int64_t value, int digits)
+    {
+        static constexpr std::int64_t BASE = 10;
+        std::array<char, 9> text{}; // The fraction of a second has at most nine digits.
+        for (int i = digits; i > 0; --i)
+        {
+            text[static_cast<std::size_t>(i - 1)] = static_cast<char>('0' + (value % BASE));
+            value /= BASE;
+        }
+        out.append(text.data(), text.data() + digits);
+    }
+
+    /**
+     * @brief Appends the timestamp as chosen by timestamp_style.
+     *
+     * An RFC 3339 string rebuilds its cached date and time part once per second.
+     */
     void append_timestamp_(const spdlog::details::log_msg &msg, spdlog::memory_buf_t &dest)
     {
         static constexpr int YEAR_BASE = 1900;
         static constexpr int CENTURY = 100;
         static constexpr int MINUTES_PER_HOUR = 60;
-        static constexpr int MILLIS_HUNDREDS = 100;
+        static constexpr std::int64_t NANOS_PER_MILLI = 1'000'000;
+        static constexpr std::int64_t NANOS_PER_MICRO = 1'000;
         const auto since_epoch = msg.time.time_since_epoch();
-        // floor keeps the milliseconds in 0 to 999 for times before the epoch too.
+        if (opts_.timestamp_style == timestamp_format::epoch_millis)
+        {
+            detail::append_int(dest, std::chrono::floor<std::chrono::milliseconds>(since_epoch).count());
+            return;
+        }
+        // floor keeps the fraction in 0 to 999999999 nanoseconds for times before the epoch too.
         const auto whole = std::chrono::floor<std::chrono::seconds>(since_epoch);
-        const auto millis =
-            static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(since_epoch - whole).count());
+        const std::int64_t nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(since_epoch - whole).count();
         const std::time_t second = spdlog::log_clock::to_time_t(spdlog::log_clock::time_point{whole});
         if (!cached_second_ || second != *cached_second_)
         {
@@ -698,8 +937,19 @@ private:
             cached_second_ = second;
         }
         detail::append(dest, cached_prefix_);
-        dest.push_back(static_cast<char>('0' + (millis / MILLIS_HUNDREDS)));
-        append_2_(dest, millis % MILLIS_HUNDREDS);
+        switch (opts_.timestamp_style)
+        {
+        case timestamp_format::rfc3339_micros:
+            append_digits_(dest, nanos / NANOS_PER_MICRO, 6);
+            break;
+        case timestamp_format::rfc3339_nanos:
+            append_digits_(dest, nanos, 9);
+            break;
+        case timestamp_format::rfc3339_millis:
+        case timestamp_format::epoch_millis: // Returned above.
+            append_digits_(dest, nanos / NANOS_PER_MILLI, 3);
+            break;
+        }
         detail::append(dest, zone_);
     }
 
@@ -733,7 +983,11 @@ private:
     /** @brief The message key, quoted and followed by a colon. */
     std::string message_key_;
     /** @brief The header keys, quoted and followed by a colon. Empty for keys that are left out. */
-    std::string timestamp_key_, logger_key_, level_key_, process_key_, thread_key_, source_key_;
+    std::string timestamp_key_, logger_key_, level_key_, severity_key_, process_key_, thread_key_, source_key_;
+    /** @brief The level names as quoted JSON strings, indexed by level. */
+    std::array<std::string, LEVEL_COUNT> level_texts_;
+    /** @brief The severity numbers in decimal, indexed by level. */
+    std::array<std::string, LEVEL_COUNT> severity_texts_;
     /** @brief The second of the cached timestamp part, empty before the first line. */
     std::optional<std::time_t> cached_second_;
     /** @brief The quoted date and time up to the decimal point. */
@@ -1781,6 +2035,7 @@ public:
         add(options.timestamp_key);
         add(options.logger_key);
         add(options.level_key);
+        add(options.severity_key);
         add(options.process_key);
         add(options.thread_key);
         add(options.source_key);

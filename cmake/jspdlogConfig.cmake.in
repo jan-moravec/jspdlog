@@ -18,6 +18,9 @@ if(NOT TARGET jspdlog::jspdlog)
             # {fmt} requires /utf-8 on MSVC. fmt and spdlog set it on their own targets, but their installed packages
             # can lose it, so the installed jspdlog adds it too.
             INTERFACE_COMPILE_OPTIONS "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/utf-8>"
+            # The text policy chosen when this package was built. The header reads it in every translation unit.
+            INTERFACE_COMPILE_DEFINITIONS
+                "JSPDLOG_UTF8_POLICY=JSPDLOG_UTF8_@JSPDLOG_UTF8_POLICY_UPPER@;JSPDLOG_ESCAPE_LINE_SEPARATORS=@JSPDLOG_ESCAPE_LINE_SEPARATORS_VALUE@"
     )
 endif()
 

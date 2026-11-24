@@ -21,7 +21,8 @@ with spdlog **v1.x (1.12 or newer)** and **v2.x**.
 - **Typed fields.** Numbers and booleans stay numbers and booleans, so log tools can filter on them. Optionals, enums,
   durations, time points, containers and your own types have a JSON form too.
 - **Context for inner code.** `with()` gives a child logger that adds fields to every line it writes.
-- **Always valid JSON** for lines written through jspdlog: messages, keys, values and logger names are escaped.
+- **Always valid JSON, and valid UTF-8 by default** for lines written through jspdlog: messages, keys, values and
+  logger names are escaped, and invalid UTF-8 is replaced.
 
 ## Contents
 
@@ -80,15 +81,17 @@ jspdlog is one header, [include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h), a
 With CMake, an installed spdlog of either major version is used if `find_package(spdlog CONFIG)` finds one. Otherwise
 spdlog is fetched at `JSPDLOG_SPDLOG_GIT_TAG` (default: a pinned v2.x commit; set for example `v1.17.0` for v1).
 
-| CMake option                 | Default            | Description                                                       |
-| ---------------------------- | ------------------ | ----------------------------------------------------------------- |
-| `JSPDLOG_SPDLOG_GIT_TAG`     | pinned v2.x commit | spdlog tag or commit to fetch when none is installed.             |
-| `JSPDLOG_BUILD_TESTS`        | top-level only     | Build the Catch2 tests.                                           |
-| `JSPDLOG_BUILD_EXAMPLES`     | top-level only     | Build the programs in [example/](example).                        |
-| `JSPDLOG_INSTALL`            | top-level only     | Generate install rules for the header and the CMake package.      |
-| `JSPDLOG_TEST_WITH_NLOHMANN` | `ON`               | Build the tests that need nlohmann/json: interop and fuzz replay. |
-| `JSPDLOG_BUILD_FUZZERS`      | `OFF`              | Build the libFuzzer targets (Clang only).                         |
-| `JSPDLOG_BUILD_BENCH`        | `OFF`              | Build the benchmark program.                                      |
+| CMake option                     | Default            | Description                                                                                          |
+| -------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------- |
+| `JSPDLOG_SPDLOG_GIT_TAG`         | pinned v2.x commit | spdlog tag or commit to fetch when none is installed.                                                |
+| `JSPDLOG_BUILD_TESTS`            | top-level only     | Build the Catch2 tests.                                                                              |
+| `JSPDLOG_BUILD_EXAMPLES`         | top-level only     | Build the programs in [example/](example).                                                           |
+| `JSPDLOG_INSTALL`                | top-level only     | Generate install rules for the header and the CMake package.                                         |
+| `JSPDLOG_TEST_WITH_NLOHMANN`     | `ON`               | Build the tests that need nlohmann/json: interop and fuzz replay.                                    |
+| `JSPDLOG_BUILD_FUZZERS`          | `OFF`              | Build the libFuzzer targets (Clang only).                                                            |
+| `JSPDLOG_BUILD_BENCH`            | `OFF`              | Build the benchmark program.                                                                         |
+| `JSPDLOG_UTF8_POLICY`            | `replace`          | Invalid UTF-8 in logged strings: `replace`, `escape` or `pass`. See [Text encoding](#text-encoding). |
+| `JSPDLOG_ESCAPE_LINE_SEPARATORS` | `OFF`              | Write U+2028 and U+2029 as escapes. See [Text encoding](#text-encoding).                             |
 
 ## Usage
 
@@ -308,7 +311,7 @@ nlohmann::json items = {"alpha", "beta"};
 logger.info({"items", jspdlog::raw_json{items.dump()}}, "loaded {} items", items.size());
 ```
 
-The text is not validated; it must be valid JSON. Example: [06_nlohmann_raw_json.cpp](example/06_nlohmann_raw_json.cpp).
+The text is not validated, neither as JSON nor as UTF-8; it must be valid JSON. Example: [06_nlohmann_raw_json.cpp](example/06_nlohmann_raw_json.cpp).
 
 ### Configuring the line
 
@@ -324,8 +327,59 @@ jspdlog::json_logger logger("app", sink, opts);
 // {"ts":"2026-05-13T07:00:00.000Z","logger":"app","level":"info","thread":5678,"message":"hi"}
 ```
 
-The header fields always come in the order timestamp, logger, level, process, thread, source. They are followed by the
-fields and then the message. With all of them removed, a line holds only the fields and the message, or `{}`.
+The header fields always come in the order timestamp, logger, level, severity, process, thread, source. They are
+followed by the fields and then the message. With all of them removed, a line holds only the fields and the message, or
+`{}`.
+
+**Level names and severity.** `level_names` replaces the seven names, from trace to off. Without it the names are
+those of spdlog, including names set with `SPDLOG_LEVEL_NAMES`. `severity_key` adds a number after the level, by
+default the OpenTelemetry severity number of the level: trace 1, debug 5, info 9, warn 13, error 17, fatal 21. Change
+the numbers with `severity_numbers`.
+
+```cpp
+jspdlog::json_options opts;
+opts.level_names = {{"TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "OFF"}};
+opts.severity_key = "severity";
+// {"timestamp":"...","logger":"app","level":"WARN","severity":13,...}
+```
+
+**Timestamps.** `timestamp_style` chooses how the time is written:
+
+| `timestamp_format`        | Example                                 |
+| ------------------------- | --------------------------------------- |
+| `rfc3339_millis`, default | `"2026-11-23T08:00:00.123+01:00"`       |
+| `rfc3339_micros`          | `"2026-11-23T08:00:00.123456+01:00"`    |
+| `rfc3339_nanos`           | `"2026-11-23T08:00:00.123456789+01:00"` |
+| `epoch_millis`            | `1795420800123`, a number               |
+
+The digits below the resolution of the clock are zero: `spdlog::log_clock` is `std::chrono::system_clock`, which counts
+nanoseconds with libstdc++ and libc++ and 100 ns ticks with MSVC. `epoch_millis` ignores `time_type`, because an epoch
+has no zone.
+
+### Text encoding
+
+Every string jspdlog writes goes through one rule for invalid UTF-8: keys, string values, messages, logger names, level
+names, file and function names, and the payload of a message logged directly on the `spdlog::logger`. The rule is a
+compile-time setting, `JSPDLOG_UTF8_POLICY`. A `fields` object and bound context are serialized before any logger sees
+them, so a per-logger option could not cover them, and the same data must give the same line as a braced list.
+
+| Policy                          | Invalid bytes                                                                                                                            |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `JSPDLOG_UTF8_REPLACE`, default | One U+FFFD for each maximal invalid subsequence, as the Unicode standard recommends. WHATWG and Python's `errors="replace"` do the same. |
+| `JSPDLOG_UTF8_ESCAPE`           | Each invalid byte as a `\u00XX` escape. A consumer reads U+00XX, not the original byte.                                                  |
+| `JSPDLOG_UTF8_PASS`             | Copied unchanged. The line is then not valid JSON for strict parsers. Costs what it cost before 0.4.                                     |
+
+Invalid are the bytes C0, C1 and F5 to FF, overlong forms, surrogates, code points above U+10FFFF, truncated sequences
+and lone continuation bytes. With CMake, set the cache variable, for example `-DJSPDLOG_UTF8_POLICY=escape`: the
+`jspdlog::jspdlog` target, installed or not, passes the value on to everything that links it. Without CMake, define
+`JSPDLOG_UTF8_POLICY` to one of the three macros before including the header. Use the same value in every translation
+unit: inline functions of the header read it, so a mismatch breaks the one-definition rule. This differs from
+`JSPDLOG_ACTIVE_LEVEL`, which only the level macros read.
+
+U+2028 and U+2029 are valid in JSON but end a line in JavaScript source before ES2019. Set
+`JSPDLOG_ESCAPE_LINE_SEPARATORS` (`ON` in CMake, or define it to 1) to write them as ` ` and ` `.
+
+`raw_json` is not checked: it is your JSON by contract, UTF-8 included. The payload protocol is ASCII.
 
 ### Sinks
 
@@ -581,10 +635,14 @@ struct json_options {
     std::optional<std::string> timestamp_key = "timestamp";  // nullopt removes the field
     std::optional<std::string> logger_key = "logger";
     std::optional<std::string> level_key = "level";
+    std::optional<std::array<std::string, 7>> level_names;  // trace to off; nullopt: spdlog's names
+    std::optional<std::string> severity_key;                 // number after the level; off by default
+    std::array<int, 7> severity_numbers = {1, 5, 9, 13, 17, 21, 0};
     std::optional<std::string> process_key = "process";
     std::optional<std::string> thread_key = "thread";
     std::optional<std::string> source_key;  // {"file":...,"line":...,"function":...} when known; off by default
     std::string message_key = "message";
+    timestamp_format timestamp_style = timestamp_format::rfc3339_millis;  // or _micros, _nanos, epoch_millis
     spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local;
     std::optional<std::string> eol;  // nullopt: spdlog's default
 };
@@ -642,13 +700,16 @@ void install_json_formatter(spdlog::sinks::sink &sink, const json_options &optio
 
 ## Guarantees and limits
 
-Every line written by a `json_formatter` is one valid JSON object, whoever logged it, as long as `raw_json` contents are
-valid JSON and strings are UTF-8. These can still produce invalid or surprising output:
+Every line written by a `json_formatter` is one valid JSON object and valid UTF-8, whoever logged it, as long as
+`raw_json` contents are valid JSON and UTF-8 and the UTF-8 policy is not `pass`. These can still produce invalid or
+surprising output:
 
 - sinks that write the raw message instead of the formatted line, and `set_pattern()` or `set_formatter()` on a sink
   that replaces the formatter (see [Working with spdlog](#working-with-spdlog));
 - field keys equal to a header key or the message key (duplicate keys);
-- bytes that are not valid UTF-8, which are passed through unchanged;
+- bytes that are not valid UTF-8 under `JSPDLOG_UTF8_PASS`, which are copied unchanged, and in `raw_json`, which is
+  never checked (see [Text encoding](#text-encoding));
+- two different invalid keys of one object that are replaced by the same text, which then appear twice;
 - a serializer that writes more or less than one value, or leaves an object or array open: release builds do not check;
 - time points outside the years 0000 to 9999, which are `null`, and maps, which are written in iteration order;
 - a `long double` beyond the range of `double`: it is a valid JSON number, but many parsers cannot read it;
