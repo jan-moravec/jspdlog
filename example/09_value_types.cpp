@@ -11,10 +11,13 @@
 #include <string>
 #include <vector>
 
+namespace
+{
+
 enum class state
 {
     idle,
-    busy
+    busy,
 };
 
 namespace shop
@@ -27,7 +30,7 @@ struct money
 };
 
 // Found by argument-dependent lookup, so it lives next to the type.
-inline void jspdlog_serialize(jspdlog::json_writer &w, const money &m)
+void jspdlog_serialize(jspdlog::json_writer &w, const money &m)
 {
     w.begin_object();
     w.member("cents", m.cents);
@@ -46,6 +49,8 @@ struct handle
 };
 
 } // namespace third_party
+
+} // namespace
 
 // For a type whose namespace you do not own, specialize jspdlog::serializer instead.
 template <>

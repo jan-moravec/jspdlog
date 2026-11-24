@@ -31,40 +31,39 @@
 
 using jspdlog::fields;
 
+namespace
+{
+
 enum class color
 {
     red,
-    green
+    green,
 };
+// Unscoped on purpose: {fmt} 9 formats every unscoped enum as an int, which must still be written as a number.
+// NOLINTNEXTLINE(cppcoreguidelines-use-enum-class)
 enum plain
 {
-    one = 1
+    one = 1,
 };
 enum class named
 {
-    up
-};
-
-template <>
-struct fmt::formatter<named> : fmt::formatter<std::string_view>
-{
-    auto format(named, fmt::format_context &ctx) const { return fmt::formatter<std::string_view>::format("up", ctx); }
+    up,
 };
 
 #if FMT_VERSION >= 100000
 enum class numbered
 {
-    first
+    first,
 };
 enum class labelled
 {
-    first
+    first,
 };
-inline int format_as(numbered e)
+int format_as(numbered e)
 {
     return static_cast<int>(e) + 10;
 }
-inline std::string_view format_as(labelled)
+std::string_view format_as(labelled /*unused*/)
 {
     return "first-label";
 }
@@ -78,7 +77,7 @@ struct money
     std::string currency;
 };
 
-inline void jspdlog_serialize(jspdlog::json_writer &w, const money &m)
+void jspdlog_serialize(jspdlog::json_writer &w, const money &m)
 {
     w.begin_object();
     w.member("cents", m.cents);
@@ -93,7 +92,7 @@ struct order
     std::optional<money> discount;
 };
 
-inline void jspdlog_serialize(jspdlog::json_writer &w, const order &o)
+void jspdlog_serialize(jspdlog::json_writer &w, const order &o)
 {
     w.begin_object();
     w.member("id", o.id);
@@ -110,7 +109,7 @@ struct bag
     [[nodiscard]] auto end() const { return items.end(); }
 };
 
-inline void jspdlog_serialize(jspdlog::json_writer &w, const bag &b)
+void jspdlog_serialize(jspdlog::json_writer &w, const bag &b)
 {
     w.begin_object();
     w.member("count", b.items.size());
@@ -121,7 +120,7 @@ inline void jspdlog_serialize(jspdlog::json_writer &w, const bag &b)
 struct label
 {
     // Implicit on purpose: this is the case the test covers.
-    // NOLINTNEXTLINE(google-explicit-constructor,hicpp-explicit-conversions)
+    // NOLINTNEXTLINE(*-explicit-constructor,hicpp-explicit-conversions)
     operator std::string_view() const { return "label"; }
 };
 
@@ -130,17 +129,33 @@ struct throwing
 {
     throwing() = default;
     throwing(const throwing &) = default;
-    // NOLINTNEXTLINE(performance-noexcept-move-constructor)
-    throwing(throwing &&) noexcept(false) { throw std::runtime_error("move"); }
+    // NOLINTNEXTLINE(performance-noexcept-move-constructor,bugprone-unsafe-to-allow-exceptions)
+    throwing(throwing && /*unused*/) noexcept(false) { throw std::runtime_error("move"); }
     throwing &operator=(const throwing &) = default;
     throwing &operator=(throwing &&) = default;
     ~throwing() = default;
 };
 
-inline void jspdlog_serialize(jspdlog::json_writer &w, const throwing &)
+void jspdlog_serialize(jspdlog::json_writer &w, const throwing & /*unused*/)
 {
     w.value("throwing");
 }
+
+// Hands out proxy objects, as std::vector<bool> does in libc++, but declares bool as its value type.
+struct bit
+{
+    bool on;
+    // Implicit on purpose: a proxy converts to the value type.
+    // NOLINTNEXTLINE(*-explicit-constructor,hicpp-explicit-conversions)
+    operator bool() const { return on; }
+};
+struct bits
+{
+    using value_type = bool;
+    std::vector<bit> items;
+    [[nodiscard]] auto begin() const { return items.begin(); }
+    [[nodiscard]] auto end() const { return items.end(); }
+};
 } // namespace shop
 
 namespace third
@@ -151,15 +166,6 @@ struct handle
 };
 } // namespace third
 
-template <>
-struct jspdlog::serializer<third::handle>
-{
-    static void write(jspdlog::json_writer &w, const third::handle &h) { w.value(h.id * 2); }
-};
-
-namespace
-{
-
 std::string line_of(const fields &f)
 {
     return f.to_json();
@@ -167,9 +173,24 @@ std::string line_of(const fields &f)
 
 } // namespace
 
+template <>
+struct fmt::formatter<named> : fmt::formatter<std::string_view>
+{
+    auto format(named /*unused*/, fmt::format_context &ctx) const
+    {
+        return fmt::formatter<std::string_view>::format("up", ctx);
+    }
+};
+
+template <>
+struct jspdlog::serializer<third::handle>
+{
+    static void write(jspdlog::json_writer &w, const third::handle &h) { w.value(h.id * 2); }
+};
+
 TEST_CASE("value types: optional writes the value or null", "[value_types]")
 {
-    test_support::fixture f;
+    const test_support::fixture f;
     f.logger.info({"a", std::optional<int>{3}, "b", std::optional<int>{}});
     CHECK(f.last() == R"({"logger":"t","level":"info","a":3,"b":null})");
 }
@@ -177,7 +198,7 @@ TEST_CASE("value types: optional writes the value or null", "[value_types]")
 TEST_CASE("value types: enums are numbers unless they have a formatter", "[value_types]")
 {
     // plain is unscoped: {fmt} 9 (bundled by spdlog 1.12) would format it as "1", but it must stay a number.
-    test_support::fixture f;
+    const test_support::fixture f;
     f.logger.info({"c", color::green, "p", one, "n", named::up});
     CHECK(f.last() == R"({"logger":"t","level":"info","c":1,"p":1,"n":"up"})");
 }
@@ -192,7 +213,7 @@ TEST_CASE("value types: enums with format_as", "[value_types]")
 TEST_CASE("value types: durations are milliseconds with a type-stable JSON type", "[value_types]")
 {
     using namespace std::chrono;
-    test_support::fixture f;
+    const test_support::fixture f;
     f.logger.info({"s", seconds(2), "us", microseconds(1500), "ns", nanoseconds(1000000), "neg", milliseconds(-5)});
     CHECK(f.last() == R"({"logger":"t","level":"info","s":2000,"us":1.5,"ns":1.0,"neg":-5})");
 }
@@ -221,7 +242,7 @@ TEST_CASE("value types: time points are RFC 3339 UTC with milliseconds", "[value
     using namespace std::chrono;
     const system_clock::time_point t = system_clock::time_point{} + seconds(1795420800) + milliseconds(123);
     const system_clock::time_point before_epoch = system_clock::time_point{} - milliseconds(1);
-    test_support::fixture f;
+    const test_support::fixture f;
     f.logger.info({"t", t, "b", before_epoch});
     CHECK(f.last() == R"({"logger":"t","level":"info","t":"2026-11-23T08:00:00.123Z","b":"1969-12-31T23:59:59.999Z"})");
 }
@@ -241,6 +262,19 @@ TEST_CASE("value types: time points of other durations and years outside 0 to 99
     CHECK(line_of({"under", millis_point{seconds(-62167219201LL)}}) == R"({"under":null})");
     CHECK(line_of({"huge", seconds_point{seconds(std::numeric_limits<std::int64_t>::max())}}) == R"({"huge":null})");
     CHECK(line_of({"low", seconds_point{seconds(std::numeric_limits<std::int64_t>::min())}}) == R"({"low":null})");
+    // A floating-point representation: fractions are floored, and values beyond any year, NaN included, are null.
+    using double_point = time_point<system_clock, duration<double>>;
+    CHECK(line_of({"d", double_point{duration<double>(-0.0005)}}) == R"({"d":"1969-12-31T23:59:59.999Z"})");
+    CHECK(
+        line_of({"inf", double_point{duration<double>(std::numeric_limits<double>::infinity())}}) == R"({"inf":null})"
+    );
+    CHECK(
+        line_of({"ninf", double_point{duration<double>(-std::numeric_limits<double>::infinity())}}) ==
+        R"({"ninf":null})"
+    );
+    CHECK(
+        line_of({"nan", double_point{duration<double>(std::numeric_limits<double>::quiet_NaN())}}) == R"({"nan":null})"
+    );
     // Rounded toward negative infinity, as the header timestamp is.
     CHECK(
         line_of({"f", time_point<system_clock, microseconds>{microseconds(-1)}}) ==
@@ -256,7 +290,7 @@ TEST_CASE("value types: containers nest", "[value_types]")
     const std::map<std::string, std::vector<std::optional<int>>> m{{"x", {1, std::nullopt}}};
     const std::vector<jspdlog::fields> rows{{"id", 1}, {"id", 2}};
     const std::map<int, std::string> by_id{{1, "a"}};
-    test_support::fixture f;
+    const test_support::fixture f;
     f.logger.info({"m", m, "rows", rows, "by_id", by_id, "pair", std::pair{1, "x"}, "arr", std::array{1.5, 2.0}});
     CHECK(
         f.last() == R"({"logger":"t","level":"info","m":{"x":[1,null]},"rows":[{"id":1},{"id":2}],)"
@@ -273,17 +307,9 @@ TEST_CASE("value types: variants", "[value_types]")
     CHECK(line_of({"v", std::variant<std::monostate, int>{}}) == R"({"v":null})");
 
     std::variant<int, shop::throwing> valueless{1};
-    try
-    {
-        valueless.emplace<shop::throwing>(shop::throwing{});
-    }
-    catch (const std::runtime_error &)
-    {
-    }
-    if (valueless.valueless_by_exception())
-    {
-        CHECK(line_of({"v", valueless}) == R"({"v":null})");
-    }
+    CHECK_THROWS_AS(valueless.emplace<shop::throwing>(shop::throwing{}), std::runtime_error);
+    REQUIRE(valueless.valueless_by_exception());
+    CHECK(line_of({"v", valueless}) == R"({"v":null})");
     // Written as the alternative, which here is itself nested.
     CHECK(line_of({"v", std::variant<int, std::vector<int>>{std::vector<int>{1, 2}}}) == R"({"v":[1,2]})");
 }
@@ -291,6 +317,8 @@ TEST_CASE("value types: variants", "[value_types]")
 TEST_CASE("value types: ranges", "[value_types]")
 {
     CHECK(line_of({"v", std::vector<bool>{true, false}}) == R"({"v":[true,false]})");
+    // Elements of a range whose value type is bool are converted, so proxy references work.
+    CHECK(line_of({"v", shop::bits{{{true}, {false}}}}) == R"({"v":[true,false]})");
     CHECK(line_of({"v", std::vector<int>{}}) == R"({"v":[]})");
     CHECK(line_of({"v", std::list<std::string>{"a", "b"}}) == R"({"v":["a","b"]})");
     CHECK(line_of({"v", std::set<int>{3, 1, 2}}) == R"({"v":[1,2,3]})");
@@ -300,7 +328,7 @@ TEST_CASE("value types: ranges", "[value_types]")
     CHECK(line_of({"v", std::vector<std::vector<int>>{{1}, {}, {2, 3}}}) == R"({"v":[[1],[],[2,3]]})");
     const int c_array[3] = {1, 2, 3};
     CHECK(line_of({"v", c_array}) == R"({"v":[1,2,3]})");
-#if defined(__cpp_lib_span)
+#ifdef __cpp_lib_span
     const std::vector<int> backing{4, 5};
     CHECK(line_of({"v", std::span<const int>{backing}}) == R"({"v":[4,5]})");
 #endif
@@ -325,11 +353,11 @@ TEST_CASE("value types: strings and scalars take the same path as before", "[val
 {
     CHECK(line_of({"v", shop::label{}}) == R"({"v":"label"})");
     CHECK(line_of({"v", "literal"}) == R"({"v":"literal"})");
-    char buffer[8] = "abc";
+    const char buffer[8] = "abc";
     CHECK(line_of({"v", buffer}) == R"({"v":"abc"})");
     const char *text = "text";
     CHECK(line_of({"v", text}) == R"({"v":"text"})");
-    char unterminated[3] = {'x', 'y', 'z'};
+    const char unterminated[3] = {'x', 'y', 'z'};
     CHECK(line_of({"v", unterminated}) == R"({"v":"xyz"})");
     CHECK(line_of({"v", std::vector<std::string>{"a\"b"}}) == R"({"v":["a\"b"]})");
 }
@@ -363,7 +391,7 @@ TEST_CASE("value types: a serializer can nest fields and raw_json", "[value_type
 TEST_CASE("value types: every line is one JSON object", "[value_types]")
 {
     using namespace std::chrono;
-    test_support::fixture f;
+    const test_support::fixture f;
     f.logger.with({"static", std::vector<int>{1, 2}})
         .info(
             {"opt",

@@ -179,7 +179,7 @@ int main(int argc, char **argv)
     enum class bench_state
     {
         idle,
-        busy
+        busy,
     };
     {
         const jspdlog::json_logger logger("bench", make_sink(), options_with(true, false));

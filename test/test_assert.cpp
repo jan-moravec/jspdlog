@@ -82,17 +82,17 @@ struct key_without_value
 {
 };
 
-void jspdlog_serialize(jspdlog::json_writer &w, const leaves_object_open &)
+void jspdlog_serialize(jspdlog::json_writer &w, const leaves_object_open & /*unused*/)
 {
     w.begin_object();
 }
-void jspdlog_serialize(jspdlog::json_writer &, const writes_nothing &) {}
-void jspdlog_serialize(jspdlog::json_writer &w, const writes_two_values &)
+void jspdlog_serialize(jspdlog::json_writer & /*unused*/, const writes_nothing & /*unused*/) {}
+void jspdlog_serialize(jspdlog::json_writer &w, const writes_two_values & /*unused*/)
 {
     w.value(1);
     w.value(2);
 }
-void jspdlog_serialize(jspdlog::json_writer &w, const key_without_value &)
+void jspdlog_serialize(jspdlog::json_writer &w, const key_without_value & /*unused*/)
 {
     w.begin_object();
     w.key("k");

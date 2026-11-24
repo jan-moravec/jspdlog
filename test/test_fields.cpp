@@ -33,7 +33,7 @@ TEST_CASE("fields: string-like user types are strings", "[fields]")
     struct view_like
     {
         // Implicit on purpose: the conversion to std::string_view is what makes it a string.
-        // NOLINTNEXTLINE(google-explicit-constructor,hicpp-explicit-conversions)
+        // NOLINTNEXTLINE(*-explicit-constructor,hicpp-explicit-conversions)
         operator std::string_view() const { return "like"; }
     };
     CHECK(fields{"v", view_like{}}.to_json() == R"({"v":"like"})");

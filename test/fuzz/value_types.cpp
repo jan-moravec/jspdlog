@@ -14,7 +14,7 @@
 #include <variant>
 #include <vector>
 
-namespace value_fuzz
+namespace
 {
 
 constexpr int MAX_DEPTH = 6;
@@ -22,7 +22,7 @@ constexpr int MAX_NODES = 64;
 
 enum class unnamed : std::int16_t
 {
-    a = 1
+    a = 1,
 };
 
 struct node
@@ -31,7 +31,7 @@ struct node
     {
         object,
         array,
-        leaf
+        leaf,
     };
 
     kind k = kind::leaf;
@@ -91,7 +91,7 @@ struct builder
         {
             return std::numeric_limits<std::int64_t>::max();
         }
-        if (s < -LIMIT && s < std::numeric_limits<std::int64_t>::min() / 1000)
+        if (s < -LIMIT)
         {
             return std::numeric_limits<std::int64_t>::min();
         }
@@ -102,7 +102,7 @@ struct builder
     {
         node n;
         const auto kind = static_cast<unsigned>(r.byte()) % 12U;
-        const auto set = [&n](auto value, fuzz::ojson model) {
+        const auto set = [&n](const auto &value, fuzz::ojson model) {
             n.write_leaf = [value](jspdlog::json_writer &w) { w.value(value); };
             n.model = std::move(model);
         };
@@ -158,7 +158,7 @@ struct builder
             std::map<std::string, double> v;
             for (unsigned i = r.byte() % 4U; i > 0; --i)
             {
-                std::string key = text(4);
+                const std::string key = text(4);
                 v[key] = r.value<double>();
             }
             fuzz::ojson model = fuzz::ojson::object();
@@ -184,7 +184,7 @@ struct builder
         case 5:
         {
             const bool b = (r.byte() & 1U) != 0;
-            std::string s = text(8);
+            const std::string s = text(8);
             set(std::make_tuple(b, s, nullptr), fuzz::ojson::array({b, s, nullptr}));
             break;
         }
@@ -317,20 +317,20 @@ struct builder
     }
 };
 
-} // namespace value_fuzz
+} // namespace
 
 // NOLINTNEXTLINE(readability-identifier-naming): libFuzzer requires this name
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size)
 {
     fuzz::reader r(fuzz::as_text(data, size));
-    value_fuzz::builder b{r};
-    const value_fuzz::node root = b.build(0);
+    builder b{r};
+    const node root = b.build(0);
 
     const jspdlog::fields f{"v", root};
     const std::string json = f.to_json();
     fuzz::check_shape(json, "");
 
-    fuzz::harness h("t", fuzz::deterministic_options());
+    const fuzz::harness h("t", fuzz::deterministic_options());
     h.logger.info(f);
     FUZZ_CHECK(h.sink->lines.size() == 1);
     const std::string line = h.sink->last();

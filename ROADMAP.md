@@ -46,10 +46,11 @@ The header ([include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h))
 provides `json_logger` (five call shapes per level plus `log(level, ...)`),
 child loggers with `with()`, `adopt`, `json_options` (rename or omit header
 fields, message key, call site, UTC, eol), typed `jspdlog::fields` with
-nesting, `raw_json`, and, on `main` since the value-types change, optionals,
-enums, durations, time points, ranges, maps, tuples and variants with a
-customization point (`jspdlog_serialize`, `serializer`). It works with spdlog 1.12 to 1.17 and v2.x from one
-header; the only differences it handles are listed in section 8.
+nesting and `raw_json`. Unreleased, for 0.3.0: optionals, enums, durations,
+time points, ranges, maps, tuples and variants as field values, with a
+customization point (`jspdlog_serialize`, `serializer`). It works with spdlog
+1.12 to 1.17 and v2.x from one header; the only differences it handles are
+listed in section 8.
 
 A `json_formatter` renders every line from the spdlog message. `json_logger`
 passes it a payload with a process-wide token, the fields and the escaped
