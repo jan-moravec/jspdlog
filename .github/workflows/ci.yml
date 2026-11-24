@@ -220,11 +220,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Ubuntu 22.04 ships gcc-11 and clang-15; ubuntu-latest (24.04) ships gcc-13 and clang-18.
+          # Ubuntu 22.04 ships gcc-11 and clang-15; ubuntu-24.04 ships gcc-13 and clang-18. The images are pinned
+          # so that the compiler install finds them preinstalled instead of downloading them.
           - {os: ubuntu-22.04, cc: gcc-11, cxx: g++-11, std: 17}
           - {os: ubuntu-22.04, cc: clang-15, cxx: clang++-15, std: 17}
-          - {os: ubuntu-latest, cc: gcc-13, cxx: g++-13, std: 20}
-          - {os: ubuntu-latest, cc: clang-18, cxx: clang++-18, std: 20}
+          - {os: ubuntu-24.04, cc: gcc-13, cxx: g++-13, std: 20}
+          - {os: ubuntu-24.04, cc: clang-18, cxx: clang++-18, std: 20}
           - {os: macos-latest, cc: clang, cxx: clang++, std: 17}
           - {os: macos-latest, cc: clang, cxx: clang++, std: 20}
           # MSVC comes from the developer environment; cc/cxx are labels for the job name.
@@ -232,7 +233,7 @@ jobs:
           - {os: windows-latest, cc: msvc, cxx: msvc, std: 20}
           # spdlog v1.x: the oldest supported release and the current one.
           - {os: ubuntu-22.04, cc: gcc-11, cxx: g++-11, std: 17, spdlog: v1.12.0}
-          - {os: ubuntu-latest, cc: clang-18, cxx: clang++-18, std: 20, spdlog: v1.17.0}
+          - {os: ubuntu-24.04, cc: clang-18, cxx: clang++-18, std: 20, spdlog: v1.17.0}
           - {os: windows-latest, cc: msvc, cxx: msvc, std: 17, spdlog: v1.17.0}
     defaults:
       run:
