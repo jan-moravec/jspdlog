@@ -34,7 +34,7 @@
 /** @brief Major version of jspdlog. */
 #define JSPDLOG_VERSION_MAJOR 0
 /** @brief Minor version of jspdlog. */
-#define JSPDLOG_VERSION_MINOR 2
+#define JSPDLOG_VERSION_MINOR 3
 /** @brief Patch version of jspdlog. */
 #define JSPDLOG_VERSION_PATCH 0
 /** @brief The version as one number, major * 10000 + minor * 100 + patch, for #if comparisons. */

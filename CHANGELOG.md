@@ -6,6 +6,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-24
+
+Field values cover most of JSON, a disabled level costs a few nanoseconds, and expensive values and arguments can be
+skipped when the level is off.
+
 ### Added
 
 - Field values cover more of JSON, recursively: `std::optional` (the value or `null`), enums (the name when {fmt} has a
@@ -73,4 +78,5 @@ First release. jspdlog is a single-header library that writes one JSON object pe
 - Fuzz targets for escaping, numbers, `fields`, foreign payloads and whole logger lines, and a benchmark program.
 
 [0.2.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.2.0
-[unreleased]: https://github.com/jan-moravec/jspdlog/compare/v0.2.0...HEAD
+[0.3.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.3.0
+[unreleased]: https://github.com/jan-moravec/jspdlog/compare/v0.3.0...HEAD

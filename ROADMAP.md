@@ -40,17 +40,19 @@ These decide every feature below.
    may improve ergonomics but must not be required.
 1. **No JSON library dependency.** `raw_json` is the bridge to one.
 
-## 3. Where we are (0.2.0)
+## 3. Where we are (0.3.0)
 
 The header ([include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h))
 provides `json_logger` (five call shapes per level plus `log(level, ...)`),
 child loggers with `with()`, `adopt`, `json_options` (rename or omit header
 fields, message key, call site, UTC, eol), typed `jspdlog::fields` with
-nesting and `raw_json`. Unreleased, for 0.3.0: optionals, enums, durations,
-time points, ranges, maps, tuples and variants as field values, with a
-customization point (`jspdlog_serialize`, `serializer`). It works with spdlog
-1.12 to 1.17 and v2.x from one header; the only differences it handles are
-listed in section 8.
+nesting and `raw_json`. Field values also cover optionals, enums, durations,
+time points, ranges, maps, tuples and variants, with a customization point
+(`jspdlog_serialize`, `serializer`). A braced list passed to a logging call is
+serialized only when the line is written, a value in it may be a lazy
+callable, and optional `JSPDLOG_*` macros skip the arguments of a call whose
+level is off. It works with spdlog 1.12 to 1.17 and v2.x from one header; the
+only differences it handles are listed in section 8.
 
 A `json_formatter` renders every line from the spdlog message. `json_logger`
 passes it a payload with a process-wide token, the fields and the escaped
