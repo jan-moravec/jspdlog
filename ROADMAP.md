@@ -46,8 +46,11 @@ The header ([include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h))
 provides `json_logger` (five call shapes per level plus `log(level, ...)`),
 child loggers with `with()`, `adopt`, `json_options` (rename or omit header
 fields, message key, call site, UTC, eol), typed `jspdlog::fields` with
-nesting, and `raw_json`. It works with spdlog 1.12 to 1.17 and v2.x from one
-header; the only differences it handles are listed in section 8.
+nesting and `raw_json`. Unreleased, for 0.3.0: optionals, enums, durations,
+time points, ranges, maps, tuples and variants as field values, with a
+customization point (`jspdlog_serialize`, `serializer`). It works with spdlog
+1.12 to 1.17 and v2.x from one header; the only differences it handles are
+listed in section 8.
 
 A `json_formatter` renders every line from the spdlog message. `json_logger`
 passes it a payload with a process-wide token, the fields and the escaped
@@ -168,23 +171,23 @@ Field keys are always strings; field values should cover as much of JSON as
 possible, so numbers, booleans and nested data stay filterable as such
 (`"context":123`, not `"context":"123"`).
 
-- Already supported: strings, `bool`, all integers, floating point (NaN/Inf →
+- [x] Already supported: strings, `bool`, all integers, floating point (NaN/Inf →
   `null`), `nullptr`, nested `fields`, `raw_json`.
-- `std::optional<T>` (empty → `null`).
-- Enums: name if the enum is {fmt}-formattable, otherwise the underlying
+- [x] `std::optional<T>` (empty → `null`).
+- [x] Enums: name if the enum is {fmt}-formattable, otherwise the underlying
   number.
-- `std::chrono` durations (number plus unit in the key is the caller's
-  choice; default milliseconds as a number) and time points (RFC 3339
-  string).
-- Ranges (`std::vector`, `std::array`, `std::span`, ...) → JSON arrays;
+- [x] `std::chrono` durations (number plus unit in the key is the caller's
+  choice; default milliseconds as a number) and `system_clock` time points
+  (RFC 3339 UTC string with milliseconds).
+- [x] Ranges (`std::vector`, `std::array`, `std::span`, ...) → JSON arrays;
   string-keyed maps → JSON objects; recursive, so `std::vector<fields>`
   works.
-- `std::variant` → whichever alternative is active.
-- Customization point for user types, e.g. ADL
+- [x] `std::variant` → whichever alternative is active.
+- [x] Customization point for user types, e.g. ADL
   `void jspdlog_serialize(jspdlog::json_writer&, const T&)`, with no JSON
   library needed.
-- Lazy values: a callable evaluated only when the level is enabled.
-- Fuzz target for nested value types (section 6, target 5).
+- [ ] Lazy values: a callable evaluated only when the level is enabled.
+- [x] Fuzz target for nested value types (section 6, target 5).
 
 ### 0.4.0: correctness and schema
 
@@ -244,14 +247,14 @@ line with nlohmann/json.
 
 ### Targets
 
-| #   | Target                  | Input                                                                                                        | Checks                                                                                                                     |
-| --- | ----------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `escape`                | Raw bytes                                                                                                    | The escaped string parses back to the same bytes (for valid UTF-8; from 0.4, invalid UTF-8 follows the configured policy). |
-| 2   | `fields`                | A byte-coded sequence of operations: insert typed values under fuzzed keys, merge, `with()`, per-call fields | The line parses; keys, values, insertion order and override rules match a simple reference model.                          |
-| 3   | `logger_line`           | Fuzzed logger name, header keys, time type, eol and message                                                  | Every line is one object; header fields are present with the configured keys; the message round-trips.                     |
-| 4   | `foreign_payload` (0.2) | Raw payloads logged directly on the underlying `spdlog::logger`, including prefixes of the payload token     | The line is valid JSON and the payload appears only inside the message; no injected fields.                                |
-| 5   | `value_types` (0.3)     | `FuzzedDataProvider`-built nested optionals, variants, ranges and maps                                       | The parsed value equals the serialized structure.                                                                          |
-| 6   | `numbers`               | Bit patterns for every integer width, `float`, `double`, `long double`                                       | Integers round-trip exactly; floats round-trip; NaN and infinity become `null`.                                            |
+| #   | Target                    | Input                                                                                                        | Checks                                                                                                                     |
+| --- | ------------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `escape`                  | Raw bytes                                                                                                    | The escaped string parses back to the same bytes (for valid UTF-8; from 0.4, invalid UTF-8 follows the configured policy). |
+| 2   | `fields`                  | A byte-coded sequence of operations: insert typed values under fuzzed keys, merge, `with()`, per-call fields | The line parses; keys, values, insertion order and override rules match a simple reference model.                          |
+| 3   | `logger_line`             | Fuzzed logger name, header keys, time type, eol and message                                                  | Every line is one object; header fields are present with the configured keys; the message round-trips.                     |
+| 4   | `foreign_payload` (0.2)   | Raw payloads logged directly on the underlying `spdlog::logger`, including prefixes of the payload token     | The line is valid JSON and the payload appears only inside the message; no injected fields.                                |
+| 5   | `value_types` (0.3, done) | `FuzzedDataProvider`-built nested optionals, variants, ranges and maps                                       | The parsed value equals the serialized structure.                                                                          |
+| 6   | `numbers`                 | Bit patterns for every integer width, `float`, `double`, `long double`                                       | Integers round-trip exactly; floats round-trip; NaN and infinity become `null`.                                            |
 
 ### CI
 

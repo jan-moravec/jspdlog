@@ -13,6 +13,10 @@
  * //  "user_id":42,"message":"hello world"}
  * @endcode
  *
+ * Field values keep their JSON type: numbers, booleans, strings and null, but also std::optional, enums, durations and
+ * time points, ranges, maps, tuples and variants, nested to any depth. Your own types join in through a
+ * jspdlog_serialize function next to the type, or a specialization of jspdlog::serializer.
+ *
  * A json_formatter renders the whole line from the spdlog message: the header fields, the call site when asked for, the
  * fields and the message. A json_logger hands it the fields and the message in a payload that starts with a random,
  * process-wide token, and the formatter recognizes that token. Any other payload, such as a message logged directly on
@@ -69,14 +73,18 @@
 #include <cstring>
 #include <ctime>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <random>
+#include <ratio>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #ifndef _WIN32
@@ -751,6 +759,217 @@ inline void install_json_formatter(spdlog::sinks::sink &sink, const json_options
     sink.set_formatter(std::make_unique<json_formatter>(options));
 }
 
+class fields;
+
+/** @brief Implementation details. Not part of the public API. */
+namespace detail
+{
+struct writer_access;
+}
+
+/**
+ * @brief Specialize to give a type you do not own a JSON form. The primary template has no write member.
+ *
+ * Use it for types from other libraries or the standard library. For your own types, a jspdlog_serialize function next
+ * to the type is shorter. The second parameter lets one specialization cover a family of types.
+ *
+ * @code
+ * template <>
+ * struct jspdlog::serializer<QString>
+ * {
+ *     static void write(jspdlog::json_writer &w, const QString &s) { w.value(s.toStdString()); }
+ * };
+ * @endcode
+ */
+template <typename T, typename Enable = void>
+struct serializer
+{
+};
+
+/**
+ * @brief Writes one JSON value into a buffer. Used by fields for every value and passed to user serializers.
+ *
+ * value writes anything that has a JSON form:
+ *
+ * - bool, integers, floating-point numbers (NaN and infinity are null), nullptr and a null C string (null), std::string
+ *   and anything that converts to std::string_view, char (a one-character string), raw_json and fields.
+ * - std::optional (the value, or null when empty), std::variant (the active alternative, null when valueless) and
+ *   std::monostate (null).
+ * - Enums: the name when {fmt} has a formatter for the enum (a fmt::formatter specialization, or format_as in {fmt} 10
+ *   and newer, which may also return a number), otherwise the number.
+ * - std::chrono::duration: milliseconds. A duration with an integer representation and a period that is a whole number
+ *   of milliseconds is written as an integer, any other duration as a floating-point number, so the JSON type depends
+ *   on the C++ type only. Put the unit in the key, for example elapsed_ms.
+ * - std::chrono::system_clock time points of any duration: an RFC 3339 UTC string with milliseconds, such as
+ *   2026-11-23T08:00:00.123Z. Years outside 0000 to 9999 are written as null. Other clocks are rejected.
+ * - Ranges (std::vector, std::array, std::list, std::set, std::span, C arrays and anything with begin and end): arrays.
+ * - Maps whose key converts to std::string_view: objects, in the iteration order of the map. A std::multimap can write
+ *   a key twice.
+ * - std::pair and std::tuple, and maps with other keys (as an array of [key, value] pairs): arrays.
+ * - Your own types, through jspdlog_serialize or serializer.
+ *
+ * Everything is recursive, so a std::map of std::optional of std::vector of your own type works. Wide characters,
+ * pointers other than C strings and types without a JSON form are rejected at compile time. std::filesystem::path is
+ * one of them: convert it with string() or u8string().
+ *
+ * Commas are inserted automatically. Inside an object call key before each value, inside an array call value for each
+ * element. A serializer must write exactly one value. The writer does not validate structure in release builds, like
+ * raw_json; debug builds check what is cheap to check through JSPDLOG_ASSERT.
+ *
+ * @code
+ * namespace shop
+ * {
+ * inline void jspdlog_serialize(jspdlog::json_writer &w, const money &m)
+ * {
+ *     w.begin_object();
+ *     w.member("cents", m.cents);
+ *     w.member("currency", m.currency);
+ *     w.end_object();
+ * }
+ * } // namespace shop
+ * @endcode
+ */
+class json_writer
+{
+public:
+    /** @brief Creates a writer that appends to out. The buffer must outlive the writer. */
+    explicit json_writer(std::string &out) noexcept
+        : out_(&out)
+    {
+    }
+
+    /** @brief Writes any supported value, including containers and types with a serializer. */
+    template <typename T>
+    void value(const T &v);
+
+    /** @brief Writes pre-serialized JSON unchanged, or null when it is empty. */
+    void raw(std::string_view json) { scalar_(json.empty() ? std::string_view{"null"} : json); }
+
+    /** @brief Opens an object. Call key and value alternately, then end_object. */
+    void begin_object() { open_('{'); }
+    /** @brief Writes a key inside an object. The next call must write its value. */
+    void key(std::string_view k)
+    {
+        JSPDLOG_ASSERT(depth_ > 0 && !after_key_, "jspdlog: key outside a container, or two keys in a row");
+        separate_();
+        detail::append_json_quoted(*out_, k);
+        out_->push_back(':');
+        after_key_ = true;
+    }
+    /** @brief Closes the innermost object. */
+    void end_object() { close_('}'); }
+    /** @brief Opens an array. Call value for each element, then end_array. */
+    void begin_array() { open_('['); }
+    /** @brief Closes the innermost array. */
+    void end_array() { close_(']'); }
+
+    /** @brief Writes key(k) followed by value(v). */
+    template <typename T>
+    void member(std::string_view k, const T &v)
+    {
+        key(k);
+        value(v);
+    }
+
+private:
+    friend struct detail::writer_access;
+    friend class fields;
+
+    /** @brief Writes a comma when a value precedes this one in the same container. */
+    void separate_()
+    {
+        JSPDLOG_ASSERT(!need_comma_ || depth_ > 0, "jspdlog: a serializer wrote more than one value");
+        if (need_comma_)
+        {
+            out_->push_back(',');
+        }
+        need_comma_ = false;
+    }
+
+    /** @brief Marks that a value was completed. */
+    void done_() noexcept
+    {
+        need_comma_ = true;
+        after_key_ = false;
+    }
+
+    /** @brief Writes text that is already valid JSON as one value. */
+    void scalar_(std::string_view text)
+    {
+        separate_();
+        detail::append(*out_, text);
+        done_();
+    }
+
+    /** @brief Writes a quoted, escaped string. */
+    void string_(std::string_view text)
+    {
+        separate_();
+        detail::append_json_quoted(*out_, text);
+        done_();
+    }
+
+    /** @brief Writes an integer in decimal. */
+    template <typename T>
+    void integer_(T number)
+    {
+        separate_();
+        detail::append_int(*out_, number);
+        done_();
+    }
+
+    /**
+     * @brief Writes a floating-point number. A whole number keeps a trailing .0, so consumers that infer types from the
+     * text still see a float. NaN and infinity become null, because JSON has no token for them.
+     */
+    template <typename T>
+    void floating_(T number)
+    {
+        if (!std::isfinite(number))
+        {
+            scalar_("null");
+            return;
+        }
+        std::string text = spdlog::fmt_lib::format("{}", number);
+        if (text.find_first_of(".eE") == std::string::npos)
+        {
+            text += ".0";
+        }
+        scalar_(text);
+    }
+
+    /** @brief Opens an object or an array. */
+    void open_(char bracket)
+    {
+        separate_();
+        out_->push_back(bracket);
+        ++depth_;
+        need_comma_ = false;
+        after_key_ = false;
+    }
+
+    /** @brief Closes an object or an array. */
+    void close_(char bracket)
+    {
+        JSPDLOG_ASSERT(depth_ > 0 && !after_key_, "jspdlog: closing without an open container, or after a key");
+        --depth_;
+        out_->push_back(bracket);
+        done_();
+    }
+
+    /** @brief Whether exactly one value was written and nothing is left open. */
+    [[nodiscard]] bool complete_() const noexcept { return depth_ == 0 && !after_key_ && need_comma_; }
+
+    /** @brief The buffer written to. */
+    std::string *out_;
+    /** @brief Whether the next value or key needs a comma before it. */
+    bool need_comma_ = false;
+    /** @brief The number of open objects and arrays. Stored in every build, so the layout does not depend on NDEBUG. */
+    int depth_ = 0;
+    /** @brief Whether a key was written and its value is still missing. */
+    bool after_key_ = false;
+};
+
 /**
  * @brief Typed key/value fields for a log line, serialized when they are inserted.
  *
@@ -783,100 +1002,26 @@ public:
     }
 
     /**
-     * @brief Inserts null. The key is copied at once, so it may be a temporary; the same holds for every insert.
-     */
-    void insert(std::string_view key, std::nullptr_t) { set_(key, "null"); }
-
-    /** @brief Inserts a string. A std::string converts to this overload. */
-    void insert(std::string_view key, std::string_view value)
-    {
-        std::string encoded;
-        encoded.reserve(value.size() + 2);
-        detail::append_json_quoted(encoded, value);
-        set_(key, encoded);
-    }
-
-    /** @brief Inserts a C string, or null for a null pointer. */
-    void insert(std::string_view key, const char *value)
-    {
-        if (value == nullptr)
-        {
-            set_(key, "null");
-        }
-        else
-        {
-            insert(key, std::string_view{value});
-        }
-    }
-
-    /** @brief Inserts true or false. */
-    void insert(std::string_view key, bool value) { set_(key, value ? "true" : "false"); }
-
-    /**
-     * @brief Inserts a one-character string. Signed and unsigned char, and so int8_t and uint8_t, are numbers instead.
-     */
-    void insert(std::string_view key, char value) { insert(key, std::string_view{&value, 1}); }
-
-    /** @brief Inserts an integer of any width as a JSON number. */
-    template <
-        typename T,
-        std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool> && !std::is_same_v<T, char>, int> = 0>
-    void insert(std::string_view key, T value)
-    {
-        std::string text;
-        detail::append_int(text, value);
-        set_(key, text);
-    }
-
-    /**
-     * @brief Inserts a floating-point number.
+     * @brief Inserts any value that has a JSON form: see json_writer for the list. The key is copied at once, so it may
+     * be a temporary; a key that exists gets the new value at its old position.
      *
-     * A whole number keeps a trailing .0, so consumers that infer types from the text still see a float. NaN and
-     * infinity become null, because JSON has no token for them.
-     */
-    template <typename T, std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
-    void insert(std::string_view key, T value)
-    {
-        if (!std::isfinite(value))
-        {
-            set_(key, "null");
-            return;
-        }
-        std::string s = spdlog::fmt_lib::format("{}", value);
-        if (s.find_first_of(".eE") == std::string::npos)
-        {
-            s += ".0";
-        }
-        set_(key, s);
-    }
-
-    /** @brief Inserts pre-serialized JSON unchanged, or null when it is empty. */
-    void insert(std::string_view key, const raw_json &value)
-    {
-        set_(key, value.value.empty() ? std::string_view{"null"} : std::string_view{value.value});
-    }
-
-    /** @brief Inserts other fields as a nested JSON object. */
-    void insert(std::string_view key, const fields &value) { set_(key, value.to_json()); }
-
-    /**
-     * @brief Wide characters are rejected, because encoding them as UTF-8 is the caller's choice. Convert to a UTF-8
-     * std::string first.
-     */
-    void insert(std::string_view, wchar_t) = delete;
-    /** @brief Rejected like wchar_t. Convert to a UTF-8 std::string first. */
-    void insert(std::string_view, char16_t) = delete;
-    /** @brief Rejected like wchar_t. Convert to a UTF-8 std::string first. */
-    void insert(std::string_view, char32_t) = delete;
-#ifdef __cpp_char8_t
-    /** @brief Rejected, because a single UTF-8 code unit is not always a character. Use a std::string instead. */
-    void insert(std::string_view, char8_t) = delete;
-#endif
-    /**
-     * @brief Pointers other than C strings are rejected. Without this overload they would silently convert to bool.
+     * A type without a JSON form, a wide character and a pointer other than a C string are rejected at compile time.
+     * Give your own types a form with jspdlog_serialize or a specialization of serializer.
      */
     template <typename T>
-    void insert(std::string_view, const T *) = delete;
+    void insert(std::string_view key, const T &value)
+    {
+        static constexpr std::size_t PUNCTUATION_AND_SHORT_VALUE = 8; // comma, quotes, colon and a few characters
+        std::string text;
+        text.reserve(key.size() + PUNCTUATION_AND_SHORT_VALUE);
+        text.push_back(',');
+        detail::append_json_quoted(text, key);
+        text.push_back(':');
+        json_writer w(text);
+        w.value(value);
+        JSPDLOG_ASSERT(w.complete_(), "jspdlog: a serializer left an object or array open, or wrote no value");
+        put_(key, std::move(text));
+    }
 
     /**
      * @brief Adds every field of other. Where both have a key, the value from other wins and the key keeps its
@@ -976,18 +1121,6 @@ private:
         entries_.push_back(entry{std::string{key}, std::move(text)});
     }
 
-    /** @brief Stores a value that is already serialized. */
-    void set_(std::string_view key, std::string_view value)
-    {
-        std::string text;
-        text.reserve(key.size() + value.size() + 4);
-        text.push_back(',');
-        detail::append_json_quoted(text, key);
-        text.push_back(':');
-        detail::append(text, value);
-        put_(key, std::move(text));
-    }
-
     /** @brief Every entry text joined, so each field starts with a comma. */
     [[nodiscard]] std::string fragment_() const
     {
@@ -1002,6 +1135,591 @@ private:
     /** @brief The fields in insertion order. */
     std::vector<entry> entries_;
 };
+
+namespace detail
+{
+
+/** @brief Always false, but depends on its arguments, so a static_assert can use it in a discarded branch. */
+template <typename... T>
+inline constexpr bool dependent_false_v = false;
+
+/** @brief Whether a type is a character type that jspdlog does not encode. */
+template <typename T>
+inline constexpr bool is_rejected_char_v =
+    std::is_same_v<T, wchar_t> || std::is_same_v<T, char16_t> || std::is_same_v<T, char32_t>
+#ifdef __cpp_char8_t
+    || std::is_same_v<T, char8_t>
+#endif
+    ;
+
+/** @brief Whether a type is an array of char, such as a string literal or a buffer. */
+template <typename T>
+inline constexpr bool is_char_array_v =
+    std::is_array_v<T> && std::is_same_v<std::remove_cv_t<std::remove_extent_t<T>>, char>;
+
+/** @brief Whether a type is a std::optional. */
+template <typename T>
+inline constexpr bool is_optional_v = false;
+template <typename T>
+inline constexpr bool is_optional_v<std::optional<T>> = true;
+
+/** @brief Whether a type is a std::variant. */
+template <typename T>
+inline constexpr bool is_variant_v = false;
+template <typename... Ts>
+inline constexpr bool is_variant_v<std::variant<Ts...>> = true;
+
+/** @brief Whether a type is a std::chrono::duration. */
+template <typename T>
+inline constexpr bool is_duration_v = false;
+template <typename Rep, typename Period>
+inline constexpr bool is_duration_v<std::chrono::duration<Rep, Period>> = true;
+
+/** @brief Whether a type is a std::chrono::time_point of any clock. */
+template <typename T>
+inline constexpr bool is_time_point_v = false;
+template <typename Clock, typename Duration>
+inline constexpr bool is_time_point_v<std::chrono::time_point<Clock, Duration>> = true;
+
+/** @brief Whether a type is a std::pair or a std::tuple. A std::array is a range, not a tuple, here. */
+template <typename T>
+inline constexpr bool is_tuple_like_v = false;
+template <typename A, typename B>
+inline constexpr bool is_tuple_like_v<std::pair<A, B>> = true;
+template <typename... Ts>
+inline constexpr bool is_tuple_like_v<std::tuple<Ts...>> = true;
+
+/** @brief Detects begin and end, found through ADL like a range-based for does. */
+namespace range_adl
+{
+using std::begin;
+using std::end;
+
+template <typename T, typename = void>
+struct has_begin_end : std::false_type
+{
+};
+
+template <typename T>
+struct has_begin_end<
+    T,
+    std::void_t<decltype(begin(std::declval<const T &>())), decltype(end(std::declval<const T &>()))>> : std::true_type
+{
+};
+
+template <typename T>
+using element_t = std::remove_cv_t<std::remove_reference_t<decltype(*begin(std::declval<const T &>()))>>;
+} // namespace range_adl
+
+/** @brief Whether a type has begin and end, and is not a range of itself, like std::filesystem::path. */
+template <typename T, typename = void>
+inline constexpr bool is_range_v = false;
+template <typename T>
+inline constexpr bool is_range_v<T, std::enable_if_t<range_adl::has_begin_end<T>::value>> =
+    !std::is_same_v<range_adl::element_t<T>, T>;
+
+/** @brief Whether a type is a map whose keys convert to std::string_view. */
+template <typename T, typename = void>
+inline constexpr bool is_string_keyed_map_v = false;
+template <typename T>
+inline constexpr bool is_string_keyed_map_v<
+    T,
+    std::void_t<typename T::key_type, typename T::mapped_type, std::enable_if_t<is_range_v<T>>>> =
+    std::is_convertible_v<const typename T::key_type &, std::string_view>;
+
+/** @brief Whether serializer<T> has a write function for a json_writer. */
+template <typename T, typename = void>
+inline constexpr bool has_serializer_v = false;
+template <typename T>
+inline constexpr bool has_serializer_v<
+    T,
+    std::void_t<decltype(serializer<T>::write(std::declval<json_writer &>(), std::declval<const T &>()))>> = true;
+
+/**
+ * @brief Finds jspdlog_serialize by argument-dependent lookup, in the namespace of the type.
+ *
+ * jspdlog declares no jspdlog_serialize itself. A deleted declaration here would keep ordinary lookup from finding one
+ * in the global namespace, but GCC 10 and 11 then skip argument-dependent lookup too, so there is none.
+ */
+namespace serialize_adl
+{
+/** @brief Chosen when jspdlog_serialize(json_writer &, const T &) is callable. */
+template <typename T>
+auto detect(int)
+    -> decltype(jspdlog_serialize(std::declval<json_writer &>(), std::declval<const T &>()), std::true_type{});
+/** @brief Chosen otherwise. */
+template <typename T>
+std::false_type detect(...);
+
+/** @brief Calls the jspdlog_serialize that argument-dependent lookup finds. */
+template <typename T>
+void call(json_writer &w, const T &v)
+{
+    jspdlog_serialize(w, v);
+}
+} // namespace serialize_adl
+
+/** @brief Whether jspdlog_serialize(json_writer &, const T &) is found by argument-dependent lookup. */
+template <typename T>
+inline constexpr bool has_adl_serialize_v = decltype(serialize_adl::detect<T>(0))::value;
+
+/** @brief Gives the functions below the private members of json_writer. */
+struct writer_access
+{
+    /** @brief Writes text that is already valid JSON. */
+    static void scalar(json_writer &w, std::string_view text) { w.scalar_(text); }
+    /** @brief Writes a string. */
+    static void string(json_writer &w, std::string_view text) { w.string_(text); }
+    /** @brief Writes an integer. */
+    template <typename T>
+    static void integer(json_writer &w, T number)
+    {
+        w.integer_(number);
+    }
+    /** @brief Writes a floating-point number. */
+    template <typename T>
+    static void floating(json_writer &w, T number)
+    {
+        w.floating_(number);
+    }
+    /** @brief Writes fields as an object. */
+    static void object(json_writer &w, const fields &f) { w.scalar_(f.to_json()); }
+};
+
+/** @brief Multiplies by a positive factor, stopping at the limits of the type instead of overflowing. */
+template <typename T>
+constexpr T saturating_mul(T a, T factor) noexcept
+{
+    if (a == 0)
+    {
+        return 0;
+    }
+    if constexpr (std::is_signed_v<T>)
+    {
+        if (a < 0)
+        {
+            return a < std::numeric_limits<T>::min() / factor ? std::numeric_limits<T>::min() : a * factor;
+        }
+    }
+    return a > std::numeric_limits<T>::max() / factor ? std::numeric_limits<T>::max() : a * factor;
+}
+
+/** @brief Whether an enum has a formatter, as opposed to {fmt} 9 formatting every unscoped enum as an int. */
+template <typename E>
+inline constexpr bool enum_has_formatter_v = std::is_default_constructible_v<spdlog::fmt_lib::formatter<E, char>>;
+
+/** @brief Detects format_as for an enum by overload resolution, like serialize_adl does for jspdlog_serialize. */
+namespace format_as_adl
+{
+/** @brief Chosen when format_as(E) is found; its type is what format_as returns. */
+template <typename E>
+auto detect(int) -> decltype(format_as(std::declval<E>()));
+/** @brief Chosen otherwise. */
+template <typename E>
+void detect(...);
+} // namespace format_as_adl
+
+#if FMT_VERSION >= 100000
+/** @brief What format_as returns for an enum, or void when there is none. */
+template <typename E>
+using format_as_result_t = decltype(format_as_adl::detect<E>(0));
+#else
+/** @brief void: {fmt} 9 has no format_as. */
+template <typename E>
+using format_as_result_t = void;
+#endif
+
+/**
+ * @brief Writes an enum as its name when {fmt} has a formatter or format_as for it, otherwise as its number. A
+ * format_as that returns an integer gives a number.
+ */
+template <typename E>
+void write_enum(json_writer &w, E e)
+{
+    using format_as_result = format_as_result_t<E>;
+    if constexpr (std::is_integral_v<format_as_result>)
+    {
+        writer_access::integer(w, format_as(e));
+    }
+    else if constexpr (!std::is_void_v<format_as_result> || enum_has_formatter_v<E>)
+    {
+        writer_access::string(w, spdlog::fmt_lib::format("{}", e));
+    }
+    else
+    {
+        writer_access::integer(w, static_cast<std::underlying_type_t<E>>(e));
+    }
+}
+
+/**
+ * @brief Writes a duration in milliseconds: an integer when the representation is an integer and a tick is a whole
+ * number of milliseconds, a floating-point number otherwise. The JSON type depends on the C++ type only. A huge integer
+ * duration stops at the limits of long long instead of wrapping.
+ */
+template <typename Rep, typename Period>
+void write_duration(json_writer &w, std::chrono::duration<Rep, Period> d)
+{
+    using ms_ratio = std::ratio_divide<Period, std::milli>; // how many milliseconds one tick is
+    if constexpr (std::is_integral_v<Rep> && ms_ratio::den == 1)
+    {
+        using wide = std::conditional_t<std::is_signed_v<Rep>, long long, unsigned long long>;
+        writer_access::integer(w, saturating_mul(static_cast<wide>(d.count()), static_cast<wide>(ms_ratio::num)));
+    }
+    else
+    {
+        writer_access::floating(w, std::chrono::duration<double, std::milli>(d).count());
+    }
+}
+
+/**
+ * @brief Year, month and day of a count of days since 1970-01-01, proleptic Gregorian.
+ *
+ * This is Howard Hinnant's civil_from_days. It needs no time zone database and no gmtime, so it is thread-safe and
+ * works for any year. The constants are those of the published algorithm.
+ */
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+constexpr void civil_from_days(long long z, long long &y, unsigned &m, unsigned &d) noexcept
+{
+    z += 719468;
+    const long long era = (z >= 0 ? z : z - 146096) / 146097;
+    const auto doe = static_cast<unsigned>(z - (era * 146097));
+    const unsigned yoe = (doe - (doe / 1460) + (doe / 36524) - (doe / 146096)) / 365;
+    const unsigned doy = doe - ((365 * yoe) + (yoe / 4) - (yoe / 100));
+    const unsigned mp = ((5 * doy) + 2) / 153;
+    d = doy - (((153 * mp) + 2) / 5) + 1;
+    m = mp < 10 ? mp + 3 : mp - 9;
+    y = static_cast<long long>(yoe) + (era * 400) + (m <= 2 ? 1 : 0);
+}
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+
+/** @brief The most milliseconds floor_milliseconds returns, far outside the years 0 to 9999. */
+inline constexpr long long MAX_TIME_POINT_MS = std::numeric_limits<long long>::max() / 2;
+
+/** @brief Whole milliseconds of a duration, rounded toward negative infinity, stopping at MAX_TIME_POINT_MS. */
+template <typename Rep, typename Period>
+long long floor_milliseconds(std::chrono::duration<Rep, Period> d) noexcept
+{
+    using ms_ratio = std::ratio_divide<Period, std::milli>;
+    if constexpr (std::is_integral_v<Rep>)
+    {
+        if constexpr (ms_ratio::den == 1)
+        {
+            using wide = std::conditional_t<std::is_signed_v<Rep>, long long, unsigned long long>;
+            const wide ms = saturating_mul(static_cast<wide>(d.count()), static_cast<wide>(ms_ratio::num));
+            if constexpr (std::is_signed_v<Rep>)
+            {
+                return ms;
+            }
+            else
+            {
+                return ms > static_cast<unsigned long long>(MAX_TIME_POINT_MS) ? MAX_TIME_POINT_MS
+                                                                               : static_cast<long long>(ms);
+            }
+        }
+        else
+        {
+            return static_cast<long long>(std::chrono::floor<std::chrono::milliseconds>(d).count());
+        }
+    }
+    else
+    {
+        const double ms = std::floor(std::chrono::duration<double, std::milli>(d).count());
+        constexpr auto LIMIT = static_cast<double>(MAX_TIME_POINT_MS);
+        if (ms <= -LIMIT)
+        {
+            return -MAX_TIME_POINT_MS;
+        }
+        if (ms < LIMIT)
+        {
+            return static_cast<long long>(ms);
+        }
+        return MAX_TIME_POINT_MS; // also NaN, which compares false with everything
+    }
+}
+
+/** @brief Builds an RFC 3339 timestamp in a fixed buffer, one zero-padded number and separator at a time. */
+class rfc3339_buffer
+{
+public:
+    /** @brief Appends a number zero-padded to width digits, then a separator. */
+    void put(long long number, int width, char separator) noexcept
+    {
+        static constexpr long long BASE = 10;
+        for (int i = width - 1; i >= 0; --i)
+        {
+            text_[size_ + static_cast<std::size_t>(i)] = static_cast<char>('0' + (number % BASE));
+            number /= BASE;
+        }
+        size_ += static_cast<std::size_t>(width);
+        text_[size_++] = separator;
+    }
+
+    /** @brief The text written so far. */
+    [[nodiscard]] std::string_view view() const noexcept { return {text_.data(), size_}; }
+
+private:
+    /** @brief The length of YYYY-MM-DDTHH:MM:SS.mmmZ. */
+    static constexpr std::size_t LENGTH = 24;
+    /** @brief The characters written so far. */
+    std::array<char, LENGTH> text_{};
+    /** @brief The number of characters written. */
+    std::size_t size_ = 0;
+};
+
+/**
+ * @brief Writes a time point as an RFC 3339 UTC string with milliseconds, rounded toward negative infinity, so times
+ * before 1970 get 0 to 999 milliseconds. Years outside 0000 to 9999 cannot be written in RFC 3339 and become null.
+ */
+template <typename Clock, typename Duration>
+void write_time_point(json_writer &w, const std::chrono::time_point<Clock, Duration> &tp)
+{
+    static_assert(
+        std::is_same_v<Clock, std::chrono::system_clock>,
+        "jspdlog: only system_clock time points have a defined epoch; convert other clocks to system_clock first"
+    );
+    static constexpr long long MS_PER_SECOND = 1000;
+    static constexpr long long SECONDS_PER_MINUTE = 60;
+    static constexpr long long MINUTES_PER_HOUR = 60;
+    static constexpr long long MS_PER_MINUTE = MS_PER_SECOND * SECONDS_PER_MINUTE;
+    static constexpr long long MS_PER_HOUR = MS_PER_MINUTE * MINUTES_PER_HOUR;
+    static constexpr long long HOURS_PER_DAY = 24;
+    static constexpr long long MS_PER_DAY = MS_PER_HOUR * HOURS_PER_DAY;
+    static constexpr long long LAST_YEAR = 9999;
+    const long long ms = floor_milliseconds(tp.time_since_epoch());
+    long long days = ms / MS_PER_DAY;
+    long long in_day = ms % MS_PER_DAY;
+    if (in_day < 0)
+    {
+        in_day += MS_PER_DAY;
+        --days;
+    }
+    long long year = 0;
+    unsigned month = 0;
+    unsigned day = 0;
+    civil_from_days(days, year, month, day);
+    if (year < 0 || year > LAST_YEAR)
+    {
+        writer_access::scalar(w, "null");
+        return;
+    }
+    rfc3339_buffer text;
+    text.put(year, 4, '-');
+    text.put(month, 2, '-');
+    text.put(day, 2, 'T');
+    text.put(in_day / MS_PER_HOUR, 2, ':');
+    text.put((in_day / MS_PER_MINUTE) % MINUTES_PER_HOUR, 2, ':');
+    text.put((in_day / MS_PER_SECOND) % SECONDS_PER_MINUTE, 2, '.');
+    text.put(in_day % MS_PER_SECOND, 3, 'Z');
+    writer_access::string(w, text.view());
+}
+
+/** @brief Whether a range declares bool as its value type, as a std::vector of bool does. */
+template <typename R, typename = void>
+inline constexpr bool has_bool_value_type_v = false;
+template <typename R>
+inline constexpr bool has_bool_value_type_v<R, std::void_t<typename R::value_type>> =
+    std::is_same_v<typename R::value_type, bool>;
+
+/**
+ * @brief Writes the elements of a range as an array. A range of bool may hand out proxy objects instead of bool, as a
+ * std::vector of bool does in libc++, so its elements are converted to bool first.
+ */
+template <typename R>
+void write_array(json_writer &w, const R &r)
+{
+    w.begin_array();
+    for (const auto &e : r)
+    {
+        if constexpr (has_bool_value_type_v<R>)
+        {
+            const bool b = e; // a conversion, not a cast, so it is not useless when e is a bool already
+            w.value(b);
+        }
+        else
+        {
+            w.value(e);
+        }
+    }
+    w.end_array();
+}
+
+/** @brief Writes a map with string-like keys as an object. */
+template <typename M>
+void write_object(json_writer &w, const M &m)
+{
+    w.begin_object();
+    for (const auto &entry : m)
+    {
+        w.key(std::string_view(entry.first));
+        w.value(entry.second);
+    }
+    w.end_object();
+}
+
+/** @brief Writes a std::pair or std::tuple as an array. */
+template <typename T>
+void write_tuple(json_writer &w, const T &t)
+{
+    w.begin_array();
+    std::apply([&w](const auto &...e) { (w.value(e), ...); }, t);
+    w.end_array();
+}
+
+/** @brief Writes the active alternative of a variant, or null when it is valueless. */
+template <typename... Ts>
+void write_variant(json_writer &w, const std::variant<Ts...> &v)
+{
+    if (v.valueless_by_exception())
+    {
+        writer_access::scalar(w, "null");
+        return;
+    }
+    std::visit([&w](const auto &alternative) { w.value(alternative); }, v);
+}
+
+/** @brief Views a char array up to its first null character, or to its end when it has none. */
+template <typename A>
+std::string_view char_array_view(const A &array) noexcept
+{
+    const char *const end = std::find(std::begin(array), std::end(array), char{0});
+    return std::string_view{std::begin(array), static_cast<std::size_t>(end - std::begin(array))};
+}
+
+/**
+ * @brief Writes any value that has a JSON form. The order matters: built-in scalars first and not overridable, then the
+ * customization points, then the categories of the standard library, so a user type that is also a range can choose its
+ * own form.
+ */
+template <typename T>
+void write_value(json_writer &w, const T &v)
+{
+    using value_type = std::remove_cv_t<std::remove_reference_t<T>>;
+    if constexpr (std::is_same_v<value_type, std::nullptr_t> || std::is_same_v<value_type, std::monostate>)
+    {
+        writer_access::scalar(w, "null");
+    }
+    else if constexpr (std::is_same_v<value_type, bool>)
+    {
+        writer_access::scalar(w, v ? "true" : "false");
+    }
+    else if constexpr (is_rejected_char_v<value_type>)
+    {
+        static_assert(
+            dependent_false_v<value_type>,
+            "jspdlog: wchar_t, char8_t, char16_t and char32_t are rejected; convert to a UTF-8 std::string"
+        );
+    }
+    else if constexpr (std::is_same_v<value_type, char>)
+    {
+        writer_access::string(w, std::string_view{&v, 1});
+    }
+    else if constexpr (std::is_integral_v<value_type>)
+    {
+        writer_access::integer(w, v);
+    }
+    else if constexpr (std::is_floating_point_v<value_type>)
+    {
+        writer_access::floating(w, v);
+    }
+    else if constexpr (std::is_same_v<value_type, const char *> || std::is_same_v<value_type, char *>)
+    {
+        if (v == nullptr)
+        {
+            writer_access::scalar(w, "null");
+        }
+        else
+        {
+            writer_access::string(w, std::string_view{v});
+        }
+    }
+    else if constexpr (std::is_pointer_v<value_type>)
+    {
+        static_assert(
+            dependent_false_v<value_type>, "jspdlog: pointers are rejected; they would otherwise convert to bool"
+        );
+    }
+    else if constexpr (is_char_array_v<value_type>)
+    {
+        writer_access::string(w, char_array_view(v)); // a literal or a buffer, ends at the first null character
+    }
+    else if constexpr (std::is_same_v<value_type, raw_json>)
+    {
+        w.raw(v.value);
+    }
+    else if constexpr (std::is_same_v<value_type, fields>)
+    {
+        writer_access::object(w, v);
+    }
+    else if constexpr (has_serializer_v<value_type>)
+    {
+        serializer<value_type>::write(w, v);
+    }
+    else if constexpr (has_adl_serialize_v<value_type>)
+    {
+        serialize_adl::call(w, v);
+    }
+    else if constexpr (std::is_convertible_v<const value_type &, std::string_view>)
+    {
+        writer_access::string(w, std::string_view(v));
+    }
+    else if constexpr (is_optional_v<value_type>)
+    {
+        if (v)
+        {
+            w.value(*v);
+        }
+        else
+        {
+            writer_access::scalar(w, "null");
+        }
+    }
+    else if constexpr (is_variant_v<value_type>)
+    {
+        write_variant(w, v);
+    }
+    else if constexpr (std::is_enum_v<value_type>)
+    {
+        write_enum(w, v);
+    }
+    else if constexpr (is_duration_v<value_type>)
+    {
+        write_duration(w, v);
+    }
+    else if constexpr (is_time_point_v<value_type>)
+    {
+        write_time_point(w, v);
+    }
+    else if constexpr (is_tuple_like_v<value_type>)
+    {
+        write_tuple(w, v);
+    }
+    else if constexpr (is_string_keyed_map_v<value_type>)
+    {
+        write_object(w, v);
+    }
+    else if constexpr (is_range_v<value_type>) // a map with other keys is a range of pairs, so it becomes [[key,
+                                               // value], ...]
+    {
+        write_array(w, v);
+    }
+    else
+    {
+        static_assert(
+            dependent_false_v<value_type>,
+            "jspdlog: no JSON form for this type. Define jspdlog_serialize(json_writer &, const T &) next to the type, "
+            "or specialize jspdlog::serializer<T>. A std::filesystem::path is rejected: convert it with string() or "
+            "u8string()"
+        );
+    }
+}
+
+} // namespace detail
+
+template <typename T>
+void json_writer::value(const T &v)
+{
+    detail::write_value(*this, v);
+}
 
 namespace detail
 {

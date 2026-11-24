@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [escape, fields, logger_line, foreign_payload, numbers]
+        target: [escape, fields, logger_line, foreign_payload, numbers, value_types]
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

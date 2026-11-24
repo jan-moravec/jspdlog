@@ -458,6 +458,62 @@ inline std::vector<std::string> keys_of(const ojson &object)
     return keys;
 }
 
+/**
+ * Formats milliseconds since the epoch as an RFC 3339 UTC string with milliseconds, by counting years and months from
+ * 1970 one at a time. It shares nothing with the library's calendar arithmetic. Years outside 0000 to 9999 cannot be
+ * written, so the result is empty for them.
+ */
+inline std::optional<std::string> rfc3339_utc_ms(std::int64_t ms)
+{
+    constexpr std::int64_t MS_PER_DAY = 86400000;
+    constexpr std::int64_t FIRST_MS = -62167219200000; // 0000-01-01T00:00:00.000Z
+    constexpr std::int64_t LAST_MS = 253402300799999;  // 9999-12-31T23:59:59.999Z
+    if (ms < FIRST_MS || ms > LAST_MS)
+    {
+        return std::nullopt;
+    }
+    std::int64_t days = ms / MS_PER_DAY;
+    std::int64_t in_day = ms % MS_PER_DAY;
+    if (in_day < 0)
+    {
+        in_day += MS_PER_DAY;
+        --days;
+    }
+    const auto leap = [](std::int64_t y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; };
+    std::int64_t year = 1970;
+    while (days < 0)
+    {
+        --year;
+        days += leap(year) ? 366 : 365;
+    }
+    while (days >= (leap(year) ? 366 : 365))
+    {
+        days -= leap(year) ? 366 : 365;
+        ++year;
+    }
+    const int month_lengths[12] = {31, leap(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int month = 0;
+    while (days >= month_lengths[month])
+    {
+        days -= month_lengths[month];
+        ++month;
+    }
+    char text[40];
+    std::snprintf(
+        text,
+        sizeof(text),
+        "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+        static_cast<int>(year),
+        month + 1,
+        static_cast<int>(days) + 1,
+        static_cast<int>(in_day / 3600000),
+        static_cast<int>((in_day / 60000) % 60),
+        static_cast<int>((in_day / 1000) % 60),
+        static_cast<int>(in_day % 1000)
+    );
+    return std::string{text};
+}
+
 /** Collects every formatted line, including its terminator. */
 class capture_sink final : public spdlog::sinks::base_sink<std::mutex>
 {
