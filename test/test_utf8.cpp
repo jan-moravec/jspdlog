@@ -28,27 +28,27 @@ struct utf8_case
 
 constexpr utf8_case CASES[] = {
     {"ascii", "ascii", "ascii"},
-    {"\xC3\xA9", "\xC3\xA9", "\xC3\xA9"},                                       // valid, 2 bytes
-    {"\xE2\x82\xAC", "\xE2\x82\xAC", "\xE2\x82\xAC"},                           // valid, 3 bytes
-    {"\xF0\x9F\x98\x80", "\xF0\x9F\x98\x80", "\xF0\x9F\x98\x80"},               // valid, 4 bytes
-    {"a\xC3", "a" FFFD, "a\\u00c3"},                                            // truncated at the end
-    {"a\xC3z", "a" FFFD "z", "a\\u00c3z"},                                      // truncated before ASCII
-    {"\xE2\x82", FFFD, "\\u00e2\\u0082"},                                       // one maximal subpart
-    {"\xE2\x82z", FFFD "z", "\\u00e2\\u0082z"},                                 // the same, followed by ASCII
-    {"\xF0\x9F\x98", FFFD, "\\u00f0\\u009f\\u0098"},                            // 4-byte start cut after 3 bytes
-    {"\xF0\x80\x80", FFFD FFFD FFFD, "\\u00f0\\u0080\\u0080"},                  // 80 cannot follow F0
-    {"\xED\xA0\x80", FFFD FFFD FFFD, "\\u00ed\\u00a0\\u0080"},                  // surrogate
-    {"\xF4\x90\x80\x80", FFFD FFFD FFFD FFFD, "\\u00f4\\u0090\\u0080\\u0080"},  // above U+10FFFF
-    {"\xC0\xAF", FFFD FFFD, "\\u00c0\\u00af"},                                  // overlong
-    {"\xE0\x80\xAF", FFFD FFFD FFFD, "\\u00e0\\u0080\\u00af"},                  // overlong, 3 bytes
-    {"\xC1\xBF", FFFD FFFD, "\\u00c1\\u00bf"},                                  // overlong
-    {"\x80", FFFD, "\\u0080"},                                                  // lone continuation byte
-    {"a\xBF" "b", "a" FFFD "b", "a\\u00bf" "b"},                                // lone continuation byte in text
+    {"\xC3\xA9", "\xC3\xA9", "\xC3\xA9"},                                      // valid, 2 bytes
+    {"\xE2\x82\xAC", "\xE2\x82\xAC", "\xE2\x82\xAC"},                          // valid, 3 bytes
+    {"\xF0\x9F\x98\x80", "\xF0\x9F\x98\x80", "\xF0\x9F\x98\x80"},              // valid, 4 bytes
+    {"a\xC3", "a" FFFD, "a\\u00c3"},                                           // truncated at the end
+    {"a\xC3z", "a" FFFD "z", "a\\u00c3z"},                                     // truncated before ASCII
+    {"\xE2\x82", FFFD, "\\u00e2\\u0082"},                                      // one maximal subpart
+    {"\xE2\x82z", FFFD "z", "\\u00e2\\u0082z"},                                // the same, followed by ASCII
+    {"\xF0\x9F\x98", FFFD, "\\u00f0\\u009f\\u0098"},                           // 4-byte start cut after 3 bytes
+    {"\xF0\x80\x80", FFFD FFFD FFFD, "\\u00f0\\u0080\\u0080"},                 // 80 cannot follow F0
+    {"\xED\xA0\x80", FFFD FFFD FFFD, "\\u00ed\\u00a0\\u0080"},                 // surrogate
+    {"\xF4\x90\x80\x80", FFFD FFFD FFFD FFFD, "\\u00f4\\u0090\\u0080\\u0080"}, // above U+10FFFF
+    {"\xC0\xAF", FFFD FFFD, "\\u00c0\\u00af"},                                 // overlong
+    {"\xE0\x80\xAF", FFFD FFFD FFFD, "\\u00e0\\u0080\\u00af"},                 // overlong, 3 bytes
+    {"\xC1\xBF", FFFD FFFD, "\\u00c1\\u00bf"},                                 // overlong
+    {"\x80", FFFD, "\\u0080"},                                                 // lone continuation byte
+    {"a\xBFz", "a" FFFD "z", "a\\u00bfz"},                                     // lone continuation byte in text
     {"\xFF", FFFD, "\\u00ff"},
     {"\xFE\xFF", FFFD FFFD, "\\u00fe\\u00ff"},
-    {"\xF5\x80\x80\x80", FFFD FFFD FFFD FFFD, "\\u00f5\\u0080\\u0080\\u0080"},  // F5 never starts a sequence
-    {"caf\xC3\xA9 \xFF end", "caf\xC3\xA9 " FFFD " end", "caf\xC3\xA9 \\u00ff end"},
-    {"\xC3\xA9\xC3", "\xC3\xA9" FFFD, "\xC3\xA9\\u00c3"},                       // valid then truncated
+    {"\xF5\x80\x80\x80", FFFD FFFD FFFD FFFD, "\\u00f5\\u0080\\u0080\\u0080"}, // F5 never starts a sequence
+    {"\xC3\xA9t\xC3\xA9 \xFF end", "\xC3\xA9t\xC3\xA9 " FFFD " end", "\xC3\xA9t\xC3\xA9 \\u00ff end"},
+    {"\xC3\xA9\xC3", "\xC3\xA9" FFFD, "\xC3\xA9\\u00c3"}, // valid then truncated
 };
 
 #undef FFFD
@@ -70,7 +70,8 @@ std::string expected_for(const utf8_case &c)
 constexpr bool LINES_ARE_JSON = JSPDLOG_UTF8_POLICY != JSPDLOG_UTF8_PASS;
 #endif
 
-// The line must be one object, and where the build promises valid JSON, the decoded string must equal the expected text.
+// The line must be one object, and where the build promises valid JSON, the decoded string must equal the expected
+// text.
 void check_line(const std::string &line, const std::string &expected_text, const std::string &path)
 {
     INFO(path << ": " << line);
@@ -163,11 +164,21 @@ TEST_CASE("utf8: the build's policy on every path", "[utf8]")
             opts.source_key = "src";
             const fixture sourced("t", opts);
             const std::string function = input;
-            sourced.logger.spdlog_logger()->log(spdlog::source_loc{"f.cpp", 7, function.c_str()}, jspdlog::level::info, "m");
+            sourced.logger.spdlog_logger()->log(
+                spdlog::source_loc{"f.cpp", 7, function.c_str()}, jspdlog::level::info, "m"
+            );
             const std::string expected = R"({"logger":"t","level":"info","src":{"file":"f.cpp","line":7,"function":")" +
                                          text + R"("},"message":"m"})";
             CHECK(sourced.last() == expected);
             check_line(sourced.last(), text, "function");
+
+            // The file name, which is cut after the last slash first.
+            const std::string file = "dir/" + input;
+            sourced.logger.spdlog_logger()->log(spdlog::source_loc{file.c_str(), 7, "fn"}, jspdlog::level::info, "m");
+            const std::string expected_file = R"({"logger":"t","level":"info","src":{"file":")" + text +
+                                              R"(","line":7,"function":"fn"},"message":"m"})";
+            CHECK(sourced.last() == expected_file);
+            check_line(sourced.last(), text, "file");
         }
         // "a key in the options"
         {
@@ -221,12 +232,12 @@ TEST_CASE("utf8: raw_json is written unchanged", "[utf8]")
 TEST_CASE("utf8: the separators U+2028 and U+2029", "[utf8]")
 {
     const fixture f;
-    f.logger.info("a\xE2\x80\xA8" "b\xE2\x80\xA9" "c");
+    f.logger.info("a\xE2\x80\xA8z\xE2\x80\xA9y");
 #if JSPDLOG_ESCAPE_LINE_SEPARATORS
     // Not a raw string: MSVC reads a backslash-u sequence in a raw string as the character it names.
-    const std::string expected = "{\"logger\":\"t\",\"level\":\"info\",\"message\":\"a\\u2028b\\u2029c\"}";
+    const std::string expected = "{\"logger\":\"t\",\"level\":\"info\",\"message\":\"a\\u2028z\\u2029y\"}";
 #else
-    const std::string expected = "{\"logger\":\"t\",\"level\":\"info\",\"message\":\"a\xE2\x80\xA8" "b\xE2\x80\xA9" "c\"}";
+    const std::string expected = "{\"logger\":\"t\",\"level\":\"info\",\"message\":\"a\xE2\x80\xA8z\xE2\x80\xA9y\"}";
 #endif
     CHECK(f.last() == expected);
 
@@ -241,8 +252,8 @@ TEST_CASE("utf8: the default build decodes to the replaced text", "[utf8]")
 {
 #if JSPDLOG_UTF8_POLICY == JSPDLOG_UTF8_REPLACE
     const fixture f;
-    f.logger.info("a\xFF" "b");
-    CHECK(test_support::message_of(f.last()) == "a\xEF\xBF\xBD" "b");
+    f.logger.info("a\xFFz");
+    CHECK(test_support::message_of(f.last()) == "a\xEF\xBF\xBDz");
     f.logger.info({"k\xC3", "v\xE2\x82"}, "m");
     const auto parsed = nlohmann::json::parse(f.last());
     CHECK(parsed.at("k\xEF\xBF\xBD").get<std::string>() == "v\xEF\xBF\xBD");

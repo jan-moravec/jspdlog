@@ -114,6 +114,7 @@ foreach(
     lazy_returns_callable
     lazy_mutable
     removed_call_typechecked
+    utf8_policy_name
 )
     foreach(kind fail control)
         add_executable(compile_${kind}_${case} EXCLUDE_FROM_ALL compile_fail/${case}.cpp)

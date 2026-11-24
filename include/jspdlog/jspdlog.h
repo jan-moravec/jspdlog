@@ -102,13 +102,15 @@
 #define JSPDLOG_ASSERT(cond, msg) assert((cond) && (msg))
 #endif
 
+// The policy values are not 0: the preprocessor reads an unknown name such as escape as 0, and the check below must
+// reject it instead of taking it for one of the policies.
 /** @brief JSPDLOG_UTF8_POLICY value: invalid UTF-8 is replaced by U+FFFD, one per maximal invalid subsequence. */
-#define JSPDLOG_UTF8_REPLACE 0
+#define JSPDLOG_UTF8_REPLACE 1
 /** @brief JSPDLOG_UTF8_POLICY value: each invalid byte is written as a JSON u00XX escape of its value. */
-#define JSPDLOG_UTF8_ESCAPE 1
+#define JSPDLOG_UTF8_ESCAPE 2
 /** @brief JSPDLOG_UTF8_POLICY value: invalid bytes are copied unchanged. The line is then not valid JSON for strict
  * parsers. */
-#define JSPDLOG_UTF8_PASS 2
+#define JSPDLOG_UTF8_PASS 3
 
 #ifndef JSPDLOG_UTF8_POLICY
 /**

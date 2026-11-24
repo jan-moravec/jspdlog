@@ -350,7 +350,7 @@ opts.severity_key = "severity";
 | `rfc3339_millis`, default | `"2026-11-23T08:00:00.123+01:00"`       |
 | `rfc3339_micros`          | `"2026-11-23T08:00:00.123456+01:00"`    |
 | `rfc3339_nanos`           | `"2026-11-23T08:00:00.123456789+01:00"` |
-| `epoch_millis`            | `1795420800123`, a number               |
+| `epoch_millis`            | `1795417200123`, a number               |
 
 The digits below the resolution of the clock are zero: `spdlog::log_clock` is `std::chrono::system_clock`, which counts
 nanoseconds with libstdc++ and libc++ and 100 ns ticks with MSVC. `epoch_millis` ignores `time_type`, because an epoch
@@ -377,7 +377,8 @@ unit: inline functions of the header read it, so a mismatch breaks the one-defin
 `JSPDLOG_ACTIVE_LEVEL`, which only the level macros read.
 
 U+2028 and U+2029 are valid in JSON but end a line in JavaScript source before ES2019. Set
-`JSPDLOG_ESCAPE_LINE_SEPARATORS` (`ON` in CMake, or define it to 1) to write them as ` ` and ` `.
+`JSPDLOG_ESCAPE_LINE_SEPARATORS` (`ON` in CMake, or define it to 1) to write them as the JSON escapes `\u2028` and
+`\u2029`.
 
 `raw_json` is not checked: it is your JSON by contract, UTF-8 included. The payload protocol is ASCII.
 
