@@ -504,8 +504,8 @@ valid JSON and strings are UTF-8. These can still produce invalid or surprising 
 - a `spdlog::source_loc` whose file name is a temporary: the formatter caches the escaped name per pointer.
 
 The message is a single formatted string, and the call site is written only when `source_key` is set and the message
-has one: macros and `logger->log(source_loc, ...)` provide it. [ROADMAP.md](ROADMAP.md) describes the planned call-site
-capture for json_logger calls.
+has one: `json_logger` calls always record it, and for other loggers spdlog's macros and `logger->log(source_loc, ...)`
+provide it.
 
 ## FAQ
 
