@@ -232,6 +232,46 @@ void check_set(const built &b, bool utf8)
     }
 }
 
+// A braced list gives byte for byte the line that a fields object built from the same pairs gives, with the same
+// override rules: bound keys keep their position and a repeated key takes the last value at the first position.
+void check_braced_list(fuzz::reader &r, const jspdlog::json_logger &logger, std::vector<std::string> &lines)
+{
+    const auto next_key = [&r] {
+        const std::uint8_t b = r.byte();
+        const std::string k = b < 128U ? std::string(1, static_cast<char>('a' + (b % 4U))) : r.string(8);
+        return fuzz::avoid_reserved_key(k, RESERVED_KEYS);
+    };
+    const std::string k0 = next_key();
+    const std::string k1 = next_key();
+    const std::string k2 = next_key();
+    const std::string k3 = next_key();
+    const auto number = r.value<std::int64_t>();
+    const std::string text = r.string(12);
+    const auto real = r.value<double>();
+    const std::optional<std::int64_t> maybe = (r.byte() & 1U) != 0 ? std::optional<std::int64_t>{number} : std::nullopt;
+    const bool with_message = (r.byte() & 1U) != 0;
+
+    jspdlog::fields object;
+    object.insert(k0, number);
+    object.insert(k1, text);
+    object.insert(k2, real);
+    object.insert(k3, maybe);
+
+    lines.clear();
+    if (with_message)
+    {
+        logger.info({k0, number, k1, text, k2, real, k3, maybe}, "m {}", 1);
+        logger.info(object, "m {}", 1);
+    }
+    else
+    {
+        logger.info({k0, number, k1, text, k2, real, k3, maybe});
+        logger.info(object);
+    }
+    FUZZ_CHECK(lines.size() == 2);
+    FUZZ_CHECK(lines[0] == lines[1]);
+}
+
 } // namespace
 
 // NOLINTNEXTLINE(readability-identifier-naming): libFuzzer requires this name
@@ -282,7 +322,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
         grandchild.info(d.f);
     }
     FUZZ_CHECK(h.sink->lines.size() == 1);
-    const std::string &text = h.sink->lines.front();
+    const std::string text = h.sink->lines.front();
+    check_braced_list(r, grandchild, h.sink->lines);
     if (!utf8)
     {
         fuzz::check_shape(text, "\n");

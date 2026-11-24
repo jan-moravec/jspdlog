@@ -979,8 +979,7 @@ private:
  * and when two sets are merged the right-hand side wins.
  *
  * Fields are meant to be small: a lookup scans the keys, which beats a map for the handful of keys a log line carries.
- * Values are serialized as soon as the set is built, so a braced list passed to a disabled level still costs its
- * serialization. Guard expensive fields with json_logger::should_log.
+ * A braced list passed to a logging call is not a fields object: it is serialized only when the line is written.
  *
  * A key equal to one of the logger's header keys, to its source key or to its message key produces a duplicate key in
  * the line. Avoiding that is up to the caller; debug builds check it through JSPDLOG_ASSERT.
@@ -1284,6 +1283,8 @@ struct writer_access
     }
     /** @brief Writes fields as an object. */
     static void object(json_writer &w, const fields &f) { w.scalar_(f.to_json()); }
+    /** @brief Whether exactly one value was written and nothing is left open. */
+    static bool complete(const json_writer &w) noexcept { return w.complete_(); }
 };
 
 /** @brief Multiplies by a positive factor, stopping at the limits of the type instead of overflowing. */
@@ -1759,6 +1760,12 @@ public:
         return std::any_of(keys_.begin(), keys_.end(), [&f](const std::string &key) { return f.contains(key); });
     }
 
+    /** @brief Whether the key is one of the reserved keys. */
+    [[nodiscard]] bool is_reserved(std::string_view key) const noexcept
+    {
+        return std::any_of(keys_.begin(), keys_.end(), [key](const std::string &reserved) { return reserved == key; });
+    }
+
 private:
     /** @brief The reserved keys. */
     std::vector<std::string> keys_;
@@ -1828,10 +1835,15 @@ inline constexpr bool is_runtime_string_v =
 template <typename S>
 using if_runtime_string = std::enable_if_t<is_runtime_string_v<S>, int>;
 
-/** @brief Whether a single argument is neither a string nor a format string, so it cannot be a message. */
+/**
+ * @brief Whether a single argument is neither a string, a format string nor a fields object, so it cannot be a message.
+ *
+ * A fields object is excluded because a call form with fields converts it to the per-call parameter, and a template
+ * that matches the type exactly would win over that conversion.
+ */
 template <typename T>
-inline constexpr bool is_rejected_message_v =
-    !is_runtime_string_v<T> && !std::is_array_v<T> && !std::is_same_v<T, runtime_format_string>;
+inline constexpr bool is_rejected_message_v = !is_runtime_string_v<T> && !std::is_array_v<T> &&
+                                              !std::is_same_v<T, runtime_format_string> && !std::is_same_v<T, fields>;
 
 /**
  * @brief Views a runtime string as a std::string_view. A null C string is an empty message, and a char array ends at
@@ -1854,6 +1866,145 @@ std::string_view message_view(const S &s) noexcept
         return std::string_view{s};
     }
 }
+
+/**
+ * @brief The fields of one logging call.
+ *
+ * A braced list is kept as references to its keys and values, which live until the end of the full expression that
+ * contains the call, and is serialized only when the line is written. So a call at a disabled level serializes nothing.
+ * A fields object is referenced whole; it is already serialized. Not copyable, and never named in user code.
+ */
+class call_fields
+{
+public:
+    /** @brief The most pairs a braced list may hold. A larger set is built as a fields object. */
+    static constexpr std::size_t CAPACITY = 16;
+
+    /** @brief Creates an empty set, for a call with an empty braced list. */
+    call_fields() noexcept = default;
+
+    /** @brief Refers to a fields object, which must outlive the call. */
+    // Implicit on purpose: a fields object is passed to a logging call as it is.
+    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
+    call_fields(const fields &f) noexcept
+        : named_(&f)
+    {
+    }
+
+    /**
+     * @brief Refers to the keys and values of a braced list. Keys may be anything convertible to std::string_view.
+     *
+     * Nothing is copied or moved, so the arguments must outlive the call, which temporaries in a braced list do.
+     */
+    template <typename K, typename V, typename... Rest>
+    // Implicit on purpose: a braced list converts at the call.
+    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
+    call_fields(const K &key, const V &value, const Rest &...rest)
+    {
+        static_assert(sizeof...(Rest) % 2 == 0, "fields: expected key/value pairs");
+        static_assert(
+            sizeof...(Rest) / 2 + 1 <= CAPACITY,
+            "jspdlog: a braced list holds at most 16 fields; build a jspdlog::fields object for more"
+        );
+        add_(key, value, rest...);
+    }
+
+    call_fields(const call_fields &) = delete;
+    call_fields &operator=(const call_fields &) = delete;
+    ~call_fields() = default;
+
+    /** @brief The fields object this refers to, or null for a braced list. */
+    [[nodiscard]] const fields *named() const noexcept { return named_; }
+
+    /** @brief The number of key and value references of a braced list. */
+    [[nodiscard]] std::size_t size() const noexcept { return size_; }
+
+    /** @brief The key of a reference. */
+    [[nodiscard]] std::string_view key(std::size_t i) const noexcept { return refs_[i].key; }
+
+    /** @brief The index of the last reference with this key, or size() when there is none. */
+    [[nodiscard]] std::size_t last_with_key(std::string_view k) const noexcept
+    {
+        for (std::size_t i = size_; i > 0; --i)
+        {
+            if (refs_[i - 1].key == k)
+            {
+                return i - 1;
+            }
+        }
+        return size_;
+    }
+
+    /** @brief Whether a reference before i has the same key as reference i. */
+    [[nodiscard]] bool repeats_earlier(std::size_t i) const noexcept
+    {
+        for (std::size_t j = 0; j < i; ++j)
+        {
+            if (refs_[j].key == refs_[i].key)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @brief Appends a reference as a field: a comma, the quoted key, a colon and the serialized value. This runs the
+     * serializer of the value, so it throws what the serializer throws.
+     */
+    void append_to(std::string &out, std::size_t i) const
+    {
+        const ref &r = refs_[i];
+        out.push_back(',');
+        append_json_quoted(out, r.key);
+        out.push_back(':');
+        json_writer w(out);
+        r.write(w, r.value);
+        JSPDLOG_ASSERT(
+            writer_access::complete(w), "jspdlog: a serializer left an object or array open, or wrote no value"
+        );
+    }
+
+private:
+    /** @brief One key and value of a braced list. */
+    struct ref
+    {
+        /** @brief The key, viewed in place. */
+        std::string_view key;
+        /** @brief The value, which the braced list owns. */
+        const void *value;
+        /** @brief Serializes the value, with its type restored. */
+        void (*write)(json_writer &, const void *);
+    };
+
+    /** @brief Serializes the value behind a pointer of type V. */
+    template <typename V>
+    static void write_ref_(json_writer &w, const void *p)
+    {
+        w.value(*static_cast<const V *>(p));
+    }
+
+    /** @brief Records one pair and then the rest. */
+    template <typename K, typename V, typename... Rest>
+    void add_(const K &key, const V &value, const Rest &...rest)
+    {
+        static_assert(
+            std::is_convertible_v<const K &, std::string_view>, "fields: key must be convertible to std::string_view"
+        );
+        refs_[size_++] = ref{std::string_view(key), std::addressof(value), &write_ref_<V>};
+        if constexpr (sizeof...(Rest) > 0)
+        {
+            add_(rest...);
+        }
+    }
+
+    /** @brief The fields object, or null for a braced list. */
+    const fields *named_ = nullptr;
+    /** @brief The references of a braced list. Only the first size_ entries are written. */
+    std::array<ref, CAPACITY> refs_; // NOLINT(cppcoreguidelines-pro-type-member-init,hicpp-member-init)
+    /** @brief The number of entries of refs_ in use. */
+    std::size_t size_ = 0;
+};
 
 } // namespace detail
 
@@ -2012,32 +2163,35 @@ public:
     [[nodiscard]] const fields &context() const noexcept { return context_->values; }
 
     /** @brief Writes a line with fields only, without a message. */
-    void log(level lvl, const fields &f, detail::site where = detail::site()) const { log_fields_(lvl, f, where); }
+    void log(level lvl, const detail::call_fields &f, detail::site where = detail::site()) const
+    {
+        log_fields_(lvl, f, where);
+    }
 
     /** @brief Writes a formatted message. The format string is checked at compile time. */
     template <typename... Args>
     void log(level lvl, format_here_t<Args...> fmt, Args &&...args) const
     {
-        log_fmt_(lvl, empty_fields_(), fmt, std::forward<Args>(args)...);
+        log_fmt_(lvl, empty_call_fields_(), fmt, std::forward<Args>(args)...);
     }
 
     /** @brief Writes a runtime string as the message. */
     template <typename S, detail::if_runtime_string<S> = 0>
     void log(level lvl, const S &msg, detail::site where = detail::site()) const
     {
-        log_str_(lvl, empty_fields_(), detail::message_view(msg), where);
+        log_str_(lvl, empty_call_fields_(), detail::message_view(msg), where);
     }
 
     /** @brief Writes fields and a formatted message. */
     template <typename... Args>
-    void log(level lvl, const fields &f, format_here_t<Args...> fmt, Args &&...args) const
+    void log(level lvl, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const
     {
         log_fmt_(lvl, f, fmt, std::forward<Args>(args)...);
     }
 
     /** @brief Writes fields and a runtime string as the message. */
     template <typename S, detail::if_runtime_string<S> = 0>
-    void log(level lvl, const fields &f, const S &msg, detail::site where = detail::site()) const
+    void log(level lvl, const detail::call_fields &f, const S &msg, detail::site where = detail::site()) const
     {
         log_str_(lvl, f, detail::message_view(msg), where);
     }
@@ -2051,24 +2205,24 @@ public:
     template <typename... Args>                                                                                        \
     void name(format_here_t<Args...> fmt, Args &&...args) const                                                        \
     {                                                                                                                  \
-        log_fmt_(lvl, empty_fields_(), fmt, std::forward<Args>(args)...);                                              \
+        log_fmt_(lvl, empty_call_fields_(), fmt, std::forward<Args>(args)...);                                         \
     }                                                                                                                  \
     template <typename S, detail::if_runtime_string<S> = 0>                                                            \
     void name(const S &msg, detail::site where = detail::site()) const                                                 \
     {                                                                                                                  \
-        log_str_(lvl, empty_fields_(), detail::message_view(msg), where);                                              \
+        log_str_(lvl, empty_call_fields_(), detail::message_view(msg), where);                                         \
     }                                                                                                                  \
-    void name(const fields &f, detail::site where = detail::site()) const                                              \
+    void name(const detail::call_fields &f, detail::site where = detail::site()) const                                 \
     {                                                                                                                  \
         log_fields_(lvl, f, where);                                                                                    \
     }                                                                                                                  \
     template <typename... Args>                                                                                        \
-    void name(const fields &f, format_here_t<Args...> fmt, Args &&...args) const                                       \
+    void name(const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const                          \
     {                                                                                                                  \
         log_fmt_(lvl, f, fmt, std::forward<Args>(args)...);                                                            \
     }                                                                                                                  \
     template <typename S, detail::if_runtime_string<S> = 0>                                                            \
-    void name(const fields &f, const S &msg, detail::site where = detail::site()) const                                \
+    void name(const detail::call_fields &f, const S &msg, detail::site where = detail::site()) const                   \
     {                                                                                                                  \
         log_str_(lvl, f, detail::message_view(msg), where);                                                            \
     }                                                                                                                  \
@@ -2178,9 +2332,9 @@ private:
     }
 
     /** @brief An empty set of fields, shared by the call forms without fields. */
-    static const fields &empty_fields_()
+    static const detail::call_fields &empty_call_fields_()
     {
-        static const fields EMPTY;
+        static const detail::call_fields EMPTY{};
         return EMPTY;
     }
 
@@ -2191,7 +2345,7 @@ private:
     }
 
     /** @brief Writes a line with fields only. */
-    void log_fields_(level lvl, const fields &f, detail::site where) const
+    void log_fields_(level lvl, const detail::call_fields &f, detail::site where) const
     {
         if (should_log(lvl))
         {
@@ -2201,7 +2355,7 @@ private:
 
     /** @brief Writes fields and a message formatted from a format string and its arguments. */
     template <typename... Args>
-    void log_fmt_(level lvl, const fields &f, format_here_t<Args...> fmt, Args &&...args) const
+    void log_fmt_(level lvl, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const
     {
         if (should_log(lvl))
         {
@@ -2214,7 +2368,7 @@ private:
     }
 
     /** @brief Writes fields and a message taken as it is. */
-    void log_str_(level lvl, const fields &f, std::string_view msg, detail::site where) const
+    void log_str_(level lvl, const detail::call_fields &f, std::string_view msg, detail::site where) const
     {
         if (should_log(lvl))
         {
@@ -2224,49 +2378,108 @@ private:
         }
     }
 
+    /** @brief Appends the bound fields and the fields of a fields object, which are already serialized. */
+    void append_named_(spdlog::memory_buf_t &out, const fields &props) const
+    {
+        const context_data &ctx = *context_;
+        if (props.empty())
+        {
+            detail::append(out, ctx.fragment);
+            return;
+        }
+        // Inside the deferred writer, so a handler that throws reaches spdlog's error handler.
+        JSPDLOG_ASSERT(
+            !ctx.reserved.clashes_with(props), "jspdlog: a field key equals a header, source or message key"
+        );
+        for (const auto &e : ctx.values.entries_)
+        {
+            const fields::entry *over = props.find_(e.key);
+            detail::append(out, over != nullptr ? over->text : e.text);
+        }
+        for (const auto &e : props.entries_)
+        {
+            if (!ctx.values.contains(e.key))
+            {
+                detail::append(out, e.text);
+            }
+        }
+    }
+
+    /**
+     * @brief Appends the bound fields and the fields of a braced list, serializing each value that is written.
+     *
+     * Only the last value of a repeated key is serialized, so an earlier one is never run. The cost is quadratic in the
+     * number of fields, at most call_fields::CAPACITY.
+     */
+    void append_refs_(spdlog::memory_buf_t &out, const detail::call_fields &props) const
+    {
+        const context_data &ctx = *context_;
+        for (std::size_t i = 0; i < props.size(); ++i)
+        {
+            JSPDLOG_ASSERT(
+                !ctx.reserved.is_reserved(props.key(i)), "jspdlog: a field key equals a header, source or message key"
+            );
+        }
+        std::string scratch; // one per line; json_writer writes to a std::string
+        const auto append_ref = [&](std::size_t i) {
+            scratch.clear();
+            props.append_to(scratch, i);
+            detail::append(out, scratch);
+        };
+        for (const auto &e : ctx.values.entries_)
+        {
+            const std::size_t over = props.last_with_key(e.key);
+            if (over == props.size())
+            {
+                detail::append(out, e.text);
+            }
+            else
+            {
+                append_ref(over);
+            }
+        }
+        for (std::size_t i = 0; i < props.size(); ++i)
+        {
+            if (!ctx.values.contains(props.key(i)) && !props.repeats_earlier(i))
+            {
+                append_ref(props.last_with_key(props.key(i)));
+            }
+        }
+    }
+
     /**
      * @brief Logs a payload: the token, the kind, the size of the fields, the bound and per-call fields and then what
-     * write_message appends. spdlog runs the serialization while it formats the line, inside its error handling.
+     * write_message appends. spdlog runs the serialization while it formats the line, inside its error handling, so
+     * the values of a braced list are serialized here and only when the line is written.
      *
      * The fields are an already escaped list, each entry starting with a comma. A per-call field with the key of a
-     * bound field replaces its value at the bound field's position. The message is appended as a quoted JSON string,
-     * so it is escaped once however many sinks the logger has.
+     * bound field replaces its value at the bound field's position, and a key that appears twice in one braced list
+     * takes the last value at the first position, as in a fields object. The message is appended as a quoted JSON
+     * string, so it is escaped once however many sinks the logger has.
      */
     template <typename WriteMessage>
-    void emit_(level lvl, const fields &props, detail::site where, char kind, const WriteMessage &write_message) const
+    void emit_(
+        level lvl, const detail::call_fields &props, detail::site where, char kind, const WriteMessage &write_message
+    ) const
     {
         const context_data &ctx = *context_;
         const auto write = [&](spdlog::memory_buf_t &out) {
-            if (!props.empty())
-            {
-                // Inside the deferred writer, so a handler that throws reaches spdlog's error handler.
-                JSPDLOG_ASSERT(
-                    !ctx.reserved.clashes_with(props), "jspdlog: a field key equals a header, source or message key"
-                );
-            }
             detail::append(out, std::string_view{ctx.token.data(), ctx.token.size()});
             out.push_back(kind);
             const std::size_t size_at = out.size();
             detail::append(out, std::string_view{"00000000", detail::SIZE_DIGITS});
             const std::size_t fields_at = out.size();
-            if (props.empty())
+            if (props.named() != nullptr)
+            {
+                append_named_(out, *props.named());
+            }
+            else if (props.size() == 0)
             {
                 detail::append(out, ctx.fragment);
             }
             else
             {
-                for (const auto &e : ctx.values.entries_)
-                {
-                    const fields::entry *over = props.find_(e.key);
-                    detail::append(out, over != nullptr ? over->text : e.text);
-                }
-                for (const auto &e : props.entries_)
-                {
-                    if (!ctx.values.contains(e.key))
-                    {
-                        detail::append(out, e.text);
-                    }
-                }
+                append_refs_(out, props);
             }
             detail::patch_hex_size(out, size_at, out.size() - fields_at);
             write_message(out);

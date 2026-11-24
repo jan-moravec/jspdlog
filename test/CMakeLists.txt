@@ -38,6 +38,7 @@ add_executable(
     test_formatter.cpp
     test_json_logger.cpp
     test_fields.cpp
+    test_lazy.cpp
     test_value_types.cpp
     test_source_location.cpp
     test_spdlog_interop.cpp
@@ -76,6 +77,7 @@ foreach(
     value_path_like
     value_steady_clock
     value_implicit_bool
+    too_many_fields
 )
     foreach(kind fail control)
         add_executable(compile_${kind}_${case} EXCLUDE_FROM_ALL compile_fail/${case}.cpp)
