@@ -2128,9 +2128,10 @@ using format_here_t = basic_format_here<typename detail::type_identity<Args>::ty
  *
  * A braced list is kept as references and serialized only when the line is written, so a call at a disabled level
  * serializes nothing and a braced list holds at most 16 pairs. A value in it may be a callable that takes no
- * arguments, which runs only when the line is written, in the calling thread, and whose result is the value. Lazy
- * values are allowed only here, not in a fields object or with. The format arguments of a call are evaluated before
- * the call; the JSPDLOG_* macros at the end of this header skip them too when the level is off.
+ * arguments, which runs only when the line is written, in the calling thread, and whose result is the value. That
+ * means whenever the logger's level lets the call through, even if each sink then drops the line because of a higher
+ * level of its own. Lazy values are allowed only here, not in a fields object or with. The format arguments of a call
+ * are evaluated before the call; the JSPDLOG_* macros at the end of this header skip them too when the level is off.
  *
  * The message is always a JSON string, and a single argument that is not a string is rejected at compile time: put
  * values that should keep their type in fields. A string literal is a format string checked at compile time; a

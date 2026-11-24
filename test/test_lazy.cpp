@@ -473,6 +473,24 @@ TEST_CASE("lazy: a lazy value runs once however many sinks the logger has", "[la
     CHECK(first->lines[0] == second->lines[0]);
 }
 
+TEST_CASE("lazy: a sink level above the logger level does not stop a lazy value", "[lazy]")
+{
+    // spdlog formats a line before its sinks check their own levels, so a lazy value runs whenever the logger's level
+    // lets the call through. The README says so; this keeps the documentation and the behavior together.
+    const auto sink = std::make_shared<test_support::capture_sink>();
+    sink->set_level(jspdlog::level::err);
+    jspdlog::json_logger logger("t", sink, test_support::deterministic_options());
+    logger.set_level(jspdlog::level::trace);
+    int runs = 0;
+    logger.info({"v", [&runs] { return ++runs; }}, "m");
+    CHECK(runs == 1);
+    CHECK(sink->lines.empty());
+
+    logger.set_level(jspdlog::level::err);
+    logger.info({"v", [&runs] { return ++runs; }}, "m");
+    CHECK(runs == 1);
+}
+
 TEST_CASE("lazy: a lazy value that throws drops the line and reaches the error handler once", "[lazy]")
 {
     const fixture f;

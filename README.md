@@ -171,11 +171,13 @@ logger.debug({"id", q.id, "plan", [&] { return explain(q); }}, "planned");
 ```
 
 The callable runs in the calling thread before the call returns, also with async logging, so capturing by reference
-is safe. Callables are allowed only in the braced list of a call, not in a fields object or `with()`: bound fields are
-serialized once, when the child logger is created. An exception thrown by the callable, or by a serializer of a value
-in a braced list, goes to the error handler and the line is dropped, like an exception from a formatter. A type that
-has a JSON form is always a value, even when it is callable. Format arguments are evaluated before the call too; use
-the [macros](#level-macros-optional) when they are expensive.
+is safe. It runs whenever the logger's level lets the call through, even if every sink then drops the line because of
+its own, higher level: spdlog formats a line before its sinks check their levels. Callables are allowed only in the
+braced list of a call, not in a fields object or `with()`: bound fields are serialized once, when the child logger is
+created. An exception thrown by the callable, or by a serializer of a value in a braced list, goes to the error handler
+and the line is dropped, like an exception from a formatter. A type that has a JSON form is always a value, even when
+it is callable. Format arguments are evaluated before the call too; use the [macros](#level-macros-optional) when they
+are expensive.
 
 ### Level macros (optional)
 

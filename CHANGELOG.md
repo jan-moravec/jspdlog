@@ -34,8 +34,9 @@ skipped when the level is off.
 ### Changed
 
 - A braced list passed to a logging call is kept as references and serialized only when the line is written, so a
-  call at a disabled level serializes nothing, with no change at the call site. A braced list holds at most 16 pairs;
-  build a `fields` object for more. A named `fields` object is still accepted.
+  call at a disabled level serializes nothing, with no change at the call site. A braced list of more than 16 pairs no
+  longer compiles (a `static_assert` says so); build a `fields` object for more. A named `fields` object is still
+  accepted.
 - A serializer that throws, or a broken one caught by `JSPDLOG_ASSERT`, now fails while the line is written: the
   exception goes to the error handler and the line is dropped. Before, it threw from the logging call while the braced
   list was built. A `fields` object still serializes, and throws, when it is built.
