@@ -16,7 +16,8 @@ with spdlog **v1.x (1.12 or newer)** and **v2.x**.
 {"timestamp":"2026-05-13T09:00:00.000+02:00","logger":"app","level":"info","process":1234,"thread":5678,"user_id":42,"message":"hello world"}
 ```
 
-- **No macros, no globals.** Loggers are plain objects that you create and pass around.
+- **No macros required, no globals.** Loggers are plain objects that you create and pass around. Optional macros skip
+  the arguments of a call whose level is off.
 - **Typed fields.** Numbers and booleans stay numbers and booleans, so log tools can filter on them. Optionals, enums,
   durations, time points, containers and your own types have a JSON form too.
 - **Context for inner code.** `with()` gives a child logger that adds fields to every line it writes.
@@ -115,6 +116,9 @@ is not a string, such as `info(42)`, does not compile: values that should keep t
 `info({"value", 42})` writes `"value":42`. Other string types (`std::pmr::string`, `QString`, a `fmt::memory_buffer`)
 are converted by the caller, for example `info(fmt::to_string(buf))`. `fmt::runtime(s)` works with arguments.
 
+A braced list is not built into a `fields` object. It is kept as references and serialized only when the line is
+written, so a call at a disabled level serializes nothing (see [Expensive values](#expensive-values)).
+
 Every call also records its file, line and function. They are written when `json_options::source_key` is set, as
 `"source":{"file":"main.cpp","line":12,"function":"handle"}`. The function is the short name your compiler gives, so it
 can differ between compilers. No macro is needed: [08_source_location.cpp](example/08_source_location.cpp).
@@ -123,7 +127,8 @@ Example: [01_console.cpp](example/01_console.cpp).
 
 ### Fields
 
-Fields are a `jspdlog::fields`, usually written as a braced list of keys and values:
+Fields are keys and values, usually written as a braced list. A `jspdlog::fields` object holds the same, serialized
+when it is built, for fields you reuse or bind to a child logger with `with()`. For example:
 
 ```cpp
 logger.info({"user_id", 42, "admin", false, "ratio", 0.25, "name", "ada"}, "login");
@@ -152,8 +157,48 @@ logger.info({"user_id", 42, "admin", false, "ratio", 0.25, "name", "ada"}, "logi
 - A key equal to a header key (`timestamp`, `level`, ...), to the source key or to `message` produces a duplicate key.
   Avoid them. Debug builds check this through `JSPDLOG_ASSERT`, which defaults to `assert`; define it before including
   jspdlog to use your own handler. Release builds do not check.
-- Values are serialized when the list is built, before the level check. Guard expensive fields:
-  `if (logger.should_log(jspdlog::level::debug)) { ... }`.
+- A braced list passed to a logging call is serialized only when the line is written. A `fields` object is
+  serialized when it is built. A braced list holds at most 16 pairs; build a `fields` object for more.
+- A key that appears twice in one braced list takes the last value at the first position, as in a `fields` object.
+
+#### Expensive values
+
+A braced list is serialized only when the line is written, but the expressions in it run first, as for any function
+argument. Pass a callable instead of an expensive value; it runs only when the line is written:
+
+```cpp
+logger.debug({"id", q.id, "plan", [&] { return explain(q); }}, "planned");
+```
+
+The callable runs in the calling thread before the call returns, also with async logging, so capturing by reference
+is safe. Callables are allowed only in the braced list of a call, not in a fields object or `with()`: bound fields are
+serialized once, when the child logger is created. An exception thrown by the callable, or by a serializer of a value
+in a braced list, goes to the error handler and the line is dropped, like an exception from a formatter. A type that
+has a JSON form is always a value, even when it is callable. Format arguments are evaluated before the call too; use
+the [macros](#level-macros-optional) when they are expensive.
+
+### Level macros (optional)
+
+`JSPDLOG_TRACE`, `JSPDLOG_DEBUG`, `JSPDLOG_INFO`, `JSPDLOG_WARN`, `JSPDLOG_ERROR`, `JSPDLOG_CRITICAL` and
+`JSPDLOG_LOG(logger, level, ...)` take the same arguments as the member functions. They evaluate nothing in the call
+when the level is off, neither fields nor format arguments:
+
+```cpp
+JSPDLOG_DEBUG(logger, {"plan", explain(q)}, "planned {}", describe(q));
+```
+
+They are optional: every feature works through the member functions. Each is one statement, and the source line it
+records is the line of the macro. A macro is also the only way to remove calls at compile time. Define
+`JSPDLOG_ACTIVE_LEVEL` to one of spdlog's `SPDLOG_LEVEL_*` values, and the macros below it are removed:
+
+```cmake
+target_compile_definitions(app PRIVATE JSPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO)
+```
+
+A removed call is still type-checked, so it cannot rot, and a variable that only logging uses is still used. Only the
+macros read the setting, so translation units with different values link together. It is independent of
+`SPDLOG_ACTIVE_LEVEL`: spdlog defaults that one to info, which would remove every `JSPDLOG_DEBUG` silently, so
+jspdlog defaults to trace and removes nothing.
 
 ### Value types
 
@@ -474,10 +519,11 @@ json_logger, the options of the last call apply to that sink.
 
 ### Compile-time settings
 
-| spdlog setting          | Effect on jspdlog                                                                  |
+| Setting                 | Effect on jspdlog                                                                  |
 | ----------------------- | ---------------------------------------------------------------------------------- |
 | `SPDLOG_LEVEL_NAMES`    | Changes the `level` values. The defaults are `trace` ... `warning` ... `critical`. |
-| `SPDLOG_ACTIVE_LEVEL`   | No effect; it only strips spdlog's macros. Use `should_log()`.                     |
+| `SPDLOG_ACTIVE_LEVEL`   | No effect on jspdlog's calls and macros; it only strips spdlog's macros.           |
+| `JSPDLOG_ACTIVE_LEVEL`  | jspdlog's own: removes the `JSPDLOG_*` macros below a level. Default: trace.       |
 | `SPDLOG_NO_THREAD_ID`   | `thread` is always 0.                                                              |
 | `SPDLOG_EOL`            | Used when `json_options::eol` is not set.                                          |
 | `SPDLOG_USE_STD_FORMAT` | Not supported; the header stops with an error.                                     |
@@ -509,9 +555,11 @@ public:
     // Each also takes the call site as a trailing default argument, which you never write.
     void info(format_here_t<Args...> fmt, Args &&...args) const;   // a string literal, or fmt::runtime(...)
     void info(const S &msg) const;                                  // S: std::string, std::string_view, const char*, char[N]
-    void info(const fields &f) const;
-    void info(const fields &f, format_here_t<Args...> fmt, Args &&...args) const;
-    void info(const fields &f, const S &msg) const;
+    void info(Fields f) const;
+    void info(Fields f, format_here_t<Args...> fmt, Args &&...args) const;
+    void info(Fields f, const S &msg) const;
+    // Fields: a braced list {"key", value, ...} of at most 16 pairs, serialized when the line is written and with
+    // callables allowed as values, or a jspdlog::fields object.
 
     json_logger with(const fields &f) const;  // new values win on collisions; keys keep their position
     const fields &context() const noexcept;
@@ -552,6 +600,10 @@ public:
 };
 
 struct raw_json { std::string value; };
+
+// Optional macros: JSPDLOG_TRACE, _DEBUG, _INFO, _WARN, _ERROR, _CRITICAL (logger, ...) and
+// JSPDLOG_LOG(logger, level, ...). Nothing in the call is evaluated when the level is off; JSPDLOG_ACTIVE_LEVEL
+// removes the ones below a level at compile time.
 
 // Writes one JSON value. Passed to your serializers; fields uses it for every value.
 class json_writer {

@@ -2123,7 +2123,14 @@ using format_here_t = basic_format_here<typename detail::type_identity<Args>::ty
  * logger.info({"items", n});            // fields only, no message
  * logger.info({"items", n}, "loaded");  // fields and a formatted message
  * logger.info({"items", n}, text);      // fields and a runtime string as the message
+ * logger.info({"plan", [&] { return explain(q); }}, "planned");  // a lazy value
  * @endcode
+ *
+ * A braced list is kept as references and serialized only when the line is written, so a call at a disabled level
+ * serializes nothing and a braced list holds at most 16 pairs. A value in it may be a callable that takes no
+ * arguments, which runs only when the line is written, in the calling thread, and whose result is the value. Lazy
+ * values are allowed only here, not in a fields object or with. The format arguments of a call are evaluated before
+ * the call; the JSPDLOG_* macros at the end of this header skip them too when the level is off.
  *
  * The message is always a JSON string, and a single argument that is not a string is rejected at compile time: put
  * values that should keep their type in fields. A string literal is a format string checked at compile time; a
@@ -2140,6 +2147,9 @@ using format_here_t = basic_format_here<typename detail::type_identity<Args>::ty
  * json_logger works; the options of the logger created last apply to both. A sink added to the spdlog::logger later, or
  * shared with a plain spdlog logger, needs install_json_formatter to get JSON lines. Like spdlog, the logging calls do
  * not throw: an exception from a user formatter goes to the spdlog::logger's error handler and the line is dropped.
+ *
+ * A serializer that throws, or a lazy value that does, fails while the line is written: the exception goes to the
+ * error handler and the line is dropped.
  *
  * A json_logger and the formatter it installs agree on the payload token, so they work together even when the logger
  * is used from another module than the one that installed the formatter. Mixing a formatter installed by one module
