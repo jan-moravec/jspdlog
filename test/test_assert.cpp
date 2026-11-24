@@ -54,6 +54,17 @@ TEST_CASE("assert: field keys that clash with header keys are reported", "[asser
         f.logger.info({"src", 1});
         CHECK(failures().size() == 3);
     }
+    SECTION("per call, with a lazy value")
+    {
+        f.logger.info({"message", [] { return 1; }}, "x");
+        f.logger.info({"ok", 1, "logger", [] { return 2; }});
+        CHECK(failures().size() == 2);
+    }
+    SECTION("per call, with a fields object")
+    {
+        f.logger.info(jspdlog::fields{"level", 1});
+        CHECK(failures().size() == 1);
+    }
     SECTION("keys that are switched off are free to use")
     {
         f.logger.info({"timestamp", 1, "thread", 2});

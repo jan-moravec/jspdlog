@@ -47,3 +47,7 @@ jspdlog_set_warnings(example_08_source_location)
 add_executable(example_09_value_types 09_value_types.cpp)
 target_link_libraries(example_09_value_types PRIVATE jspdlog::jspdlog)
 jspdlog_set_warnings(example_09_value_types)
+
+add_executable(example_10_lazy_values 10_lazy_values.cpp)
+target_link_libraries(example_10_lazy_values PRIVATE jspdlog::jspdlog)
+jspdlog_set_warnings(example_10_lazy_values)

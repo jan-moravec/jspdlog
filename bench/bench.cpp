@@ -160,12 +160,46 @@ int main(int argc, char **argv)
         run("jspdlog, source location on", [&] { logger.info("request {} handled in {} ms", 42, 7); });
     }
 
-    // Fields are built and serialized before the level is checked: the known cost of eager fields.
+    // A disabled level. A braced list is kept as references and serialized only when the line is written, so a call
+    // costs a few nanoseconds however many fields it has. The macros skip the argument expressions too.
     {
         jspdlog::json_logger logger("bench", make_sink(), options_with(true, false));
         logger.set_level(jspdlog::level::off);
-        run("jspdlog, level off, 2 per-call fields",
+        run("disabled level, braced list (2 fields)",
             [&] { logger.info({"user", user, "status", 200}, "request {} handled in {} ms", 42, 7); });
+        run("disabled level, braced list (6 fields)", [&] {
+            logger.info(
+                {"user", user, "status", 200, "path", "/v1/items", "bytes", 1234, "cached", false, "ratio", 0.25},
+                "request {} handled in {} ms",
+                42,
+                7
+            );
+        });
+        run("disabled level, macro, braced list (2 fields)",
+            [&] { JSPDLOG_INFO(logger, {"user", user, "status", 200}, "request {} handled in {} ms", 42, 7); });
+        int counter = 0;
+        run("disabled level, format argument std::to_string, function",
+            [&] { logger.info("request {}", std::to_string(++counter)); });
+        run("disabled level, format argument std::to_string, macro",
+            [&] { JSPDLOG_INFO(logger, "request {}", std::to_string(++counter)); });
+        run("disabled level, lazy value", [&] { logger.info({"n", [&] { return ++counter; }}, "done"); });
+    }
+
+    // An enabled level: the braced list is serialized into the line, a lazy value costs the same as an eager one.
+    {
+        const jspdlog::json_logger logger("bench", make_sink(), options_with(true, false));
+        run("jspdlog, braced list (2 fields) + message",
+            [&] { logger.info({"user", user, "status", 200}, "request {} handled in {} ms", 42, 7); });
+        run("jspdlog, braced list (6 fields) + message", [&] {
+            logger.info(
+                {"user", user, "status", 200, "path", "/v1/items", "bytes", 1234, "cached", false, "ratio", 0.25},
+                "request {} handled in {} ms",
+                42,
+                7
+            );
+        });
+        run("jspdlog, lazy value + message (2 fields)",
+            [&] { logger.info({"user", user, "status", [] { return 200; }}, "request {} handled in {} ms", 42, 7); });
     }
 
     // Third-party code logging straight on the spdlog logger: the whole payload is escaped into the message.

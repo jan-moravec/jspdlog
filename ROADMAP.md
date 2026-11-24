@@ -40,17 +40,19 @@ These decide every feature below.
    may improve ergonomics but must not be required.
 1. **No JSON library dependency.** `raw_json` is the bridge to one.
 
-## 3. Where we are (0.2.0)
+## 3. Where we are (0.3.0)
 
 The header ([include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h))
 provides `json_logger` (five call shapes per level plus `log(level, ...)`),
 child loggers with `with()`, `adopt`, `json_options` (rename or omit header
 fields, message key, call site, UTC, eol), typed `jspdlog::fields` with
-nesting and `raw_json`. Unreleased, for 0.3.0: optionals, enums, durations,
-time points, ranges, maps, tuples and variants as field values, with a
-customization point (`jspdlog_serialize`, `serializer`). It works with spdlog
-1.12 to 1.17 and v2.x from one header; the only differences it handles are
-listed in section 8.
+nesting and `raw_json`. Field values also cover optionals, enums, durations,
+time points, ranges, maps, tuples and variants, with a customization point
+(`jspdlog_serialize`, `serializer`). A braced list passed to a logging call is
+serialized only when the line is written, a value in it may be a lazy
+callable, and optional `JSPDLOG_*` macros skip the arguments of a call whose
+level is off. It works with spdlog 1.12 to 1.17 and v2.x from one header; the
+only differences it handles are listed in section 8.
 
 A `json_formatter` renders every line from the spdlog message. `json_logger`
 passes it a payload with a process-wide token, the fields and the escaped
@@ -60,9 +62,6 @@ loggers and sinks jspdlog does not wrap. Structural limits that remain:
 
 - The options belong to each sink's formatter, so loggers sharing a sink share
   the options of the one created last.
-- Per-call fields are serialized when the braced list is built, before the
-  level check, so principle 5 holds only for the message. Lazy values
-  (milestone 0.3.0) close this gap.
 
 ## 4. Architecture decision: custom `spdlog::formatter` (proposed for 0.2)
 
@@ -186,7 +185,9 @@ possible, so numbers, booleans and nested data stay filterable as such
 - [x] Customization point for user types, e.g. ADL
   `void jspdlog_serialize(jspdlog::json_writer&, const T&)`, with no JSON
   library needed.
-- [ ] Lazy values: a callable evaluated only when the level is enabled.
+- [x] Lazy values: a callable evaluated only when the line is written; a braced
+  list is serialized only then too.
+- [x] Optional level macros with compile-time removal (`JSPDLOG_ACTIVE_LEVEL`).
 - [x] Fuzz target for nested value types (section 6, target 5).
 
 ### 0.4.0: correctness and schema
@@ -300,25 +301,28 @@ line with nlohmann/json.
 The differences are small enough for **one header** with a few `#if`s;
 separate per-version headers aren't needed.
 
-## 9. Decisions (2026-11-21 and 2026-11-22)
+## 9. Decisions (2026-11-21 to 2026-11-24)
 
-| #   | Question                             | Decision                                                                                                                                                                    |
-| --- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Key order                            | Insertion order: outer context, inner context, per-call fields, message. A replaced key keeps its position.                                                                 |
-| 2   | Source location                      | Always captured; written only when enabled (off by default); file base name.                                                                                                |
-| 3   | Fields that clash with header keys   | Caller's responsibility. Debug-build `JSPDLOG_ASSERT`, like bounds checks in `std::vector`; no release cost.                                                                |
-| 4   | Value types                          | Keys are strings; values map to native JSON types wherever possible (section 5, milestone 0.3.0). The message is always a string; `info(value)` takes runtime strings only. |
-| 5   | Naming                               | `jspdlog::fields`, `logger.with(...)`.                                                                                                                                      |
-| 6   | Payload token                        | One immutable process-wide token. Accepted exception to "no global state": it is a constant, not configurable shared state. `adopt()` keeps installing the formatter.       |
-| 7   | Minimum spdlog                       | 1.12.                                                                                                                                                                       |
-| 8   | Raw-message sinks                    | A documented route per sink, no stripping helper; `mongo_sink` and `kafka_sink` unsupported.                                                                                |
-| 9   | Source `file`                        | Base name, written by the formatter from 0.2.0 on.                                                                                                                          |
-| 10  | Process id                           | Cached, because getpid is a system call on Linux; a pthread_atfork handler clears it in a forked child.                                                                     |
-| 11  | Per-call key replacing a context key | Context position: a key stays where it first appeared.                                                                                                                      |
-| 12  | Getter name for bound fields         | `context()`.                                                                                                                                                                |
-| 13  | Deprecated aliases for 0.1 names     | None, clean rename.                                                                                                                                                         |
-| 14  | Test option name                     | `JSPDLOG_TEST_NLOHMANN_INTEROP` becomes `JSPDLOG_TEST_WITH_NLOHMANN`.                                                                                                       |
-| 15  | Releases                             | Each milestone is tagged `v0.N.0` when complete; the API may break between minor versions until `v1.0.0`.                                                                   |
+| #   | Question                             | Decision                                                                                                                                                                                                                                                                                                  |
+| --- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Key order                            | Insertion order: outer context, inner context, per-call fields, message. A replaced key keeps its position.                                                                                                                                                                                               |
+| 2   | Source location                      | Always captured; written only when enabled (off by default); file base name.                                                                                                                                                                                                                              |
+| 3   | Fields that clash with header keys   | Caller's responsibility. Debug-build `JSPDLOG_ASSERT`, like bounds checks in `std::vector`; no release cost.                                                                                                                                                                                              |
+| 4   | Value types                          | Keys are strings; values map to native JSON types wherever possible (section 5, milestone 0.3.0). The message is always a string; `info(value)` takes runtime strings only.                                                                                                                               |
+| 5   | Naming                               | `jspdlog::fields`, `logger.with(...)`.                                                                                                                                                                                                                                                                    |
+| 6   | Payload token                        | One immutable process-wide token. Accepted exception to "no global state": it is a constant, not configurable shared state. `adopt()` keeps installing the formatter.                                                                                                                                     |
+| 7   | Minimum spdlog                       | 1.12.                                                                                                                                                                                                                                                                                                     |
+| 8   | Raw-message sinks                    | A documented route per sink, no stripping helper; `mongo_sink` and `kafka_sink` unsupported.                                                                                                                                                                                                              |
+| 9   | Source `file`                        | Base name, written by the formatter from 0.2.0 on.                                                                                                                                                                                                                                                        |
+| 10  | Process id                           | Cached, because getpid is a system call on Linux; a pthread_atfork handler clears it in a forked child.                                                                                                                                                                                                   |
+| 11  | Per-call key replacing a context key | Context position: a key stays where it first appeared.                                                                                                                                                                                                                                                    |
+| 12  | Getter name for bound fields         | `context()`.                                                                                                                                                                                                                                                                                              |
+| 13  | Deprecated aliases for 0.1 names     | None, clean rename.                                                                                                                                                                                                                                                                                       |
+| 14  | Test option name                     | `JSPDLOG_TEST_NLOHMANN_INTEROP` becomes `JSPDLOG_TEST_WITH_NLOHMANN`.                                                                                                                                                                                                                                     |
+| 15  | Releases                             | Each milestone is tagged `v0.N.0` when complete; the API may break between minor versions until `v1.0.0`.                                                                                                                                                                                                 |
+| 16  | Per-call fields (2026-11-24)         | A braced list passed to a logging call is a separate type, `detail::call_fields`, that holds references to its keys and values and is serialized only when the line is written; at most 16 pairs. A disabled call costs a few nanoseconds, with no change at the call site.                               |
+| 17  | Lazy values (2026-11-24)             | A value in a per-call braced list may be a callable taking no arguments, run only when the line is written. `fields` and `with()` reject callables at compile time, and a type with a JSON form is never lazy.                                                                                            |
+| 18  | Level macros (2026-11-24)            | Optional `JSPDLOG_*` statement macros skip every argument of a call whose level is off. `JSPDLOG_ACTIVE_LEVEL` is read only inside macros, so translation units with different values link together. A removed call is `if (false)`, not `(void)0`, so it stays type-checked and its variables stay used. |
 
 ## 10. Quality gates (every milestone)
 

@@ -48,7 +48,9 @@ TEST_CASE("formatter: a direct spdlog call becomes an escaped message", "[format
 {
     const fixture f;
     f.logger.spdlog_logger()->info(R"(a "quoted" {"x":1} line)");
-    CHECK(f.last() == R"({"logger":"t","level":"info","message":"a \"quoted\" {\"x\":1} line"})");
+    // MSVC 19.44 mis-stringifies raw strings with backslashes inside Catch2 macros.
+    const std::string expected = R"({"logger":"t","level":"info","message":"a \"quoted\" {\"x\":1} line"})";
+    CHECK(f.last() == expected);
 
     f.logger.spdlog_logger()->info("x {}", 1);
     CHECK(f.last() == R"({"logger":"t","level":"info","message":"x 1"})");
@@ -133,9 +135,12 @@ TEST_CASE("formatter: message_key renames the message for jspdlog and foreign ca
     const fixture f("t", opts);
 
     f.logger.info({"k", 1}, "x");
-    CHECK(f.last() == R"({"logger":"t","level":"info","k":1,"msg\"":"x"})");
+    // MSVC 19.44 mis-stringifies raw strings with backslashes inside Catch2 macros.
+    const std::string expected_fields = R"({"logger":"t","level":"info","k":1,"msg\"":"x"})";
+    const std::string expected_plain = R"({"logger":"t","level":"info","msg\"":"y"})";
+    CHECK(f.last() == expected_fields);
     f.logger.spdlog_logger()->info("y");
-    CHECK(f.last() == R"({"logger":"t","level":"info","msg\"":"y"})");
+    CHECK(f.last() == expected_plain);
 }
 
 TEST_CASE("formatter: the header keys can be renamed", "[formatter]")
@@ -207,7 +212,9 @@ TEST_CASE("formatter: timestamps are RFC 3339 with milliseconds", "[formatter]")
         jspdlog::json_formatter formatter(opts);
         const std::string line = format_payload(formatter, "x");
         INFO(line);
-        CHECK(std::regex_search(line, std::regex(R"re(^\{"ts":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z",)re")));
+        // MSVC 19.44 mis-stringifies raw strings with backslashes inside Catch2 macros.
+        const std::regex utc(R"re(^\{"ts":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z",)re");
+        CHECK(std::regex_search(line, utc));
     }
     SECTION("local time ends in an offset")
     {
@@ -215,9 +222,9 @@ TEST_CASE("formatter: timestamps are RFC 3339 with milliseconds", "[formatter]")
         jspdlog::json_formatter formatter(opts);
         const std::string line = format_payload(formatter, "x");
         INFO(line);
-        CHECK(
-            std::regex_search(line, std::regex(R"re(^\{"ts":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d",)re"))
-        );
+        // MSVC 19.44 mis-stringifies raw strings with backslashes inside Catch2 macros.
+        const std::regex local(R"re(^\{"ts":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d",)re");
+        CHECK(std::regex_search(line, local));
     }
     SECTION("a known instant")
     {
