@@ -359,7 +359,9 @@ TEST_CASE("value types: strings and scalars take the same path as before", "[val
     CHECK(line_of({"v", text}) == R"({"v":"text"})");
     const char unterminated[3] = {'x', 'y', 'z'};
     CHECK(line_of({"v", unterminated}) == R"({"v":"xyz"})");
-    CHECK(line_of({"v", std::vector<std::string>{"a\"b"}}) == R"({"v":["a\"b"]})");
+    // MSVC 19.44 mis-stringifies raw strings with backslashes inside Catch2 macros.
+    const std::string escaped = R"({"v":["a\"b"]})";
+    CHECK(line_of({"v", std::vector<std::string>{"a\"b"}}) == escaped);
 }
 
 TEST_CASE("value types: customization points", "[value_types]")

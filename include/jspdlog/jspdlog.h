@@ -2588,14 +2588,19 @@ private:
 #define JSPDLOG_ACTIVE_LEVEL SPDLOG_LEVEL_TRACE
 #endif
 
-// Unique local names, so a macro inside a lazy value of another macro does not shadow the outer one. MSVC with edit and
-// continue makes __LINE__ unusable for pasting and does not warn about __COUNTER__. GCC and Clang accept __LINE__ in
-// any mode, while Clang 21 and newer warn about __COUNTER__ under -Wpedantic. Two macros that start on one line and
-// nest share a name, which is only a shadowing warning.
-#if defined(_MSC_VER) && !defined(__clang__)
-#define JSPDLOG_DETAIL_UNIQUE __COUNTER__
-#else
+// Unique local names, so a macro inside a lazy value of another macro does not shadow the outer one. __COUNTER__ gives
+// each macro its own name, also when both are on one line, where GCC's -Wshadow would report a shared one. Clang
+// versions with -Wc2y-extensions report __COUNTER__ under -Wpedantic, and a pragma in the macro cannot cover a nested
+// macro, whose __COUNTER__ is expanded with the arguments of the outer one. They use __LINE__: Clang reports the
+// shadowing of a local that the lambda does not capture only under -Wshadow-uncaptured-local, which -Wshadow does not
+// include.
+#if defined(__clang__) && defined(__has_warning)
+#if __has_warning("-Wc2y-extensions")
 #define JSPDLOG_DETAIL_UNIQUE __LINE__
+#endif
+#endif
+#ifndef JSPDLOG_DETAIL_UNIQUE
+#define JSPDLOG_DETAIL_UNIQUE __COUNTER__
 #endif
 #define JSPDLOG_DETAIL_CAT2(a, b) a##b
 #define JSPDLOG_DETAIL_CAT(a, b) JSPDLOG_DETAIL_CAT2(a, b)

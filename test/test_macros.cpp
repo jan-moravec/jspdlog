@@ -111,20 +111,24 @@ TEST_CASE("macros: a macro is one statement, also in an if without braces", "[ma
     const fixture f;
     for (const bool yes : {true, false})
     {
-        // No braces on purpose: a macro that is not one statement would not compile or would bind the else wrongly.
-        // clang-format would add the braces, so it is switched off here.
+        // No braces on purpose: a macro that is not one statement would not compile or would bind the else wrongly,
+        // and a macro built on if/else would make the if without else warn about a dangling else, which fails the
+        // -Werror build. clang-format would add the braces, so it is switched off here.
         // clang-format off
         // NOLINTBEGIN(readability-braces-around-statements,google-readability-braces-around-statements)
         if (yes)
             JSPDLOG_INFO(f.logger, "yes");
         else
             JSPDLOG_INFO(f.logger, "no");
+        if (yes)
+            JSPDLOG_WARN(f.logger, "only yes");
         // NOLINTEND(readability-braces-around-statements,google-readability-braces-around-statements)
         // clang-format on
     }
-    REQUIRE(f.sink->lines.size() == 2);
+    REQUIRE(f.sink->lines.size() == 3);
     CHECK(f.sink->lines[0] == R"({"logger":"t","level":"info","message":"yes"})");
-    CHECK(f.sink->lines[1] == R"({"logger":"t","level":"info","message":"no"})");
+    CHECK(f.sink->lines[1] == R"({"logger":"t","level":"warning","message":"only yes"})");
+    CHECK(f.sink->lines[2] == R"({"logger":"t","level":"info","message":"no"})");
 }
 
 TEST_CASE("macros: a macro inside a lazy value of another macro", "[macros]")
@@ -142,6 +146,13 @@ TEST_CASE("macros: a macro inside a lazy value of another macro", "[macros]")
     REQUIRE(f.sink->lines.size() == 2);
     CHECK(f.sink->lines[0] == R"({"logger":"t","level":"debug","message":"inner"})");
     CHECK(f.sink->lines[1] == R"({"logger":"t","level":"info","v":1,"message":"outer"})");
+
+    // On one line too: the locals of the two macros must still differ, or GCC's -Wshadow fails the build.
+    // clang-format off
+    JSPDLOG_INFO(f.logger, {"v", [&f] { JSPDLOG_DEBUG(f.logger, "inner"); return 2; }}, "outer");
+    // clang-format on
+    REQUIRE(f.sink->lines.size() == 4);
+    CHECK(f.sink->lines[3] == R"({"logger":"t","level":"info","v":2,"message":"outer"})");
 }
 
 TEST_CASE("macros: the source line of a one-line call is the line of the macro", "[macros]")

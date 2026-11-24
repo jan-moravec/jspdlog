@@ -28,8 +28,8 @@ skipped when the level is off.
 - Optional level macros `JSPDLOG_TRACE`, `JSPDLOG_DEBUG`, `JSPDLOG_INFO`, `JSPDLOG_WARN`, `JSPDLOG_ERROR`,
   `JSPDLOG_CRITICAL` and `JSPDLOG_LOG`, which evaluate none of their arguments when the level is off, and
   `JSPDLOG_ACTIVE_LEVEL`, which removes the calls below a level at compile time. Removed calls stay type-checked.
-- Benchmark cases for disabled levels, macros and lazy values, and a fuzz check that a braced list and a `fields`
-  object give the same line.
+- Benchmark cases for disabled levels, macros and lazy values, a fuzz check that a braced list and a `fields` object
+  give the same line, and the example `10_lazy_values.cpp`.
 
 ### Changed
 

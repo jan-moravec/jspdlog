@@ -177,7 +177,7 @@ braced list of a call, not in a fields object or `with()`: bound fields are seri
 created. An exception thrown by the callable, or by a serializer of a value in a braced list, goes to the error handler
 and the line is dropped, like an exception from a formatter. A type that has a JSON form is always a value, even when
 it is callable. Format arguments are evaluated before the call too; use the [macros](#level-macros-optional) when they
-are expensive.
+are expensive. Example: [10_lazy_values.cpp](example/10_lazy_values.cpp).
 
 ### Level macros (optional)
 
@@ -189,8 +189,9 @@ when the level is off, neither fields nor format arguments:
 JSPDLOG_DEBUG(logger, {"plan", explain(q)}, "planned {}", describe(q));
 ```
 
-They are optional: every feature works through the member functions. Each is one statement, and the source line it
-records is the line of the macro. A macro is also the only way to remove calls at compile time. Define
+They are optional: every feature works through the member functions. Each is one statement, a `do { } while (false)`,
+so clang-tidy's `cppcoreguidelines-avoid-do-while` reports every call unless its `IgnoreMacros` option is set. The
+source line a macro records is the line of the macro. A macro is also the only way to remove calls at compile time. Define
 `JSPDLOG_ACTIVE_LEVEL` to one of spdlog's `SPDLOG_LEVEL_*` values, and the macros below it are removed:
 
 ```cmake
