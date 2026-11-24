@@ -528,25 +528,28 @@ std::thread::id lazy_thread;
 TEST_CASE("lazy: an async_sink runs a lazy value in the calling thread", "[lazy]")
 {
     const auto capture = std::make_shared<test_support::capture_sink>();
-    spdlog::sinks::async_sink::config config;
-    config.sinks.push_back(capture);
-    const auto async = std::make_shared<spdlog::sinks::async_sink>(std::move(config));
-    jspdlog::json_logger logger("t", async, test_support::deterministic_options());
-    logger.set_level(jspdlog::level::trace);
-
     {
-        std::string local = "gone after this block";
-        logger.info(
-            {"v",
-             [&local] {
-                 lazy_thread = std::this_thread::get_id();
-                 return local;
-             }},
-            "x"
+        spdlog::sinks::async_sink::config config;
+        config.sinks.push_back(capture);
+        jspdlog::json_logger logger(
+            "t", std::make_shared<spdlog::sinks::async_sink>(std::move(config)), test_support::deterministic_options()
         );
-        local = "overwritten";
+        logger.set_level(jspdlog::level::trace);
+        {
+            std::string local = "gone after this block";
+            logger.info(
+                {"v",
+                 [&local] {
+                     lazy_thread = std::this_thread::get_id();
+                     return local;
+                 }},
+                "x"
+            );
+            local = "overwritten";
+        }
+        // Destroying the sink drains its queue and joins its worker. wait_all() is not enough: it returns once the
+        // queue is empty, which can be before the worker has passed the last message to the sinks.
     }
-    async->wait_all();
 
     CHECK(lazy_thread == std::this_thread::get_id());
     REQUIRE(capture->lines.size() == 1);
