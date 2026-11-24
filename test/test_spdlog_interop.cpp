@@ -175,15 +175,19 @@ TEST_CASE("interop: the dup_filter_sink skip notice is valid JSON", "[interop]")
 TEST_CASE("interop: an async_sink keeps the fields and the message", "[interop]")
 {
     const auto capture = std::make_shared<capture_sink>();
-    spdlog::sinks::async_sink::config config;
-    config.sinks.push_back(capture);
-    const auto async = std::make_shared<spdlog::sinks::async_sink>(std::move(config));
-    jspdlog::json_logger logger("t", async, deterministic_options());
-    logger.set_level(jspdlog::level::trace);
+    {
+        spdlog::sinks::async_sink::config config;
+        config.sinks.push_back(capture);
+        jspdlog::json_logger logger(
+            "t", std::make_shared<spdlog::sinks::async_sink>(std::move(config)), deterministic_options()
+        );
+        logger.set_level(jspdlog::level::trace);
 
-    logger.info({"k", 1}, "x");
-    logger.spdlog_logger()->info("direct");
-    async->wait_all();
+        logger.info({"k", 1}, "x");
+        logger.spdlog_logger()->info("direct");
+        // Destroying the sink drains its queue and joins its worker. wait_all() is not enough: it returns once the
+        // queue is empty, which can be before the worker has passed the last message to the sinks.
+    }
 
     REQUIRE(capture->lines.size() == 2);
     CHECK(capture->lines[0] == R"({"logger":"t","level":"info","k":1,"message":"x"})");
