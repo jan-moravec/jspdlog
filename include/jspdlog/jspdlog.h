@@ -1236,17 +1236,13 @@ inline constexpr bool has_serializer_v<
     std::void_t<decltype(serializer<T>::write(std::declval<json_writer &>(), std::declval<const T &>()))>> = true;
 
 /**
- * @brief Finds jspdlog_serialize by argument-dependent lookup only.
+ * @brief Finds jspdlog_serialize by argument-dependent lookup, in the namespace of the type.
  *
- * The deleted declaration stops ordinary lookup here, so a jspdlog_serialize in the global namespace or in jspdlog is
- * never picked up by accident. Detection uses overload resolution on a function template rather than a partial
- * specialization, because GCC 11 does not perform argument-dependent lookup in a partial specialization of a variable
- * template.
+ * jspdlog declares no jspdlog_serialize itself. A deleted declaration here would keep ordinary lookup from finding one
+ * in the global namespace, but GCC 10 and 11 then skip argument-dependent lookup too, so there is none.
  */
 namespace serialize_adl
 {
-void jspdlog_serialize() = delete;
-
 /** @brief Chosen when jspdlog_serialize(json_writer &, const T &) is callable. */
 template <typename T>
 auto detect(int)
