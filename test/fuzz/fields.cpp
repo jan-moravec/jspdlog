@@ -268,8 +268,20 @@ void check_braced_list(fuzz::reader &r, const jspdlog::json_logger &logger, std:
         logger.info({k0, number, k1, text, k2, real, k3, maybe});
         logger.info(object);
     }
-    FUZZ_CHECK(lines.size() == 2);
+    // The same list with lazy values, which run only when the line is written.
+    const auto lazy_number = [number] { return number; };
+    const auto lazy_text = [&text] { return text; };
+    if (with_message)
+    {
+        logger.info({k0, lazy_number, k1, lazy_text, k2, real, k3, maybe}, "m {}", 1);
+    }
+    else
+    {
+        logger.info({k0, lazy_number, k1, lazy_text, k2, real, k3, maybe});
+    }
+    FUZZ_CHECK(lines.size() == 3);
     FUZZ_CHECK(lines[0] == lines[1]);
+    FUZZ_CHECK(lines[0] == lines[2]);
 }
 
 } // namespace

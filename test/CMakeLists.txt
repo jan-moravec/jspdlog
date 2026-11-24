@@ -78,6 +78,10 @@ foreach(
     value_steady_clock
     value_implicit_bool
     too_many_fields
+    with_lazy
+    fields_lazy
+    lazy_as_message
+    lazy_returns_callable
 )
     foreach(kind fail control)
         add_executable(compile_${kind}_${case} EXCLUDE_FROM_ALL compile_fail/${case}.cpp)

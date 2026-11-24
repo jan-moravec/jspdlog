@@ -6,17 +6,28 @@
 
 #include "test_support.h"
 
+#include <spdlog/spdlog.h>
+
 #include <catch2/catch_test_macros.hpp>
+
+#if JSPDLOG_SPDLOG_V2
+#include <spdlog/sinks/async_sink.h>
+#else
+#include <spdlog/async.h>
+#endif
 
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <variant>
 #include <vector>
@@ -45,6 +56,16 @@ struct throws_on_write
 void jspdlog_serialize(jspdlog::json_writer & /*w*/, const throws_on_write & /*value*/)
 {
     throw std::runtime_error("serializer failed");
+}
+
+// Callable and has a JSON form: it is a value, never lazy.
+struct callable_value
+{
+    int operator()() const { return 99; }
+};
+void jspdlog_serialize(jspdlog::json_writer &w, const callable_value & /*value*/)
+{
+    w.value("form");
 }
 
 enum class shade
@@ -298,3 +319,244 @@ TEST_CASE("lazy: a serializer that throws drops the line and reaches the error h
     f.logger.info({"a", 1}, "still works");
     CHECK(f.sink->lines.size() == 1);
 }
+
+TEST_CASE("lazy: which types are lazy values", "[lazy]")
+{
+    using jspdlog::detail::is_lazy_value_v;
+    const auto lambda = [] { return 1; };
+    const auto takes_argument = [](int) { return 1; };
+    CHECK(is_lazy_value_v<decltype(lambda)>);
+    CHECK(is_lazy_value_v<std::function<int()>>);
+    CHECK_FALSE(is_lazy_value_v<decltype(takes_argument)>);
+    CHECK_FALSE(is_lazy_value_v<callable_value>);
+    CHECK_FALSE(is_lazy_value_v<int>);
+    CHECK_FALSE(is_lazy_value_v<int (*)()>);
+    CHECK_FALSE(is_lazy_value_v<std::string>);
+    CHECK_FALSE(is_lazy_value_v<fields>);
+    CHECK_FALSE(is_lazy_value_v<std::vector<int>>);
+    CHECK_FALSE(is_lazy_value_v<std::optional<int>>);
+    CHECK_FALSE(is_lazy_value_v<money>);
+
+    // The trait and write_value agree: everything that is written has a form.
+    using jspdlog::detail::has_json_form_v;
+    CHECK(has_json_form_v<int>);
+    CHECK(has_json_form_v<const char *>);
+    CHECK(has_json_form_v<char[4]>);
+    CHECK(has_json_form_v<std::nullptr_t>);
+    CHECK(has_json_form_v<shade>);
+    CHECK(has_json_form_v<std::chrono::milliseconds>);
+    CHECK(has_json_form_v<std::map<std::string, int>>);
+    CHECK(has_json_form_v<std::variant<int, std::string>>);
+    CHECK(has_json_form_v<std::tuple<int>>);
+    CHECK(has_json_form_v<jspdlog::raw_json>);
+    CHECK_FALSE(has_json_form_v<decltype(lambda)>);
+}
+
+TEST_CASE("lazy: a lazy value does not run when the level is off", "[lazy]")
+{
+    fixture f;
+    int runs = 0;
+    const auto count = [&runs] { return ++runs; };
+
+    f.logger.set_level(jspdlog::level::off);
+    f.logger.info({"v", count});
+    f.logger.info({"v", count}, "m");
+    f.logger.warn({"v", count}, "m {}", 1);
+    f.logger.log(jspdlog::level::err, {"v", count}, std::string("text"));
+    CHECK(runs == 0);
+    CHECK(f.sink->lines.empty());
+
+    f.logger.set_level(jspdlog::level::warn);
+    f.logger.info({"v", count}, "below the level");
+    f.logger.debug({"v", count});
+    CHECK(runs == 0);
+
+    f.logger.warn({"v", count}, "written");
+    CHECK(runs == 1);
+    CHECK(f.last() == R"({"logger":"t","level":"warning","v":1,"message":"written"})");
+}
+
+TEST_CASE("lazy: a lazy value runs once for every call form on every level", "[lazy]")
+{
+    const fixture f;
+    int runs = 0;
+    const auto count = [&runs] { return ++runs; };
+    const auto expect_run = [&](const char *line) {
+        INFO(line);
+        CHECK(runs == 1);
+        CHECK(f.last().find("\"v\":1") != std::string::npos);
+        runs = 0;
+    };
+    const std::string text = "runtime";
+
+    f.logger.trace({"v", count});
+    expect_run("trace, fields only");
+    f.logger.debug({"v", count}, "fixed");
+    expect_run("debug, fixed message");
+    f.logger.info({"v", count}, "format {}", 1);
+    expect_run("info, format");
+    f.logger.warn({"v", count}, text);
+    expect_run("warn, runtime string");
+    f.logger.error({"v", count}, "format {} {}", 1, 2);
+    expect_run("error, format");
+    f.logger.critical({"v", count}, "fixed");
+    expect_run("critical");
+
+    f.logger.log(jspdlog::level::info, {"v", count});
+    expect_run("log, fields only");
+    f.logger.log(jspdlog::level::info, {"v", count}, "format {}", 1);
+    expect_run("log, format");
+    f.logger.log(jspdlog::level::info, {"v", count}, text);
+    expect_run("log, runtime string");
+}
+
+TEST_CASE("lazy: values of every kind, returned by reference or by value", "[lazy]")
+{
+    const fixture f;
+    const std::string stored = "by reference";
+    const std::string captured = "captured by value";
+    f.logger.info(
+        {"a",
+         [&]() -> const std::string & { return stored; },
+         "b",
+         [captured] { return captured; },
+         "c",
+         [] { return std::vector<int>{1, 2}; },
+         "d",
+         [] { return std::optional<int>{}; },
+         "e",
+         [] { return fields{"x", 1}; },
+         "f",
+         [] { return "literal"; },
+         "g",
+         std::function<double()>([] { return 0.5; }),
+         "h",
+         callable_value{}},
+        "m"
+    );
+    CHECK(
+        f.last() == R"({"logger":"t","level":"info","a":"by reference","b":"captured by value","c":[1,2],"d":null,)"
+                    R"("e":{"x":1},"f":"literal","g":0.5,"h":"form","message":"m"})"
+    );
+}
+
+TEST_CASE("lazy: a lazy value follows the override rules", "[lazy]")
+{
+    const fixture f;
+    const auto bound = f.logger.with({"a", 1, "b", 2});
+    int runs = 0;
+
+    bound.info({"c", 3, "a", [&runs] { return ++runs + 100; }});
+    CHECK(f.last() == R"({"logger":"t","level":"info","a":101,"b":2,"c":3})");
+
+    // The earlier lazy value of a repeated key never runs.
+    runs = 0;
+    f.logger.info({"k", [&runs] { return ++runs; }, "k", 7, "j", [&runs] { return ++runs; }});
+    CHECK(runs == 1);
+    CHECK(f.last() == R"({"logger":"t","level":"info","k":7,"j":1})");
+    runs = 0;
+    f.logger.info({"k", 7, "k", [&runs] { return ++runs; }});
+    CHECK(runs == 1);
+    CHECK(f.last() == R"({"logger":"t","level":"info","k":1})");
+}
+
+TEST_CASE("lazy: a lazy value runs once however many sinks the logger has", "[lazy]")
+{
+    const auto first = std::make_shared<test_support::capture_sink>();
+    const auto second = std::make_shared<test_support::capture_sink>();
+    const jspdlog::json_logger logger("t", {first, second}, test_support::deterministic_options());
+    int runs = 0;
+    logger.info({"v", [&runs] { return ++runs; }}, "m");
+    CHECK(runs == 1);
+    REQUIRE(first->lines.size() == 1);
+    REQUIRE(second->lines.size() == 1);
+    CHECK(first->lines[0] == second->lines[0]);
+}
+
+TEST_CASE("lazy: a lazy value that throws drops the line and reaches the error handler once", "[lazy]")
+{
+    const fixture f;
+    int errors = 0;
+    std::string what;
+    f.logger.spdlog_logger()->set_error_handler([&](const std::string &message) {
+        ++errors;
+        what = message;
+    });
+
+    CHECK_NOTHROW(f.logger.info({"a", 1, "v", []() -> int { throw std::runtime_error("lazy failed"); }}, "m"));
+    CHECK(errors == 1);
+    CHECK(what.find("lazy failed") != std::string::npos);
+    CHECK(f.sink->lines.empty());
+
+    // An empty std::function throws std::bad_function_call when it is run.
+    const std::function<int()> empty;
+    CHECK_NOTHROW(f.logger.info({"v", empty}));
+    CHECK(errors == 2);
+    CHECK(f.sink->lines.empty());
+
+    f.logger.info({"a", [] { return 1; }}, "fine");
+    CHECK(errors == 2);
+    CHECK(f.last() == R"({"logger":"t","level":"info","a":1,"message":"fine"})");
+}
+
+namespace
+{
+std::thread::id lazy_thread; // set by the lazy value of the async tests
+} // namespace
+
+#if JSPDLOG_SPDLOG_V2
+TEST_CASE("lazy: an async_sink runs a lazy value in the calling thread", "[lazy]")
+{
+    const auto capture = std::make_shared<test_support::capture_sink>();
+    spdlog::sinks::async_sink::config config;
+    config.sinks.push_back(capture);
+    const auto async = std::make_shared<spdlog::sinks::async_sink>(std::move(config));
+    jspdlog::json_logger logger("t", async, test_support::deterministic_options());
+    logger.set_level(jspdlog::level::trace);
+
+    {
+        std::string local = "gone after this block";
+        logger.info(
+            {"v",
+             [&local] {
+                 lazy_thread = std::this_thread::get_id();
+                 return local;
+             }},
+            "x"
+        );
+        local = "overwritten";
+    }
+    async->wait_all();
+
+    CHECK(lazy_thread == std::this_thread::get_id());
+    REQUIRE(capture->lines.size() == 1);
+    CHECK(capture->lines[0] == R"({"logger":"t","level":"info","v":"gone after this block","message":"x"})");
+}
+#else
+TEST_CASE("lazy: an async logger runs a lazy value in the calling thread", "[lazy]")
+{
+    const auto capture = std::make_shared<test_support::capture_sink>();
+    {
+        auto pool = std::make_shared<spdlog::details::thread_pool>(64, 1);
+        auto async = std::make_shared<spdlog::async_logger>("t", capture, pool, spdlog::async_overflow_policy::block);
+        const auto logger = jspdlog::json_logger::adopt(async, test_support::deterministic_options());
+        {
+            std::string local = "gone after this block";
+            logger.info(
+                {"v",
+                 [&local] {
+                     lazy_thread = std::this_thread::get_id();
+                     return local;
+                 }},
+                "x"
+            );
+            local = "overwritten";
+        }
+        pool.reset(); // The pool drains its queue before its worker stops.
+    }
+
+    CHECK(lazy_thread == std::this_thread::get_id());
+    REQUIRE(capture->lines.size() == 1);
+    CHECK(capture->lines[0] == R"({"logger":"t","level":"info","v":"gone after this block","message":"x"})");
+}
+#endif

@@ -1587,6 +1587,25 @@ std::string_view char_array_view(const A &array) noexcept
 }
 
 /**
+ * @brief Whether write_value has a branch for the type, that is, whether it has a JSON form. Mirrors the branches of
+ * write_value, so a type is lazy exactly when none of them takes it.
+ */
+template <typename T>
+inline constexpr bool has_json_form_v =
+    std::is_arithmetic_v<T> || std::is_enum_v<T> || std::is_pointer_v<T> || is_char_array_v<T> ||
+    std::is_same_v<T, std::nullptr_t> || std::is_same_v<T, std::monostate> || std::is_same_v<T, raw_json> ||
+    std::is_same_v<T, fields> || has_serializer_v<T> || has_adl_serialize_v<T> ||
+    std::is_convertible_v<const T &, std::string_view> || is_optional_v<T> || is_variant_v<T> || is_duration_v<T> ||
+    is_time_point_v<T> || is_tuple_like_v<T> || is_string_keyed_map_v<T> || is_range_v<T>;
+
+/**
+ * @brief Whether a value is lazy: a callable that takes no arguments and has no JSON form of its own. It is run when
+ * the line is written, and what it returns is written as the value.
+ */
+template <typename T>
+inline constexpr bool is_lazy_value_v = std::is_class_v<T> && std::is_invocable_v<const T &> && !has_json_form_v<T>;
+
+/**
  * @brief Writes any value that has a JSON form. The order matters: built-in scalars first and not overridable, then the
  * customization points, then the categories of the standard library, so a user type that is also a range can choose its
  * own form.
@@ -1702,6 +1721,14 @@ void write_value(json_writer &w, const T &v)
                                                // value], ...]
     {
         write_array(w, v);
+    }
+    else if constexpr (is_lazy_value_v<value_type>)
+    {
+        static_assert(
+            dependent_false_v<value_type>,
+            "jspdlog: a callable value is lazy and allowed only in the braced list of a logging call, not in a stored "
+            "fields object or with()"
+        );
     }
     else
     {
@@ -1977,12 +2004,37 @@ private:
         void (*write)(json_writer &, const void *);
     };
 
-    /** @brief Serializes the value behind a pointer of type V. */
+#ifdef _MSC_VER
+// A lazy value that always throws makes the code after the call unreachable in this function, which C4702 reports.
+#pragma warning(push)
+#pragma warning(disable : 4702)
+#endif
+    /**
+     * @brief Serializes the value behind a pointer of type V, or runs it first when it is a lazy value and writes what
+     * it returns.
+     */
     template <typename V>
     static void write_ref_(json_writer &w, const void *p)
     {
-        w.value(*static_cast<const V *>(p));
+        const V &v = *static_cast<const V *>(p);
+        if constexpr (is_lazy_value_v<V>)
+        {
+            using result = std::decay_t<std::invoke_result_t<const V &>>;
+            constexpr bool WRITABLE = !std::is_void_v<result> && !is_lazy_value_v<result>;
+            static_assert(WRITABLE, "jspdlog: a lazy value must return a value");
+            if constexpr (WRITABLE)
+            {
+                w.value(v());
+            }
+        }
+        else
+        {
+            w.value(v);
+        }
     }
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
     /** @brief Records one pair and then the rest. */
     template <typename K, typename V, typename... Rest>
