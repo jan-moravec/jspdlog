@@ -65,3 +65,73 @@ TEST_CASE("assert: field keys that clash with header keys are reported", "[asser
         CHECK(failures().empty());
     }
 }
+
+namespace
+{
+
+struct leaves_object_open
+{
+};
+struct writes_nothing
+{
+};
+struct writes_two_values
+{
+};
+struct key_without_value
+{
+};
+
+void jspdlog_serialize(jspdlog::json_writer &w, const leaves_object_open &)
+{
+    w.begin_object();
+}
+void jspdlog_serialize(jspdlog::json_writer &, const writes_nothing &) {}
+void jspdlog_serialize(jspdlog::json_writer &w, const writes_two_values &)
+{
+    w.value(1);
+    w.value(2);
+}
+void jspdlog_serialize(jspdlog::json_writer &w, const key_without_value &)
+{
+    w.begin_object();
+    w.key("k");
+    w.end_object();
+}
+
+} // namespace
+
+TEST_CASE("assert: a serializer must write exactly one complete value", "[assert]")
+{
+    failures().clear();
+    SECTION("a well-formed serializer")
+    {
+        jspdlog::fields f;
+        f.insert("a", std::vector<int>{1, 2});
+        CHECK(failures().empty());
+    }
+    SECTION("an object left open")
+    {
+        jspdlog::fields f;
+        f.insert("a", leaves_object_open{});
+        CHECK(failures().size() == 1);
+    }
+    SECTION("no value")
+    {
+        jspdlog::fields f;
+        f.insert("a", writes_nothing{});
+        CHECK(failures().size() == 1);
+    }
+    SECTION("two values")
+    {
+        jspdlog::fields f;
+        f.insert("a", writes_two_values{});
+        CHECK_FALSE(failures().empty());
+    }
+    SECTION("a key without a value")
+    {
+        jspdlog::fields f;
+        f.insert("a", key_without_value{});
+        CHECK_FALSE(failures().empty());
+    }
+}

@@ -17,7 +17,9 @@
 #include <cstdlib>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -171,6 +173,28 @@ int main(int argc, char **argv)
         const jspdlog::json_logger logger("bench", make_sink(), options_with(true, false));
         const auto &direct = logger.spdlog_logger();
         run("direct spdlog call through json_formatter", [&] { direct->info(text); });
+    }
+
+    // Value types: containers, optionals, enums, durations and time points, serialized on every call.
+    enum class bench_state
+    {
+        idle,
+        busy
+    };
+    {
+        const jspdlog::json_logger logger("bench", make_sink(), options_with(true, false));
+        const std::vector<int> numbers{1, 2, 3, 4, 5, 6, 7, 8};
+        run("jspdlog, per-call vector<int> of 8", [&] { logger.info({"numbers", numbers}, "done"); });
+        const std::map<std::string, int> counts{{"a", 1}, {"b", 2}, {"c", 3}};
+        run("jspdlog, per-call map<string,int> of 3", [&] { logger.info({"counts", counts}, "done"); });
+        const std::optional<int> maybe = 5;
+        run("jspdlog, per-call optional<int> + enum + duration", [&] {
+            logger.info(
+                {"maybe", maybe, "state", bench_state::busy, "elapsed_ms", std::chrono::microseconds(1500)}, "done"
+            );
+        });
+        const auto now = std::chrono::system_clock::now();
+        run("jspdlog, per-call time_point", [&] { logger.info({"at", now}, "done"); });
     }
 
     const double baseline = results.front().ns_per_call;

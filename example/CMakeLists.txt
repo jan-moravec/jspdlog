@@ -43,3 +43,7 @@ jspdlog_set_warnings(example_07_third_party)
 add_executable(example_08_source_location 08_source_location.cpp)
 target_link_libraries(example_08_source_location PRIVATE jspdlog::jspdlog)
 jspdlog_set_warnings(example_08_source_location)
+
+add_executable(example_09_value_types 09_value_types.cpp)
+target_link_libraries(example_09_value_types PRIVATE jspdlog::jspdlog)
+jspdlog_set_warnings(example_09_value_types)

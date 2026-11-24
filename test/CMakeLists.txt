@@ -38,6 +38,7 @@ add_executable(
     test_formatter.cpp
     test_json_logger.cpp
     test_fields.cpp
+    test_value_types.cpp
     test_source_location.cpp
     test_spdlog_interop.cpp
 )
@@ -63,7 +64,19 @@ catch_discover_tests(jspdlog_assert_tests)
 # A control target builds the same file with the offending line replaced by a valid one and must succeed, so a failure
 # for an unrelated reason (a broken include, a typo) cannot pass as the expected one. The tests build in the shared
 # build directory, so they hold a lock and never run in parallel.
-foreach(case info_int info_vector odd_fields fields_int)
+foreach(
+    case
+    info_int
+    info_vector
+    odd_fields
+    fields_int
+    value_pointer
+    value_wchar
+    value_unknown
+    value_path_like
+    value_steady_clock
+    value_implicit_bool
+)
     foreach(kind fail control)
         add_executable(compile_${kind}_${case} EXCLUDE_FROM_ALL compile_fail/${case}.cpp)
         target_link_libraries(compile_${kind}_${case} PRIVATE jspdlog::jspdlog)

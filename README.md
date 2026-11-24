@@ -17,7 +17,8 @@ with spdlog **v1.x (1.12 or newer)** and **v2.x**.
 ```
 
 - **No macros, no globals.** Loggers are plain objects that you create and pass around.
-- **Typed fields.** Numbers and booleans stay numbers and booleans, so log tools can filter on them.
+- **Typed fields.** Numbers and booleans stay numbers and booleans, so log tools can filter on them. Optionals, enums,
+  durations, time points, containers and your own types have a JSON form too.
 - **Context for inner code.** `with()` gives a child logger that adds fields to every line it writes.
 - **Always valid JSON** for lines written through jspdlog: messages, keys, values and logger names are escaped.
 
@@ -146,12 +147,89 @@ logger.info({"user_id", 42, "admin", false, "ratio", 0.25, "name", "ada"}, "logi
   again keeps its first position, so `with({"step", "a"})` followed by `info({"step", "b"})` writes `step` once, where
   the logger's field was.
 - Fields are meant to be small (a handful of keys); lookups scan the keys.
-- Wide characters and pointers other than `const char*` don't compile.
+- Wide characters and pointers other than `const char*` don't compile. More types are covered under
+  [Value types](#value-types).
 - A key equal to a header key (`timestamp`, `level`, ...), to the source key or to `message` produces a duplicate key.
   Avoid them. Debug builds check this through `JSPDLOG_ASSERT`, which defaults to `assert`; define it before including
   jspdlog to use your own handler. Release builds do not check.
 - Values are serialized when the list is built, before the level check. Guard expensive fields:
   `if (logger.should_log(jspdlog::level::debug)) { ... }`.
+
+### Value types
+
+Values keep their JSON type, however deeply they are nested. Everything below also works inside containers, so
+`std::map<std::string, std::optional<std::vector<int>>>` and `std::vector<jspdlog::fields>` are fine.
+
+| C++ type                                                    | JSON                                                                   |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `std::optional<T>`                                          | the value, or `null` when empty                                        |
+| enums                                                       | the name if {fmt} has a formatter for the enum, otherwise the number   |
+| `std::chrono::duration`                                     | milliseconds as a number                                               |
+| `std::chrono::system_clock::time_point` (any duration)      | RFC 3339 UTC string with milliseconds, `"2026-11-23T08:00:00.123Z"`    |
+| ranges (`vector`, `array`, `span`, `list`, `set`, C arrays) | array                                                                  |
+| maps whose key converts to `std::string_view`               | object, in the iteration order of the map                              |
+| `std::pair`, `std::tuple`, maps with other keys             | array (`[key, value]` pairs for such maps)                             |
+| `std::variant`, `std::monostate`                            | the active alternative; `null` for `monostate` and a valueless variant |
+| your own types                                              | through `jspdlog_serialize` or `jspdlog::serializer`, see below        |
+
+- **Enums.** An enum written as a name needs a `fmt::formatter` specialization, or `format_as` with {fmt} 10 and newer.
+  `format_as` that returns an integer gives a number. {fmt} 9, which spdlog 1.12 bundles, formats every unscoped enum
+  as an integer, and jspdlog still writes a number for it, so the output does not depend on the {fmt} version.
+- **Durations** are milliseconds. A duration with an integer representation and a period that is a whole number of
+  milliseconds (`milliseconds`, `seconds`, `minutes`, `hours`) is an integer. Any other (`microseconds`, `nanoseconds`,
+  floating-point) is a float, which keeps `.0`: `1500us` is `1.5` and `1000000ns` is `1.0`. The JSON type depends on the
+  C++ type only, so an index that first sees `1500` does not later reject `1.5`. Put the unit in the key
+  (`elapsed_ms`), or convert to `std::chrono::duration<double>` first for seconds. An integer duration that does not fit
+  `long long` stops at its limit instead of wrapping.
+- **Time points** are written in UTC with milliseconds whatever the logger's `time_type`, rounded toward the past. A
+  year outside 0000 to 9999 cannot be written as RFC 3339 and becomes `null`. Other clocks are rejected at compile
+  time: convert to `system_clock` first.
+- **Maps** are written in the iteration order of the map, which is the key order for `std::map` and unspecified for
+  `std::unordered_map`. A `std::multimap` can write a key twice.
+- `std::filesystem::path` is rejected, because it is a range of paths. Write `path.string()` or `path.u8string()`.
+- A class that only converts implicitly to `bool`, `char` or `const char *` is not accepted as a value; cast it or give
+  it a serializer. A class that converts to `std::string_view` is written as a string.
+
+#### Your own types
+
+Write a `jspdlog_serialize` function next to the type, in its namespace. It finds the type by argument-dependent lookup
+and needs no JSON library:
+
+```cpp
+namespace shop
+{
+struct money { std::int64_t cents; std::string currency; };
+
+inline void jspdlog_serialize(jspdlog::json_writer &w, const money &m)
+{
+    w.begin_object();
+    w.member("cents", m.cents);
+    w.member("currency", m.currency);
+    w.end_object();
+}
+} // namespace shop
+
+logger.info({"price", shop::money{1250, "EUR"}}, "checkout");
+// ...,"price":{"cents":1250,"currency":"EUR"},"message":"checkout"}
+```
+
+For a type whose namespace you do not own (a third-party library, the standard library), specialize `jspdlog::serializer`:
+
+```cpp
+template <>
+struct jspdlog::serializer<QString>
+{
+    static void write(jspdlog::json_writer &w, const QString &s) { w.value(s.toStdString()); }
+};
+```
+
+The writer inserts commas for you: inside an object call `key` before each value, inside an array call `value` for each
+element, and `member(k, v)` is `key` followed by `value`. A serializer must write exactly one value. The writer does not
+check its structure in release builds, as with `raw_json`; debug builds check what is cheap to check through
+`JSPDLOG_ASSERT`. A serializer takes precedence over every built-in form except scalars, so a type that is also a range
+can choose its own JSON form.
+
+Example: [09_value_types.cpp](example/09_value_types.cpp).
 
 ### Context: child loggers
 
@@ -463,7 +541,7 @@ struct json_options {
 class fields {
 public:
     fields(K &&key, V &&value, Rest &&...rest);  // key, value, key, value, ...
-    void insert(std::string_view key, V value);
+    template <typename T> void insert(std::string_view key, const T &value);  // any type with a JSON form
     void merge(const fields &other);  // other wins on collisions
     friend fields operator+(fields a, const fields &b);
     bool empty() const;
@@ -474,6 +552,24 @@ public:
 };
 
 struct raw_json { std::string value; };
+
+// Writes one JSON value. Passed to your serializers; fields uses it for every value.
+class json_writer {
+public:
+    explicit json_writer(std::string &out) noexcept;
+    template <typename T> void value(const T &v);  // any type with a JSON form, recursively
+    void raw(std::string_view json);               // pre-serialized JSON; empty is null
+    void begin_object();
+    void key(std::string_view k);                  // inside an object, before each value
+    void end_object();
+    void begin_array();
+    void end_array();
+    template <typename T> void member(std::string_view k, const T &v);  // key(k), then value(v)
+};
+
+// Specialize to give a type you do not own a JSON form. Your own types: a jspdlog_serialize function found by ADL.
+template <typename T, typename Enable = void> struct serializer {};
+// void jspdlog_serialize(jspdlog::json_writer &w, const T &v);  // next to T, in its namespace
 
 // Renders every spdlog message as one JSON object. One instance per sink.
 class json_formatter final : public spdlog::formatter {
@@ -498,6 +594,8 @@ valid JSON and strings are UTF-8. These can still produce invalid or surprising 
   that replaces the formatter (see [Working with spdlog](#working-with-spdlog));
 - field keys equal to a header key or the message key (duplicate keys);
 - bytes that are not valid UTF-8, which are passed through unchanged;
+- a serializer that writes more or less than one value, or leaves an object or array open: release builds do not check;
+- time points outside the years 0000 to 9999, which are `null`, and maps, which are written in iteration order;
 - a `long double` beyond the range of `double`: it is a valid JSON number, but many parsers cannot read it;
 - a `json_logger` and a formatter installed from another module on one sink, where each module has its own copy of
   the header, such as Windows DLLs: the line stays valid JSON, but the fields appear inside the message;

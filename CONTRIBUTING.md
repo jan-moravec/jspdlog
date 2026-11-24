@@ -135,7 +135,7 @@ dependencies, tests and examples are filtered out.
 ## Fuzzing
 
 jspdlog promises that every line is one valid JSON object, whatever the input. The fuzz targets in
-[test/fuzz](test/fuzz) test that with inputs nobody writes by hand. There are five libFuzzer targets:
+[test/fuzz](test/fuzz) test that with inputs nobody writes by hand. There are six libFuzzer targets:
 
 | Target            | What it checks                                                                                      |
 | ----------------- | --------------------------------------------------------------------------------------------------- |
@@ -144,6 +144,7 @@ jspdlog promises that every line is one valid JSON object, whatever the input. T
 | `logger_line`     | Fuzzed logger name, header keys, time type, line terminator and message: one object per line.       |
 | `foreign_payload` | Payloads logged straight on the `spdlog::logger`, with prefixes of the payload token: no injection. |
 | `numbers`         | Every integer width, `float`, `double` and `long double` round-trip; NaN and infinity are `null`.   |
+| `value_types`     | Nested optionals, variants, ranges, maps, durations and time points against an independent model.   |
 
 ### Run a target
 

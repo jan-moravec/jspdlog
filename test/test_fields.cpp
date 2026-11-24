@@ -6,7 +6,6 @@
 #include <limits>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 
 using jspdlog::fields;
@@ -29,36 +28,22 @@ TEST_CASE("fields: scalar types", "[fields]")
     CHECK(fields{"v", std::numeric_limits<std::uint64_t>::max()}.to_json() == R"({"v":18446744073709551615})");
 }
 
-namespace
+TEST_CASE("fields: string-like user types are strings", "[fields]")
 {
-
-template <typename T, typename = void>
-struct can_insert : std::false_type
-{
-};
-
-template <typename T>
-struct can_insert<T, std::void_t<decltype(std::declval<fields &>().insert(std::string{}, std::declval<T>()))>>
-    : std::true_type
-{
-};
-
-} // namespace
-
-TEST_CASE("fields: types without a JSON mapping are rejected", "[fields]")
-{
-    STATIC_CHECK(can_insert<int>::value);
-    STATIC_CHECK(can_insert<const char *>::value);
-    STATIC_CHECK_FALSE(can_insert<wchar_t>::value);
-    STATIC_CHECK_FALSE(can_insert<char16_t>::value);
-    STATIC_CHECK_FALSE(can_insert<char32_t>::value);
-    STATIC_CHECK_FALSE(can_insert<const int *>::value);
-    STATIC_CHECK_FALSE(can_insert<void *>::value);
-    STATIC_CHECK_FALSE(can_insert<const wchar_t *>::value);
-#ifdef __cpp_char8_t
-    STATIC_CHECK_FALSE(can_insert<char8_t>::value);
-#endif
+    struct view_like
+    {
+        // Implicit on purpose: the conversion to std::string_view is what makes it a string.
+        // NOLINTNEXTLINE(google-explicit-constructor,hicpp-explicit-conversions)
+        operator std::string_view() const { return "like"; }
+    };
+    CHECK(fields{"v", view_like{}}.to_json() == R"({"v":"like"})");
+    fields f;
+    f.insert("k", view_like{});
+    CHECK(f.to_json() == R"({"k":"like"})");
 }
+
+// Types without a JSON form (wide characters, pointers, unknown classes) are rejected at compile time: see
+// test/compile_fail/value_*.cpp.
 
 TEST_CASE("fields: floating point", "[fields]")
 {

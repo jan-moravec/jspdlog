@@ -9,6 +9,7 @@ set(JSPDLOG_FUZZ_TARGETS
     logger_line
     foreign_payload
     numbers
+    value_types
 )
 
 foreach(target IN LISTS JSPDLOG_FUZZ_TARGETS)
