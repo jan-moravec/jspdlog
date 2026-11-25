@@ -8,16 +8,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.4.0] - 2026-11-25
 
-Exceptions are logged with their causes, the field names of common log schemas are one function call away, and strings are
-valid UTF-8 by default.
+Exceptions are logged with their causes, the field names of common log schemas are one function call away, and strings
+are valid UTF-8 by default. That last one changes output: invalid UTF-8, which earlier releases copied into the line, is
+now replaced by U+FFFD (see Changed).
 
 ### Added
 
 - Exceptions. A `std::exception` (or anything derived from it) and a `std::exception_ptr` are field values: an object
   with the `type` name and `message`, and the nested causes under `cause`, up to eight deep. Every level and `log()`
-  take an exception first, with the same endings as the other forms, and write it under `json_options::error_key`,
-  with `error_type_key` and `error_message_key` for its members. It is written only when the line is, so a disabled
-  level computes nothing. The type name is the same on GCC, Clang and MSVC, also for `std::throw_with_nested`.
+  take an exception as their first argument, followed by any of the usual fields and message arguments, and write it
+  under `json_options::error_key`, with `error_type_key` and `error_message_key` for its members. It is written only
+  when the line is, so a disabled level computes nothing. The type name is the same on GCC, Clang and MSVC, also for
+  `std::throw_with_nested`.
 - `json_options::source_flat` writes the call site as three fields of the line instead of an object, and
   `source_file_key`, `source_line_key` and `source_function_key` name its parts in both layouts.
 - Schema presets, `jspdlog::presets::ecs()`, `gcp()`, `datadog()` and `otel()`, which return a filled `json_options`
@@ -31,8 +33,8 @@ valid UTF-8 by default.
   after the level (OpenTelemetry numbers by default).
 - `json_options::timestamp_style` with `timestamp_format::rfc3339_millis` (default), `rfc3339_micros`,
   `rfc3339_nanos` and `epoch_millis`.
-- Tests for each policy, level names, severity and timestamp formats, benchmark cases for UTF-8 and timestamps, and a
-  "Text encoding" section in the README.
+- Tests for each policy, level names, severity and timestamp formats, benchmark cases for UTF-8 and timestamps,
+  "Exceptions", "Schema presets" and "Text encoding" sections in the README, and the example `11_presets.cpp`.
 
 ### Changed
 
