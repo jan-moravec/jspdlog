@@ -1095,6 +1095,116 @@ inline void install_json_formatter(spdlog::sinks::sink &sink, const json_options
     sink.set_formatter(std::make_unique<json_formatter>(options));
 }
 
+/**
+ * @brief Ready-made json_options for the field names of common log ingestion schemas.
+ *
+ * A preset is a function that returns a filled json_options, so change any member afterwards. Each one leaves the call
+ * site off: set source_key to any text, or to the key the schema names, to turn it on. Exceptions logged through the
+ * exception call forms go under the key the schema uses for them. Bind schema fields that are not per call, such as
+ * ecs.version, with json_logger::with.
+ *
+ * @code
+ * auto options = jspdlog::presets::ecs();
+ * options.source_key = "source"; // also write the call site
+ * jspdlog::json_logger logger("app", sink, options);
+ * @endcode
+ */
+namespace presets
+{
+
+/** @brief The table of level names of json_options, from trace to off. */
+using level_name_table = std::array<std::string, jspdlog::detail::LEVEL_COUNT>;
+
+/**
+ * @brief Elastic Common Schema: @timestamp in UTC, log.level, log.logger, process.pid, process.thread.id, the call
+ * site as log.origin.file.name, log.origin.file.line and log.origin.function, and exceptions under error with type and
+ * message, which are error.type and error.message once Elasticsearch expands the dotted keys.
+ */
+inline json_options ecs()
+{
+    json_options o;
+    o.timestamp_key = "@timestamp";
+    o.time_type = spdlog::pattern_time_type::utc;
+    o.level_key = "log.level";
+    o.level_names = level_name_table{{"trace", "debug", "info", "warn", "error", "critical", "off"}};
+    o.logger_key = "log.logger";
+    o.process_key = "process.pid";
+    o.thread_key = "process.thread.id";
+    o.source_flat = true;
+    o.source_file_key = "log.origin.file.name";
+    o.source_line_key = "log.origin.file.line";
+    o.source_function_key = "log.origin.function";
+    o.eol = "\n";
+    return o;
+}
+
+/**
+ * @brief Google Cloud Logging structured logs, as read from stdout by Cloud Run, GKE and the Ops Agent: severity, time
+ * as an RFC 3339 string with nanoseconds in UTC, and the message. The logger, process and thread fields stay, as
+ * fields of the JSON payload. The call site is off. To write it where Cloud Logging
+ * looks, set source_key to logging.googleapis.com/sourceLocation: its file, line and function members already have
+ * the names of that field.
+ */
+inline json_options gcp()
+{
+    json_options o;
+    o.timestamp_key = "time";
+    o.time_type = spdlog::pattern_time_type::utc;
+    o.timestamp_style = timestamp_format::rfc3339_nanos;
+    o.level_key = "severity";
+    o.level_names = level_name_table{{"DEBUG", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "DEFAULT"}};
+    o.eol = "\n";
+    return o;
+}
+
+/**
+ * @brief Datadog log attributes: the status that Datadog remaps, the date as epoch milliseconds, logger.name and
+ * logger.thread_name, and exceptions under error with kind and message.
+ */
+inline json_options datadog()
+{
+    json_options o;
+    o.timestamp_key = "timestamp";
+    o.timestamp_style = timestamp_format::epoch_millis;
+    o.level_key = "status";
+    o.level_names = level_name_table{{"trace", "debug", "info", "warn", "error", "critical", "off"}};
+    o.logger_key = "logger.name";
+    o.thread_key = "logger.thread_name";
+    o.process_key = std::nullopt;
+    o.error_type_key = "kind";
+    o.eol = "\n";
+    return o;
+}
+
+/**
+ * @brief The OpenTelemetry log data model as flat JSON, for a collector's filelog receiver: timestamp, severity_text,
+ * severity_number and body, with the call site as code.file.path (the base name), code.line.number and
+ * code.function.name, process.pid, thread.id and exceptions under exception with type and message.
+ */
+inline json_options otel()
+{
+    json_options o;
+    o.timestamp_key = "timestamp";
+    o.time_type = spdlog::pattern_time_type::utc;
+    o.timestamp_style = timestamp_format::rfc3339_nanos;
+    o.level_key = "severity_text";
+    o.level_names = level_name_table{{"TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "OFF"}};
+    o.severity_key = "severity_number";
+    o.message_key = "body";
+    o.logger_key = "logger";
+    o.process_key = "process.pid";
+    o.thread_key = "thread.id";
+    o.source_flat = true;
+    o.source_file_key = "code.file.path";
+    o.source_line_key = "code.line.number";
+    o.source_function_key = "code.function.name";
+    o.error_key = "exception";
+    o.eol = "\n";
+    return o;
+}
+
+} // namespace presets
+
 class fields;
 
 /** @brief Implementation details. Not part of the public API. */

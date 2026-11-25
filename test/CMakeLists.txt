@@ -39,6 +39,7 @@ add_executable(
     test_json_logger.cpp
     test_fields.cpp
     test_exceptions.cpp
+    test_presets.cpp
     test_lazy.cpp
     test_macros.cpp
     test_active_level.cpp
