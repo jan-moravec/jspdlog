@@ -278,7 +278,7 @@ inline utf8_step next_utf8(const unsigned char *p, const unsigned char *end) noe
     };
     static constexpr unsigned CONTINUATION_MIN = 0x80U;
     static constexpr unsigned CONTINUATION_MAX = 0xBFU;
-    static constexpr std::array<lead_range, 8> LEADS = {{
+    static constexpr lead_range LEADS[] = {
         {0xC2U, 0xDFU, 2, 0x80U, 0xBFU},
         {0xE0U, 0xE0U, 3, 0xA0U, 0xBFU},
         {0xE1U, 0xECU, 3, 0x80U, 0xBFU},
@@ -287,11 +287,18 @@ inline utf8_step next_utf8(const unsigned char *p, const unsigned char *end) noe
         {0xF0U, 0xF0U, 4, 0x90U, 0xBFU},
         {0xF1U, 0xF3U, 4, 0x80U, 0xBFU},
         {0xF4U, 0xF4U, 4, 0x80U, 0x8FU},
-    }};
+    };
     const unsigned b0 = p[0];
-    const auto lead =
-        std::find_if(LEADS.begin(), LEADS.end(), [b0](const lead_range &r) { return b0 >= r.first && b0 <= r.last; });
-    if (lead == LEADS.end())
+    const lead_range *lead = nullptr;
+    for (const lead_range &row : LEADS)
+    {
+        if (b0 >= row.first && b0 <= row.last)
+        {
+            lead = &row;
+            break;
+        }
+    }
+    if (lead == nullptr)
     {
         return {false, 1}; // 80 to C1 and F5 to FF never start a sequence.
     }
