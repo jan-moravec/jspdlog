@@ -1120,7 +1120,8 @@ using level_name_table = std::array<std::string, jspdlog::detail::LEVEL_COUNT>;
 /**
  * @brief Elastic Common Schema: @timestamp in UTC, log.level, log.logger, process.pid, process.thread.id, the call
  * site as log.origin.file.name, log.origin.file.line and log.origin.function, and exceptions under error with type and
- * message, which are error.type and error.message once Elasticsearch expands the dotted keys.
+ * message, which are error.type and error.message once Elasticsearch expands the dotted keys. ECS requires ecs.version
+ * in every event; bind it with json_logger::with, since only you know which version your index templates use.
  */
 inline json_options ecs()
 {
@@ -2075,7 +2076,8 @@ inline std::string normalize_type_name(std::string name, bool nested)
         name.replace(at, LIBCXX_NAMESPACE.size(), "std::");
     }
     strip_class_keyword(name);
-    if (nested && name.compare(0, 5, "std::") == 0)
+    static constexpr std::string_view STD_NAMESPACE = "std::";
+    if (nested && name.compare(0, STD_NAMESPACE.size(), STD_NAMESPACE) == 0)
     {
         const std::size_t open = name.find('<');
         const std::size_t close = name.rfind('>');
@@ -2089,6 +2091,7 @@ inline std::string normalize_type_name(std::string name, bool nested)
 }
 
 /** @brief The name of the dynamic type of an exception, demangled where the compiler mangles it. */
+// NOLINTNEXTLINE(modernize-use-string-view): only the build without RTTI returns a literal; the others build a name
 inline std::string exception_type_name(const std::exception &ex)
 {
 #if JSPDLOG_HAS_RTTI
@@ -2109,7 +2112,13 @@ inline std::string exception_type_name(const std::exception &ex)
 #endif
 }
 
-/** @brief Writes an exception as an object with its type and message, and its nested causes as a chain. */
+/**
+ * @brief Writes an exception as an object with its type and message, and its nested causes as a chain.
+ *
+ * A std::nested_exception that holds no cause, such as one thrown by std::throw_with_nested outside a handler, has no
+ * cause member: std::rethrow_if_nested would call std::terminate for it.
+ */
+// NOLINTNEXTLINE(misc-no-recursion): the recursion stops at MAX_EXCEPTION_DEPTH
 inline void write_exception(json_writer &w, const std::exception &ex, const exception_keys &keys, int depth = 0)
 {
     w.begin_object();
@@ -2119,11 +2128,12 @@ inline void write_exception(json_writer &w, const std::exception &ex, const exce
     w.key(keys.message);
     writer_access::string(w, std::string_view{what != nullptr ? what : ""});
 #if JSPDLOG_HAS_EXCEPTIONS && JSPDLOG_HAS_RTTI
-    if (depth < MAX_EXCEPTION_DEPTH)
+    const auto *nested = dynamic_cast<const std::nested_exception *>(&ex);
+    if (depth < MAX_EXCEPTION_DEPTH && nested != nullptr && nested->nested_ptr() != nullptr)
     {
         try
         {
-            std::rethrow_if_nested(ex);
+            nested->rethrow_nested();
         }
         catch (const std::exception &cause)
         {
@@ -2177,7 +2187,7 @@ inline void write_exception_ptr(json_writer &w, const std::exception_ptr &p, con
 struct exception_arg
 {
     /** @brief The exception. */
-    const std::exception *ex;
+    const std::exception *ex = nullptr;
     /** @brief The keys of its object. */
     exception_keys keys;
 };
@@ -3184,13 +3194,13 @@ private:
             return named != nullptr ? std::string_view{named->entries_[i - first].key} : props.key(i - first);
         };
         // Inside the deferred writer, so a handler that throws reaches spdlog's error handler.
-        for (std::size_t i = first; i < count; ++i)
+        for (std::size_t i = 0; i < count; ++i)
         {
             JSPDLOG_ASSERT(
                 !ctx.reserved.is_reserved(key_of(i)), "jspdlog: a field key equals a header, source or message key"
             );
             JSPDLOG_ASSERT(
-                leading == nullptr || key_of(i) != leading->key,
+                leading == nullptr || i < first || key_of(i) != leading->key,
                 "jspdlog: a field key equals the error key of an exception call"
             );
         }

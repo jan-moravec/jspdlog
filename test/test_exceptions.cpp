@@ -19,11 +19,25 @@ using test_support::fixture;
 namespace jspdlog_test
 {
 
+// The types with a NOLINT below are outside an anonymous namespace, because their logged type names are checked, and
+// the name of an anonymous namespace differs between compilers.
+
 // A user type in a named namespace, whose type name is the same on every compiler.
-struct payment_error : std::runtime_error
+struct payment_error : std::runtime_error // NOLINT(misc-use-internal-linkage): its type name is checked
 {
     using std::runtime_error::runtime_error;
 };
+
+// A user type that is also a std::nested_exception, as std::throw_with_nested expects such types to be. Built outside a
+// handler, it holds no cause.
+// NOLINTNEXTLINE(misc-use-internal-linkage,misc-multiple-inheritance): its type name is checked; the mix is the point
+struct wrapped_error : std::runtime_error, std::nested_exception
+{
+    using std::runtime_error::runtime_error;
+};
+
+namespace
+{
 
 // Counts how often its message is read, to show that a disabled level computes nothing.
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): counted by what()
@@ -38,8 +52,10 @@ struct counting_error : std::runtime_error
     }
 };
 
-// An exception type with its own JSON form, which must win over the exception form.
-struct my_error : std::runtime_error
+} // namespace
+
+// An exception type with its own JSON form, which must win over the exception form. Its type name is checked.
+struct my_error : std::runtime_error // NOLINT(misc-use-internal-linkage): its type name is checked
 {
     using std::runtime_error::runtime_error;
 };
@@ -57,10 +73,13 @@ struct jspdlog::serializer<jspdlog_test::my_error>
     }
 };
 
+namespace
+{
 // A type whose {fmt} formatter throws, standing in for a user formatter with a bug.
 struct throws_when_formatted
 {
 };
+} // namespace
 
 template <>
 struct fmt::formatter<throws_when_formatted>
@@ -80,7 +99,7 @@ namespace
 // The line of an exception under the default keys, up to and including the closing brace of the exception.
 std::string error_object(const std::string &type, const std::string &message)
 {
-    return "\"error\":{\"type\":\"" + type + "\",\"message\":\"" + message + "\"}";
+    return R"("error":{"type":")" + type + R"(","message":")" + message + R"("})";
 }
 
 // The type name that a thrown exception gets, as logged.
@@ -142,6 +161,7 @@ namespace
 {
 
 // Throws an exception that has a chain of n nested causes below it.
+// NOLINTNEXTLINE(misc-no-recursion): the recursion builds a chain of n causes
 [[noreturn]] void throw_chain(int n)
 {
     try
@@ -205,7 +225,7 @@ TEST_CASE("exceptions: a cause that is not a std::exception is unknown", "[excep
     {
         try
         {
-            throw 42;
+            throw 42; // NOLINT(bugprone-std-exception-baseclass): a cause that is not a std::exception
         }
         catch (...)
         {
@@ -220,6 +240,35 @@ TEST_CASE("exceptions: a cause that is not a std::exception is unknown", "[excep
         R"({"logger":"t","level":"error","error":{"type":"std::runtime_error","message":"wrapper",)"
         R"("cause":{"type":"unknown"}}})";
     CHECK(f.last() == expected);
+}
+
+TEST_CASE("exceptions: a nested exception that holds no cause is written without one", "[exceptions]")
+{
+    // std::rethrow_if_nested calls std::terminate for these, because their nested_ptr is null.
+    const fixture f;
+    SECTION("std::throw_with_nested outside a handler")
+    {
+        try
+        {
+            std::throw_with_nested(std::runtime_error("alone"));
+        }
+        catch (const std::exception &ex)
+        {
+            f.logger.error(ex);
+        }
+        CHECK(
+            f.last() ==
+            std::string(R"({"logger":"t","level":"error",)") + error_object("std::runtime_error", "alone") + "}"
+        );
+    }
+    SECTION("a user type derived from std::nested_exception, built outside a handler")
+    {
+        const jspdlog_test::wrapped_error ex("alone");
+        f.logger.error({"e", ex});
+        CHECK(
+            f.last() == R"({"logger":"t","level":"error","e":{"type":"jspdlog_test::wrapped_error","message":"alone"}})"
+        );
+    }
 }
 
 TEST_CASE("exceptions: the same type name on every compiler", "[exceptions]")
@@ -420,7 +469,7 @@ TEST_CASE("exceptions: a null std::exception_ptr is null and a current exception
 
     try
     {
-        throw 42;
+        throw 42; // NOLINT(bugprone-std-exception-baseclass): a cause that is not a std::exception
     }
     catch (...)
     {

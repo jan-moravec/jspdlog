@@ -89,7 +89,7 @@ TEST_CASE("presets: ecs", "[presets]")
         "log.origin.file.name",
         "log.origin.file.line",
         "log.origin.function",
-        "message"
+        "message",
     };
     CHECK(keys_of(format_fixed(options)) == keys);
 #endif
@@ -113,9 +113,10 @@ TEST_CASE("presets: gcp", "[presets]")
     CHECK(format_fixed(options) == with_source);
 
     // Every level has a name Cloud Logging knows.
-    const auto names = *jspdlog::presets::gcp().level_names;
+    const auto names = jspdlog::presets::gcp().level_names;
+    REQUIRE(names.has_value());
     const std::set<std::string> known{"DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL"};
-    for (const std::string &name : names)
+    for (const std::string &name : names.value_or(jspdlog::presets::level_name_table{}))
     {
         CHECK(known.count(name) == 1);
     }
@@ -163,7 +164,7 @@ TEST_CASE("presets: otel", "[presets]")
         "code.file.path",
         "code.line.number",
         "code.function.name",
-        "body"
+        "body",
     };
     CHECK(keys_of(format_fixed(options)) == keys);
 #endif
@@ -202,7 +203,7 @@ TEST_CASE("presets: an exception call is written under the key of the schema", "
         options.thread_key = std::nullopt;
         options.logger_key = std::nullopt;
         options.eol = "\n";
-        auto sink = std::make_shared<test_support::capture_sink>();
+        const auto sink = std::make_shared<test_support::capture_sink>();
         const jspdlog::json_logger logger("t", sink, options);
         logger.error(ex, {"k", 1}, "m");
         return sink->last();
@@ -233,7 +234,7 @@ TEST_CASE("presets: a logger with a preset, bound schema fields and the call sit
     options.timestamp_key = std::nullopt;
     options.process_key = std::nullopt;
     options.thread_key = std::nullopt;
-    auto sink = std::make_shared<test_support::capture_sink>();
+    const auto sink = std::make_shared<test_support::capture_sink>();
     const jspdlog::json_logger logger("svc", sink, options);
     logger.with({"ecs.version", "8.11.0"}).info({"user", 7}, "hi");
     const std::string line = sink->last();

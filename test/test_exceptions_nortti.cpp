@@ -6,7 +6,7 @@
 
 #include "test_support.h"
 
-#include <cstdio>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 
@@ -24,12 +24,13 @@ void check(const std::string &actual, const std::string &expected, const char *w
     if (actual != expected)
     {
         ++failures;
-        std::fprintf(stderr, "FAILED: %s\n  actual:   %s\n  expected: %s\n", what, actual.c_str(), expected.c_str());
+        std::cerr << "FAILED: " << what << "\n  actual:   " << actual << "\n  expected: " << expected << '\n';
     }
 }
 
 } // namespace
 
+// NOLINTNEXTLINE(bugprone-exception-escape): an exception that escapes fails the test, as it should
 int main()
 {
     const test_support::fixture f;
@@ -65,7 +66,7 @@ int main()
 
     if (failures == 0)
     {
-        std::printf("ok\n");
+        std::cout << "ok\n";
     }
     return failures == 0 ? 0 : 1;
 }
