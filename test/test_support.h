@@ -13,6 +13,7 @@
 
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -53,6 +54,11 @@ inline jspdlog::json_options deterministic_options()
     opts.eol = "\n";
     return opts;
 }
+
+// A type whose formatter throws, standing in for a user formatter with a bug.
+struct throws_when_formatted
+{
+};
 
 // A plain spdlog logger on a sink, with jspdlog's formatter installed, standing in for third-party code.
 inline std::shared_ptr<spdlog::logger> make_plain_logger(
@@ -111,3 +117,30 @@ struct fixture
 };
 
 } // namespace test_support
+
+// The formatter of throws_when_formatted, for {fmt} or for std::format.
+#if JSPDLOG_STD_FORMAT
+template <>
+struct std::formatter<test_support::throws_when_formatted, char>
+{
+    static constexpr auto parse(std::format_parse_context &ctx) -> decltype(ctx.begin()) { return ctx.begin(); }
+
+    template <typename Context>
+    auto format(const test_support::throws_when_formatted & /*value*/, Context &ctx) const -> decltype(ctx.out())
+    {
+        throw std::runtime_error("formatter failed");
+    }
+};
+#else
+template <>
+struct fmt::formatter<test_support::throws_when_formatted>
+{
+    static constexpr auto parse(fmt::format_parse_context &ctx) -> decltype(ctx.begin()) { return ctx.begin(); }
+
+    template <typename Context>
+    auto format(const test_support::throws_when_formatted & /*value*/, Context &ctx) const -> decltype(ctx.out())
+    {
+        throw std::runtime_error("formatter failed");
+    }
+};
+#endif

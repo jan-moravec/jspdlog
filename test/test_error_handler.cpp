@@ -37,6 +37,20 @@ protected:
     void flush_() override {}
 };
 
+// Whether a report line is {"logger":"app","level":"error",<extra>"message":"disk full"}. spdlog v1 appends the call
+// site, " [file(line)]", to the message of a call that has one, so there the message only has to start with the text.
+bool is_disk_full_report(const std::string &line, const std::string &extra = {})
+{
+    const std::string head = R"({"logger":"app","level":"error",)" + extra + R"("message":"disk full)";
+    const std::string tail = R"("})";
+#if JSPDLOG_SPDLOG_V2
+    return line == head + tail;
+#else
+    return line.size() >= head.size() + tail.size() && line.compare(0, head.size(), head) == 0 &&
+           line.compare(line.size() - tail.size(), tail.size(), tail) == 0;
+#endif
+}
+
 // std::tmpfile is deprecated on MSVC, which has tmpfile_s.
 std::FILE *open_temp_file()
 {
@@ -78,7 +92,7 @@ TEST_CASE("error handler: reports a failing sink as one JSON line and does not t
 
     CHECK_NOTHROW(logger.info("x"));
     REQUIRE(report->lines.size() == 1);
-    CHECK(report->last() == R"({"logger":"app","level":"error","message":"disk full"})");
+    CHECK(is_disk_full_report(report->last()));
     CHECK(test_support::is_single_json_object(report->last()));
 }
 
@@ -120,7 +134,7 @@ TEST_CASE("error handler: reports closer together than min_interval are counted"
         logger.info("b");
         logger.info("c");
         REQUIRE(report->lines.size() == 1);
-        CHECK(report->lines[0] == R"({"logger":"app","level":"error","message":"disk full"})");
+        CHECK(is_disk_full_report(report->lines[0]));
 
         const auto start = std::chrono::steady_clock::now();
         while (std::chrono::steady_clock::now() - start < interval + std::chrono::milliseconds{20})
@@ -128,7 +142,7 @@ TEST_CASE("error handler: reports closer together than min_interval are counted"
         }
         logger.info("d");
         REQUIRE(report->lines.size() == 2);
-        CHECK(report->lines[1] == R"({"logger":"app","level":"error","dropped":2,"message":"disk full"})");
+        CHECK(is_disk_full_report(report->lines[1], R"("dropped":2,)"));
         CHECK(test_support::is_single_json_object(report->lines[1]));
     }
 }
@@ -184,7 +198,10 @@ TEST_CASE("error handler: writes to a stream when there is no sink", "[error_han
         text.append(chunk.data(), n);
     }
     std::fclose(file);
-    CHECK(text == "{\"logger\":\"app\",\"level\":\"error\",\"message\":\"disk full\"}\n");
+    REQUIRE(!text.empty());
+    CHECK(text.back() == '\n');
+    text.pop_back();
+    CHECK(is_disk_full_report(text));
 }
 
 TEST_CASE("error handler: a stream line ends in a newline even when eol is empty", "[error_handler]")
@@ -220,7 +237,7 @@ TEST_CASE("error handler: an async_sink reports from its worker", "[error_handle
         // Destroying the sink drains its queue and joins its worker.
     }
     REQUIRE(report->lines.size() == 1);
-    CHECK(report->last() == R"({"logger":"app","level":"error","message":"disk full"})");
+    CHECK(is_disk_full_report(report->last()));
 }
 #else
 TEST_CASE("error handler: an async logger reports from its worker", "[error_handler]")
@@ -237,6 +254,6 @@ TEST_CASE("error handler: an async logger reports from its worker", "[error_hand
         pool.reset(); // The pool drains its queue before its worker stops.
     }
     REQUIRE(report->lines.size() == 1);
-    CHECK(report->last() == R"({"logger":"app","level":"error","message":"disk full"})");
+    CHECK(is_disk_full_report(report->last()));
 }
 #endif

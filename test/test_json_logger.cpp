@@ -64,8 +64,10 @@ TEST_CASE("json_logger: runtime strings are messages, typed values are not", "[j
     CHECK(f.last() == R"({"logger":"t","level":"info","message":""})");
     f.logger.info({"k", 1}, std::string{"braces {} stay"});
     CHECK(f.last() == R"({"logger":"t","level":"info","k":1,"message":"braces {} stay"})");
+#if !JSPDLOG_STD_FORMAT // std::format has no runtime format strings before C++26
     f.logger.info(spdlog::fmt_lib::runtime("{} and {}"), 1, 2);
     CHECK(f.last() == R"({"logger":"t","level":"info","message":"1 and 2"})");
+#endif
 }
 
 TEST_CASE("json_logger: a writable char buffer is a runtime string", "[json_logger]")

@@ -173,6 +173,16 @@ std::string line_of(const fields &f)
 
 } // namespace
 
+#if JSPDLOG_STD_FORMAT
+template <>
+struct std::formatter<named, char> : std::formatter<std::string_view, char>
+{
+    auto format(named /*unused*/, std::format_context &ctx) const
+    {
+        return std::formatter<std::string_view, char>::format("up", ctx);
+    }
+};
+#else
 template <>
 struct fmt::formatter<named> : fmt::formatter<std::string_view>
 {
@@ -181,6 +191,7 @@ struct fmt::formatter<named> : fmt::formatter<std::string_view>
         return fmt::formatter<std::string_view>::format("up", ctx);
     }
 };
+#endif
 
 template <>
 struct jspdlog::serializer<third::handle>

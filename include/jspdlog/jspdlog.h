@@ -44,6 +44,7 @@
 #include <spdlog/version.h>
 
 #if SPDLOG_VER_MAJOR >= 2
+#define JSPDLOG_STD_FORMAT 0
 #include <fmt/format.h>
 /** @brief 1 when building against spdlog v2.x, 0 for v1.x. */
 #define JSPDLOG_SPDLOG_V2 1
@@ -52,7 +53,13 @@
 #error "jspdlog requires spdlog >= 1.12 (or v2.x)"
 #endif
 #ifdef SPDLOG_USE_STD_FORMAT
-#error "jspdlog does not support SPDLOG_USE_STD_FORMAT yet; build spdlog with {fmt}"
+// spdlog v1 formats with std::format, which needs C++20. spdlog v2 has no such mode.
+#if __cplusplus < 202002L && !(defined(_MSVC_LANG) && _MSVC_LANG >= 202002L)
+#error "jspdlog with SPDLOG_USE_STD_FORMAT needs C++20 for <format>"
+#endif
+#define JSPDLOG_STD_FORMAT 1
+#else
+#define JSPDLOG_STD_FORMAT 0
 #endif
 #include <spdlog/fmt/fmt.h>
 #define JSPDLOG_SPDLOG_V2 0
@@ -64,9 +71,14 @@
 #include <spdlog/logger.h>
 #include <spdlog/sinks/sink.h>
 
+#if JSPDLOG_STD_FORMAT && !defined(__cpp_lib_format)
+#error "jspdlog with SPDLOG_USE_STD_FORMAT needs a standard library with <format>"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -134,6 +146,13 @@
 #define JSPDLOG_CONSTEVAL consteval
 #else
 #define JSPDLOG_CONSTEVAL constexpr
+#endif
+
+#if JSPDLOG_STD_FORMAT
+/** @brief What a format-string constructor is declared with: {fmt}'s own switch, or consteval for std::format. */
+#define JSPDLOG_FORMAT_CONSTEVAL JSPDLOG_CONSTEVAL
+#else
+#define JSPDLOG_FORMAT_CONSTEVAL FMT_CONSTEVAL
 #endif
 
 // The policy values are not 0: the preprocessor reads an unknown name such as escape as 0, and the check below must
@@ -524,6 +543,21 @@ template <typename Buffer, typename T>
 void append_int(Buffer &out, T value)
 {
     static_assert(std::is_integral_v<T>, "append_int: expected an integer");
+#if JSPDLOG_STD_FORMAT
+    std::array<char, 24> digits{}; // enough for the 20 digits and the sign of any 64-bit integer
+    const auto written = [&](auto number) {
+        const auto result = std::to_chars(digits.data(), digits.data() + digits.size(), number);
+        out.append(digits.data(), result.ptr);
+    };
+    if constexpr (std::is_signed_v<T>)
+    {
+        written(static_cast<long long>(value));
+    }
+    else
+    {
+        written(static_cast<unsigned long long>(value));
+    }
+#else
     if constexpr (std::is_signed_v<T>)
     {
         const spdlog::fmt_lib::format_int text(static_cast<long long>(value));
@@ -534,6 +568,7 @@ void append_int(Buffer &out, T value)
         const spdlog::fmt_lib::format_int text(static_cast<unsigned long long>(value));
         out.append(text.data(), text.data() + text.size());
     }
+#endif
 }
 
 /** @brief Views spdlog's string view type as a std::string_view. */
@@ -774,12 +809,21 @@ struct deferred_payload
 } // namespace detail
 } // namespace jspdlog
 
+#if JSPDLOG_STD_FORMAT
+/** @brief Formats a jspdlog::detail::deferred_payload by running its write function. */
+template <typename Write>
+struct std::formatter<jspdlog::detail::deferred_payload<Write>, char>
+{
+    /** @brief Accepts only an empty format specification. */
+    constexpr auto parse(std::format_parse_context &ctx) -> decltype(ctx.begin()) { return ctx.begin(); }
+#else
 /** @brief Formats a jspdlog::detail::deferred_payload by running its write function. */
 template <typename Write>
 struct fmt::formatter<jspdlog::detail::deferred_payload<Write>>
 {
     /** @brief Accepts only an empty format specification. */
     constexpr auto parse(fmt::format_parse_context &ctx) -> decltype(ctx.begin()) { return ctx.begin(); }
+#endif
 
     /** @brief Runs the write function and copies its output. */
     template <typename Context>
@@ -2861,8 +2905,40 @@ struct type_identity
     using type = T;
 };
 
+#if JSPDLOG_STD_FORMAT
+#if defined(__cpp_lib_format) && __cpp_lib_format >= 202311L
+#define JSPDLOG_HAS_RUNTIME_FORMAT 1
+/** @brief The type of std::runtime_format(...). */
+using runtime_format_string = decltype(std::runtime_format(std::string_view{}));
+#else
+#define JSPDLOG_HAS_RUNTIME_FORMAT 0
+/** @brief std::format has no runtime format strings before C++26, so no argument has this type. */
+struct runtime_format_string
+{
+    runtime_format_string() = delete;
+};
+#endif
+#else
+#define JSPDLOG_HAS_RUNTIME_FORMAT 1
 /** @brief The type of fmt::runtime(...) in the {fmt} version in use. */
 using runtime_format_string = decltype(spdlog::fmt_lib::runtime(""));
+#endif
+
+#if JSPDLOG_STD_FORMAT
+/** @brief The text of a format string: std::format_string, or a plain std::string_view in older standard libraries. */
+template <typename F>
+std::string_view format_text(const F &f) noexcept
+{
+    if constexpr (std::is_convertible_v<const F &, std::string_view>)
+    {
+        return f;
+    }
+    else
+    {
+        return f.get();
+    }
+}
+#endif
 
 /**
  * @brief Whether a type is a writable char array, such as a buffer filled at run time. String literals are const
@@ -3108,11 +3184,12 @@ public:
     template <typename S, std::enable_if_t<std::is_convertible_v<const S &, spdlog::fmt_lib::string_view>, int> = 0>
     // Implicit on purpose: a string literal or fmt::runtime must convert at the call.
     // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
-    FMT_CONSTEVAL basic_format_here(const S &s, detail::site w = detail::site())
+    JSPDLOG_FORMAT_CONSTEVAL basic_format_here(const S &s, detail::site w = detail::site())
         : fmt_(s), where_(w)
     {
     }
 
+#if JSPDLOG_HAS_RUNTIME_FORMAT
     /** @brief Converts fmt::runtime(...), capturing the call site of the logging function. */
     // Implicit on purpose: a string literal or fmt::runtime must convert at the call.
     // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
@@ -3120,6 +3197,7 @@ public:
         : fmt_(r), where_(w)
     {
     }
+#endif
 
     /** @brief The format string. */
     [[nodiscard]] spdlog::format_string_t<Args...> format() const noexcept { return fmt_; }
@@ -3546,7 +3624,13 @@ private:
         {
             emit_(lvl, ex, f, fmt.where(), detail::KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
                 spdlog::memory_buf_t msg;
+#if JSPDLOG_STD_FORMAT
+                std::vformat_to(
+                    std::back_inserter(msg), detail::format_text(fmt.format()), std::make_format_args(args...)
+                );
+#else
                 spdlog::fmt_lib::format_to(std::back_inserter(msg), fmt.format(), std::forward<Args>(args)...);
+#endif
                 append_message_(out, msg);
             });
         }
