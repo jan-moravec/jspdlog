@@ -71,8 +71,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -84,12 +86,20 @@
 #include <string_view>
 #include <tuple>
 #include <type_traits>
+#include <typeinfo>
 #include <utility>
 #include <variant>
 #include <vector>
 
 #ifndef _WIN32
 #include <pthread.h>
+#endif
+
+#if defined(__GNUC__) && __has_include(<cxxabi.h>)
+#include <cxxabi.h>
+#define JSPDLOG_DETAIL_HAS_CXXABI 1
+#else
+#define JSPDLOG_DETAIL_HAS_CXXABI 0
 #endif
 
 #ifndef JSPDLOG_ASSERT
@@ -100,6 +110,20 @@
  * NDEBUG the default expands to nothing and the condition is not evaluated.
  */
 #define JSPDLOG_ASSERT(cond, msg) assert((cond) && (msg))
+#endif
+
+#if (defined(__cpp_exceptions) || defined(_CPPUNWIND)) && !defined(SPDLOG_NO_EXCEPTIONS)
+/** @brief 1 when the code is built with C++ exceptions, so a nested exception can be inspected, 0 otherwise. */
+#define JSPDLOG_HAS_EXCEPTIONS 1
+#else
+#define JSPDLOG_HAS_EXCEPTIONS 0
+#endif
+
+#if defined(__cpp_rtti) || defined(__GXX_RTTI) || defined(_CPPRTTI)
+/** @brief 1 when run-time type information is available, so the dynamic type of an exception can be named. */
+#define JSPDLOG_HAS_RTTI 1
+#else
+#define JSPDLOG_HAS_RTTI 0
 #endif
 
 // The policy values are not 0: the preprocessor reads an unknown name such as escape as 0, and the check below must
@@ -214,6 +238,12 @@ struct json_options
     std::optional<std::string> source_key;
     /** @brief Key of the message. It is not optional, because a message from outside jspdlog needs a place to go. */
     std::string message_key = "message";
+    /** @brief Key of the exception passed first to a logging call. Used only by those call forms. */
+    std::string error_key = "error";
+    /** @brief Key of the exception's type name inside its object. Used only by the exception call forms. */
+    std::string error_type_key = "type";
+    /** @brief Key of the exception's message inside its object. Used only by the exception call forms. */
+    std::string error_message_key = "message";
 
     /** @brief How the timestamp is written. */
     timestamp_format timestamp_style = timestamp_format::rfc3339_millis;
@@ -1072,7 +1102,9 @@ struct serializer
  * - Maps whose key converts to std::string_view: objects, in the iteration order of the map. A std::multimap can write
  *   a key twice.
  * - std::pair and std::tuple, and maps with other keys (as an array of [key, value] pairs): arrays.
- * - Your own types, through jspdlog_serialize or serializer.
+ * - Exceptions (anything derived from std::exception) and std::exception_ptr: an object with the type name and the
+ *   message, and the nested causes as a chain under cause. A null std::exception_ptr is null.
+ * - Your own types, through jspdlog_serialize or serializer. They win over the exception form.
  *
  * Everything is recursive, so a std::map of std::optional of std::vector of your own type works. Wide characters,
  * pointers other than C strings and types without a JSON form are rejected at compile time. std::filesystem::path is
@@ -1852,6 +1884,159 @@ std::string_view char_array_view(const A &array) noexcept
     return std::string_view{std::begin(array), static_cast<std::size_t>(end - std::begin(array))};
 }
 
+/** @brief The keys of an exception object. The value-type form uses the defaults; the call forms use json_options. */
+struct exception_keys
+{
+    /** @brief Key of the type name. */
+    std::string_view type = "type";
+    /** @brief Key of the message. */
+    std::string_view message = "message";
+};
+
+/** @brief How many nested causes are written at most. Deeper ones are left out. */
+inline constexpr int MAX_EXCEPTION_DEPTH = 8;
+
+/** @brief Removes a leading class or struct, which MSVC writes in front of a type name. */
+inline void strip_class_keyword(std::string &name)
+{
+    for (const std::string_view keyword : {std::string_view{"class "}, std::string_view{"struct "}})
+    {
+        if (name.compare(0, keyword.size(), keyword) == 0)
+        {
+            name.erase(0, keyword.size());
+            return;
+        }
+    }
+}
+
+/**
+ * @brief Makes a type name the same on every compiler and standard library: no class or struct keyword, no libc++
+ * inline namespace, and for the type that std::throw_with_nested throws, the user's type instead of the library's
+ * wrapper template, such as std::_Nested_exception of T on libstdc++ and MSVC. A name that does not look like such a
+ * wrapper stays as it is.
+ */
+inline std::string normalize_type_name(std::string name, bool nested)
+{
+    static constexpr std::string_view LIBCXX_NAMESPACE = "std::__1::";
+    for (std::size_t at = name.find(LIBCXX_NAMESPACE); at != std::string::npos; at = name.find(LIBCXX_NAMESPACE, at))
+    {
+        name.replace(at, LIBCXX_NAMESPACE.size(), "std::");
+    }
+    strip_class_keyword(name);
+    if (nested && name.compare(0, 5, "std::") == 0)
+    {
+        const std::size_t open = name.find('<');
+        const std::size_t close = name.rfind('>');
+        if (open != std::string::npos && close != std::string::npos && close > open + 1)
+        {
+            name = name.substr(open + 1, close - open - 1);
+            strip_class_keyword(name);
+        }
+    }
+    return name;
+}
+
+/** @brief The name of the dynamic type of an exception, demangled where the compiler mangles it. */
+inline std::string exception_type_name(const std::exception &ex)
+{
+#if JSPDLOG_HAS_RTTI
+    const char *raw = typeid(ex).name();
+#if JSPDLOG_DETAIL_HAS_CXXABI
+    int status = 0;
+    const std::unique_ptr<char, void (*)(void *)> demangled(
+        abi::__cxa_demangle(raw, nullptr, nullptr, &status), &std::free
+    );
+    std::string name = status == 0 && demangled ? demangled.get() : raw;
+#else
+    std::string name = raw; // MSVC: "class std::runtime_error"
+#endif
+    return normalize_type_name(std::move(name), dynamic_cast<const std::nested_exception *>(&ex) != nullptr);
+#else
+    (void)ex;
+    return "std::exception"; // no RTTI: the static type is all there is
+#endif
+}
+
+/** @brief Writes an exception as an object with its type and message, and its nested causes as a chain. */
+inline void write_exception(json_writer &w, const std::exception &ex, const exception_keys &keys, int depth = 0)
+{
+    w.begin_object();
+    w.key(keys.type);
+    writer_access::string(w, exception_type_name(ex));
+    const char *what = ex.what();
+    w.key(keys.message);
+    writer_access::string(w, std::string_view{what != nullptr ? what : ""});
+#if JSPDLOG_HAS_EXCEPTIONS && JSPDLOG_HAS_RTTI
+    if (depth < MAX_EXCEPTION_DEPTH)
+    {
+        try
+        {
+            std::rethrow_if_nested(ex);
+        }
+        catch (const std::exception &cause)
+        {
+            w.key("cause");
+            write_exception(w, cause, keys, depth + 1);
+        }
+        catch (...)
+        {
+            w.key("cause");
+            w.begin_object();
+            w.key(keys.type);
+            writer_access::string(w, "unknown");
+            w.end_object();
+        }
+    }
+#else
+    (void)depth;
+#endif
+    w.end_object();
+}
+
+/** @brief Writes the exception behind a pointer like write_exception, or null for a null pointer. */
+inline void write_exception_ptr(json_writer &w, const std::exception_ptr &p, const exception_keys &keys)
+{
+    if (!p)
+    {
+        writer_access::scalar(w, "null");
+        return;
+    }
+#if JSPDLOG_HAS_EXCEPTIONS
+    try
+    {
+        std::rethrow_exception(p);
+    }
+    catch (const std::exception &ex)
+    {
+        write_exception(w, ex, keys);
+        return;
+    }
+    catch (...) // NOLINT(bugprone-empty-catch): an exception of another type is written as unknown below
+    {
+    }
+#endif
+    w.begin_object();
+    w.key(keys.type);
+    writer_access::string(w, "unknown");
+    w.end_object();
+}
+
+/** @brief The exception of an exception call form and the keys to write it with. Lives on the caller's stack. */
+struct exception_arg
+{
+    /** @brief The exception. */
+    const std::exception *ex;
+    /** @brief The keys of its object. */
+    exception_keys keys;
+};
+
+/** @brief Writes the exception_arg behind a pointer. It has the type of a per-call reference's writer function. */
+inline void write_exception_arg(json_writer &w, const void *p)
+{
+    const auto &arg = *static_cast<const exception_arg *>(p);
+    write_exception(w, *arg.ex, arg.keys);
+}
+
 /**
  * @brief Whether write_value has a branch for the type, that is, whether it has a JSON form. Mirrors the branches of
  * write_value, so a type is lazy exactly when none of them takes it.
@@ -1861,6 +2046,7 @@ inline constexpr bool has_json_form_v =
     std::is_arithmetic_v<T> || std::is_enum_v<T> || std::is_pointer_v<T> || is_char_array_v<T> ||
     std::is_same_v<T, std::nullptr_t> || std::is_same_v<T, std::monostate> || std::is_same_v<T, raw_json> ||
     std::is_same_v<T, fields> || has_serializer_v<T> || has_adl_serialize_v<T> ||
+    std::is_base_of_v<std::exception, T> || std::is_same_v<T, std::exception_ptr> ||
     std::is_convertible_v<const T &, std::string_view> || is_optional_v<T> || is_variant_v<T> || is_duration_v<T> ||
     is_time_point_v<T> || is_tuple_like_v<T> || is_string_keyed_map_v<T> || is_range_v<T>;
 
@@ -1943,6 +2129,14 @@ void write_value(json_writer &w, const T &v)
     else if constexpr (has_adl_serialize_v<value_type>)
     {
         serialize_adl::call(w, v);
+    }
+    else if constexpr (std::is_base_of_v<std::exception, value_type>)
+    {
+        write_exception(w, v, exception_keys{});
+    }
+    else if constexpr (std::is_same_v<value_type, std::exception_ptr>)
+    {
+        write_exception_ptr(w, v, exception_keys{});
     }
     else if constexpr (std::is_convertible_v<const value_type &, std::string_view>)
     {
@@ -2136,14 +2330,24 @@ template <typename S>
 using if_runtime_string = std::enable_if_t<is_runtime_string_v<S>, int>;
 
 /**
+ * @brief Enables an overload for exceptions only. The exception parameter is a template, not a const std::exception
+ * reference, because the standard library of MSVC gives std::exception a constructor that takes a const char pointer
+ * and an int, so a braced list such as {"k", 1} would convert to one.
+ */
+template <typename E>
+using if_exception = std::enable_if_t<std::is_base_of_v<std::exception, E>, int>;
+
+/**
  * @brief Whether a single argument is neither a string, a format string nor a fields object, so it cannot be a message.
  *
  * A fields object is excluded because a call form with fields converts it to the per-call parameter, and a template
- * that matches the type exactly would win over that conversion.
+ * that matches the type exactly would win over that conversion. An exception is excluded for the same reason against
+ * the exception call forms, which take a const std::exception reference.
  */
 template <typename T>
 inline constexpr bool is_rejected_message_v = !is_runtime_string_v<T> && !std::is_array_v<T> &&
-                                              !std::is_same_v<T, runtime_format_string> && !std::is_same_v<T, fields>;
+                                              !std::is_same_v<T, runtime_format_string> && !std::is_same_v<T, fields> &&
+                                              !std::is_base_of_v<std::exception, T>;
 
 /**
  * @brief Views a runtime string as a std::string_view. A null C string is an empty message, and a char array ends at
@@ -2380,6 +2584,18 @@ using format_here_t = basic_format_here<typename detail::type_identity<Args>::ty
  * logger.info({"plan", [&] { return explain(q); }}, "planned");  // a lazy value
  * @endcode
  *
+ * Each level also has six call forms that take a std::exception first, with the same endings: no message, a message
+ * or a format string, and each with fields too. They write the exception as the first per-call field, under
+ * json_options::error_key, as an object with its type name and message, and its nested causes under cause. The
+ * exception is written only when the line is, so a call at a disabled level computes nothing. A per-call field with
+ * the error key is a mistake that debug builds report through JSPDLOG_ASSERT; a bound field with that key is replaced
+ * by the exception.
+ *
+ * @code
+ * try { connect(); }
+ * catch (const std::exception &ex) { logger.error(ex, {"host", host}, "connect failed"); }
+ * @endcode
+ *
  * A braced list is kept as references and serialized only when the line is written, so a call at a disabled level
  * serializes nothing and a braced list holds at most 16 pairs. A value in it may be a callable that takes no
  * arguments, which runs only when the line is written, in the calling thread, and whose result is the value. That
@@ -2482,35 +2698,79 @@ public:
     /** @brief Writes a line with fields only, without a message. */
     void log(level lvl, const detail::call_fields &f, detail::site where = detail::site()) const
     {
-        log_fields_(lvl, f, where);
+        log_fields_(lvl, nullptr, f, where);
     }
 
     /** @brief Writes a formatted message. The format string is checked at compile time. */
     template <typename... Args>
     void log(level lvl, format_here_t<Args...> fmt, Args &&...args) const
     {
-        log_fmt_(lvl, empty_call_fields_(), fmt, std::forward<Args>(args)...);
+        log_fmt_(lvl, nullptr, empty_call_fields_(), fmt, std::forward<Args>(args)...);
     }
 
     /** @brief Writes a runtime string as the message. */
     template <typename S, detail::if_runtime_string<S> = 0>
     void log(level lvl, const S &msg, detail::site where = detail::site()) const
     {
-        log_str_(lvl, empty_call_fields_(), detail::message_view(msg), where);
+        log_str_(lvl, nullptr, empty_call_fields_(), detail::message_view(msg), where);
     }
 
     /** @brief Writes fields and a formatted message. */
     template <typename... Args>
     void log(level lvl, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const
     {
-        log_fmt_(lvl, f, fmt, std::forward<Args>(args)...);
+        log_fmt_(lvl, nullptr, f, fmt, std::forward<Args>(args)...);
     }
 
     /** @brief Writes fields and a runtime string as the message. */
     template <typename S, detail::if_runtime_string<S> = 0>
     void log(level lvl, const detail::call_fields &f, const S &msg, detail::site where = detail::site()) const
     {
-        log_str_(lvl, f, detail::message_view(msg), where);
+        log_str_(lvl, nullptr, f, detail::message_view(msg), where);
+    }
+
+    /** @brief Writes a line with an exception under json_options::error_key and no message. */
+    template <typename E, detail::if_exception<E> = 0>
+    void log(level lvl, const E &ex, detail::site where = detail::site()) const
+    {
+        log_fields_(lvl, &ex, empty_call_fields_(), where);
+    }
+
+    /** @brief Writes an exception and a formatted message. */
+    template <typename E, detail::if_exception<E> = 0, typename... Args>
+    void log(level lvl, const E &ex, format_here_t<Args...> fmt, Args &&...args) const
+    {
+        log_fmt_(lvl, &ex, empty_call_fields_(), fmt, std::forward<Args>(args)...);
+    }
+
+    /** @brief Writes an exception and a runtime string as the message. */
+    template <typename E, typename S, detail::if_exception<E> = 0, detail::if_runtime_string<S> = 0>
+    void log(level lvl, const E &ex, const S &msg, detail::site where = detail::site()) const
+    {
+        log_str_(lvl, &ex, empty_call_fields_(), detail::message_view(msg), where);
+    }
+
+    /** @brief Writes an exception and fields, without a message. */
+    template <typename E, detail::if_exception<E> = 0>
+    void log(level lvl, const E &ex, const detail::call_fields &f, detail::site where = detail::site()) const
+    {
+        log_fields_(lvl, &ex, f, where);
+    }
+
+    /** @brief Writes an exception, fields and a formatted message. */
+    template <typename E, detail::if_exception<E> = 0, typename... Args>
+    void log(level lvl, const E &ex, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const
+    {
+        log_fmt_(lvl, &ex, f, fmt, std::forward<Args>(args)...);
+    }
+
+    /** @brief Writes an exception, fields and a runtime string as the message. */
+    template <typename E, typename S, detail::if_exception<E> = 0, detail::if_runtime_string<S> = 0>
+    void log(
+        level lvl, const E &ex, const detail::call_fields &f, const S &msg, detail::site where = detail::site()
+    ) const
+    {
+        log_str_(lvl, &ex, f, detail::message_view(msg), where);
     }
 
     /** @brief Rejects a single argument that is not a string. Put typed values in fields. */
@@ -2522,26 +2782,59 @@ public:
     template <typename... Args>                                                                                        \
     void name(format_here_t<Args...> fmt, Args &&...args) const                                                        \
     {                                                                                                                  \
-        log_fmt_(lvl, empty_call_fields_(), fmt, std::forward<Args>(args)...);                                         \
+        log_fmt_(lvl, nullptr, empty_call_fields_(), fmt, std::forward<Args>(args)...);                                \
     }                                                                                                                  \
     template <typename S, detail::if_runtime_string<S> = 0>                                                            \
     void name(const S &msg, detail::site where = detail::site()) const                                                 \
     {                                                                                                                  \
-        log_str_(lvl, empty_call_fields_(), detail::message_view(msg), where);                                         \
+        log_str_(lvl, nullptr, empty_call_fields_(), detail::message_view(msg), where);                                \
     }                                                                                                                  \
     void name(const detail::call_fields &f, detail::site where = detail::site()) const                                 \
     {                                                                                                                  \
-        log_fields_(lvl, f, where);                                                                                    \
+        log_fields_(lvl, nullptr, f, where);                                                                           \
     }                                                                                                                  \
     template <typename... Args>                                                                                        \
     void name(const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const                          \
     {                                                                                                                  \
-        log_fmt_(lvl, f, fmt, std::forward<Args>(args)...);                                                            \
+        log_fmt_(lvl, nullptr, f, fmt, std::forward<Args>(args)...);                                                   \
     }                                                                                                                  \
     template <typename S, detail::if_runtime_string<S> = 0>                                                            \
     void name(const detail::call_fields &f, const S &msg, detail::site where = detail::site()) const                   \
     {                                                                                                                  \
-        log_str_(lvl, f, detail::message_view(msg), where);                                                            \
+        log_str_(lvl, nullptr, f, detail::message_view(msg), where);                                                   \
+    }                                                                                                                  \
+    template <typename E, detail::if_exception<E> = 0>                                                                 \
+    void name(const E &ex, detail::site where = detail::site()) const                                                  \
+    {                                                                                                                  \
+        log_fields_(lvl, &ex, empty_call_fields_(), where);                                                            \
+    }                                                                                                                  \
+    template <typename E, detail::if_exception<E> = 0, typename... Args>                                               \
+    void name(const E &ex, format_here_t<Args...> fmt, Args &&...args) const                                           \
+    {                                                                                                                  \
+        log_fmt_(lvl, &ex, empty_call_fields_(), fmt, std::forward<Args>(args)...);                                    \
+    }                                                                                                                  \
+    template <typename E, typename S, detail::if_exception<E> = 0, detail::if_runtime_string<S> = 0>                   \
+    void name(const E &ex, const S &msg, detail::site where = detail::site()) const                                    \
+    {                                                                                                                  \
+        log_str_(lvl, &ex, empty_call_fields_(), detail::message_view(msg), where);                                    \
+    }                                                                                                                  \
+    template <typename E, detail::if_exception<E> = 0>                                                                 \
+    void name(const E &ex, const detail::call_fields &f, detail::site where = detail::site()) const                    \
+    {                                                                                                                  \
+        log_fields_(lvl, &ex, f, where);                                                                               \
+    }                                                                                                                  \
+    template <typename E, detail::if_exception<E> = 0, typename... Args>                                               \
+    void name(const E &ex, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args)                   \
+        const                                                                                                          \
+    {                                                                                                                  \
+        log_fmt_(lvl, &ex, f, fmt, std::forward<Args>(args)...);                                                       \
+    }                                                                                                                  \
+    template <typename E, typename S, detail::if_exception<E> = 0, detail::if_runtime_string<S> = 0>                   \
+    void name(                                                                                                         \
+        const E &ex, const detail::call_fields &f, const S &msg, detail::site where = detail::site()                   \
+    ) const                                                                                                            \
+    {                                                                                                                  \
+        log_str_(lvl, &ex, f, detail::message_view(msg), where);                                                       \
     }                                                                                                                  \
     template <typename T, std::enable_if_t<detail::is_rejected_message_v<T>, int> = 0>                                 \
     void name(const T &) const = delete;
@@ -2599,6 +2892,16 @@ private:
         detail::payload_token token{};
         /** @brief The keys the logger writes itself, for the debug check. */
         detail::reserved_keys reserved;
+        /** @brief Where an exception of an exception call form goes: its key and the keys inside its object. */
+        struct error_keys_data
+        {
+            /** @brief Key of the exception object. */
+            std::string key;
+            /** @brief Key of the type name inside it. */
+            std::string type;
+            /** @brief Key of the message inside it. */
+            std::string message;
+        } errors;
     };
 
     /** @brief Installs a json_formatter on a logger that is known not to be null. */
@@ -2614,6 +2917,7 @@ private:
         auto ctx = std::make_shared<context_data>();
         ctx->token = detail::process_token();
         ctx->reserved = detail::reserved_keys(options);
+        ctx->errors = {options.error_key, options.error_type_key, options.error_message_key};
         return ctx;
     }
 
@@ -2662,21 +2966,23 @@ private:
     }
 
     /** @brief Writes a line with fields only. */
-    void log_fields_(level lvl, const detail::call_fields &f, detail::site where) const
+    void log_fields_(level lvl, const std::exception *ex, const detail::call_fields &f, detail::site where) const
     {
         if (should_log(lvl))
         {
-            emit_(lvl, f, where, detail::KIND_FIELDS, [](spdlog::memory_buf_t & /*out*/) {});
+            emit_(lvl, ex, f, where, detail::KIND_FIELDS, [](spdlog::memory_buf_t & /*out*/) {});
         }
     }
 
     /** @brief Writes fields and a message formatted from a format string and its arguments. */
     template <typename... Args>
-    void log_fmt_(level lvl, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const
+    void log_fmt_(
+        level lvl, const std::exception *ex, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args
+    ) const
     {
         if (should_log(lvl))
         {
-            emit_(lvl, f, fmt.where(), detail::KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
+            emit_(lvl, ex, f, fmt.where(), detail::KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
                 spdlog::memory_buf_t msg;
                 spdlog::fmt_lib::format_to(std::back_inserter(msg), fmt.format(), std::forward<Args>(args)...);
                 append_message_(out, msg);
@@ -2685,11 +2991,13 @@ private:
     }
 
     /** @brief Writes fields and a message taken as it is. */
-    void log_str_(level lvl, const detail::call_fields &f, std::string_view msg, detail::site where) const
+    void log_str_(
+        level lvl, const std::exception *ex, const detail::call_fields &f, std::string_view msg, detail::site where
+    ) const
     {
         if (should_log(lvl))
         {
-            emit_(lvl, f, where, detail::KIND_MESSAGE, [msg](spdlog::memory_buf_t &out) {
+            emit_(lvl, ex, f, where, detail::KIND_MESSAGE, [msg](spdlog::memory_buf_t &out) {
                 detail::append_json_quoted(out, msg);
             });
         }
@@ -2800,14 +3108,20 @@ private:
      * write_message appends. spdlog runs the serialization while it formats the line, inside its error handling, so
      * the values of a braced list are serialized here and only when the line is written.
      *
-     * The fields are an already escaped list, each entry starting with a comma. A per-call field with the key of a
-     * bound field replaces its value at the bound field's position, and a key that appears twice in one braced list
-     * takes the last value at the first position, as in a fields object. The message is appended as a quoted JSON
+     * The fields are an already escaped list, each entry starting with a comma. The exception of an exception call
+     * comes first among the per-call fields. A per-call field with the key of a bound field replaces its value at the
+     * bound field's position, and a key that appears twice in one braced list takes the last value at the first
+     * position, as in a fields object. The message is appended as a quoted JSON
      * string, so it is escaped once however many sinks the logger has.
      */
     template <typename WriteMessage>
     void emit_(
-        level lvl, const detail::call_fields &props, detail::site where, char kind, const WriteMessage &write_message
+        level lvl,
+        const std::exception *ex,
+        const detail::call_fields &props,
+        detail::site where,
+        char kind,
+        const WriteMessage &write_message
     ) const
     {
         const context_data &ctx = *context_;
@@ -2817,7 +3131,11 @@ private:
             const std::size_t size_at = out.size();
             detail::append(out, std::string_view{"00000000", detail::SIZE_DIGITS});
             const std::size_t fields_at = out.size();
-            append_props_(out, props, nullptr);
+            // The exception is held by reference and written here, when the line is, so a disabled level computes
+            // nothing and an exception from writing it reaches the error handler.
+            const detail::exception_arg arg{ex, {ctx.errors.type, ctx.errors.message}};
+            const detail::call_fields::ref leading{ctx.errors.key, &arg, &detail::write_exception_arg};
+            append_props_(out, props, ex != nullptr ? &leading : nullptr);
             detail::patch_hex_size(out, size_at, out.size() - fields_at);
             write_message(out);
         };

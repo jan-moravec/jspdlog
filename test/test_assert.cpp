@@ -1,5 +1,6 @@
 // Built into its own executable: it defines JSPDLOG_ASSERT before the header, which changes the inline checks.
 
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,14 @@ std::vector<std::string> &failures()
 #include <catch2/catch_test_macros.hpp>
 
 using test_support::fixture;
+
+namespace
+{
+jspdlog::fields fields_without_error_key()
+{
+    return jspdlog::fields{"a", 1};
+}
+} // namespace
 
 TEST_CASE("assert: field keys that clash with header keys are reported", "[assert]")
 {
@@ -145,4 +154,24 @@ TEST_CASE("assert: a serializer must write exactly one complete value", "[assert
         f.insert("a", key_without_value{});
         CHECK_FALSE(failures().empty());
     }
+}
+
+TEST_CASE("assert: a per-call field with the error key of an exception call is reported", "[assert]")
+{
+    failures().clear();
+    const fixture f;
+    const std::runtime_error ex("boom");
+
+    f.logger.error(ex, {"ok", 1}, "x");
+    f.logger.error(ex, fields_without_error_key());
+    CHECK(failures().empty());
+
+    f.logger.error(ex, {"error", 1});
+    REQUIRE(failures().size() == 1);
+    CHECK(failures().front() == "jspdlog: a field key equals the error key of an exception call");
+
+    // Without an exception the key is an ordinary one.
+    failures().clear();
+    f.logger.error({"error", 1});
+    CHECK(failures().empty());
 }

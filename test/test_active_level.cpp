@@ -8,6 +8,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <stdexcept>
+
 static_assert(JSPDLOG_ACTIVE_LEVEL == SPDLOG_LEVEL_INFO, "this unit must be built with JSPDLOG_ACTIVE_LEVEL=info");
 
 bool default_unit_debug_macro_writes();
@@ -51,6 +53,25 @@ TEST_CASE("active level: calls below it are removed, calls at or above it are wr
     // The member functions do not read JSPDLOG_ACTIVE_LEVEL.
     f.logger.debug("debug through the member function");
     CHECK(f.sink->lines.size() == 6);
+}
+
+TEST_CASE("active level: exception forms through the macros", "[active_level]")
+{
+    const test_support::fixture f;
+    const std::runtime_error ex("boom");
+    evaluations = 0;
+
+    JSPDLOG_DEBUG(f.logger, ex, {"v", next()}, "debug");
+    CHECK(evaluations == 0);
+    CHECK(f.sink->lines.empty());
+
+    JSPDLOG_ERROR(f.logger, ex, {"v", next()}, "kept {}", 1);
+    CHECK(evaluations == 1);
+    const std::string by_macro = f.last();
+    f.logger.error(ex, {"v", 1}, "kept {}", 1);
+    CHECK(f.last() == by_macro);
+    CHECK(by_macro.find(R"("error":{"type":"std::runtime_error","message":"boom"},"v":1,"message":"kept 1")") !=
+          std::string::npos);
 }
 
 TEST_CASE("active level: units built with different values link into one program", "[active_level]")
