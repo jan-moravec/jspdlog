@@ -193,7 +193,7 @@ TEST_CASE("exceptions: a chain is cut at the maximum depth", "[exceptions]")
     {
         f.logger.error(ex);
     }
-    CHECK(count_of(f.last(), R"("cause")") == 3);
+    CHECK(count_of(f.last(), R"("cause")") == 4); // level2, level1, level0 and the root
     CHECK(f.last().find(R"("message":"root")") != std::string::npos);
 }
 #endif

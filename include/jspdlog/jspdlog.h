@@ -2890,13 +2890,6 @@ public:
         log_str_(lvl, nullptr, f, detail::message_view(msg), where);
     }
 
-    /** @brief Writes a line with an exception under json_options::error_key and no message. */
-    template <typename E, detail::if_exception<E> = 0>
-    void log(level lvl, const E &ex, detail::site where = detail::site()) const
-    {
-        log_fields_(lvl, &ex, empty_call_fields_(), where);
-    }
-
     /** @brief Writes an exception and a formatted message. */
     template <typename E, detail::if_exception<E> = 0, typename... Args>
     void log(level lvl, const E &ex, format_here_t<Args...> fmt, Args &&...args) const
@@ -2911,9 +2904,14 @@ public:
         log_str_(lvl, &ex, empty_call_fields_(), detail::message_view(msg), where);
     }
 
-    /** @brief Writes an exception and fields, without a message. */
+    /**
+     * @brief Writes an exception under json_options::error_key, with fields if given and without a message. The fields
+     * have a default and are not a separate overload, so a braced list cannot be taken for the call site.
+     */
     template <typename E, detail::if_exception<E> = 0>
-    void log(level lvl, const E &ex, const detail::call_fields &f, detail::site where = detail::site()) const
+    void log(
+        level lvl, const E &ex, const detail::call_fields &f = empty_call_fields_(), detail::site where = detail::site()
+    ) const
     {
         log_fields_(lvl, &ex, f, where);
     }
@@ -2963,11 +2961,6 @@ public:
     {                                                                                                                  \
         log_str_(lvl, nullptr, f, detail::message_view(msg), where);                                                   \
     }                                                                                                                  \
-    template <typename E, detail::if_exception<E> = 0>                                                                 \
-    void name(const E &ex, detail::site where = detail::site()) const                                                  \
-    {                                                                                                                  \
-        log_fields_(lvl, &ex, empty_call_fields_(), where);                                                            \
-    }                                                                                                                  \
     template <typename E, detail::if_exception<E> = 0, typename... Args>                                               \
     void name(const E &ex, format_here_t<Args...> fmt, Args &&...args) const                                           \
     {                                                                                                                  \
@@ -2979,7 +2972,8 @@ public:
         log_str_(lvl, &ex, empty_call_fields_(), detail::message_view(msg), where);                                    \
     }                                                                                                                  \
     template <typename E, detail::if_exception<E> = 0>                                                                 \
-    void name(const E &ex, const detail::call_fields &f, detail::site where = detail::site()) const                    \
+    void name(const E &ex, const detail::call_fields &f = empty_call_fields_(), detail::site where = detail::site())   \
+        const                                                                                                          \
     {                                                                                                                  \
         log_fields_(lvl, &ex, f, where);                                                                               \
     }                                                                                                                  \

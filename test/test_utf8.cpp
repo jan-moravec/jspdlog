@@ -281,6 +281,7 @@ TEST_CASE("utf8: exception messages follow the policy", "[utf8]")
         f.logger.error(ex);
         CHECK(f.last() == expected);
         f.logger.error({"e", ex});
-        CHECK(f.last().find(R"("e":{"type":"std::runtime_error","message":")" + text + "\"}") != std::string::npos);
+        const std::string as_value = R"("e":{"type":"std::runtime_error","message":")" + text + "\"}";
+        CHECK(f.last().find(as_value) != std::string::npos);
     }
 }

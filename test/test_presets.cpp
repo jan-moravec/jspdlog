@@ -15,9 +15,9 @@
 namespace
 {
 
-// 2026-11-25T10:20:30.1234567Z, on a clock that counts in 100 nanosecond steps at the coarsest.
+// 2026-11-25T10:20:30.123456Z, a time that a clock counting microseconds (libc++) can hold.
 constexpr std::int64_t FIXED_SECONDS = 1795602030;
-constexpr std::int64_t FIXED_NANOS = 123456700;
+constexpr std::int64_t FIXED_NANOS = 123456000;
 constexpr unsigned FIXED_THREAD = 77;
 
 // Formats a plain message at the error level with a fixed time, thread and call site.
@@ -98,7 +98,7 @@ TEST_CASE("presets: ecs", "[presets]")
 TEST_CASE("presets: gcp", "[presets]")
 {
     const std::string expected = with_pid(
-        R"({"time":"2026-11-25T10:20:30.123456700Z","logger":"name","severity":"ERROR","process":@PID@,"thread":77,)"
+        R"({"time":"2026-11-25T10:20:30.123456000Z","logger":"name","severity":"ERROR","process":@PID@,"thread":77,)"
         R"("message":"hello"})"
     );
     CHECK(format_fixed(jspdlog::presets::gcp()) == expected);
@@ -107,7 +107,7 @@ TEST_CASE("presets: gcp", "[presets]")
     auto options = jspdlog::presets::gcp();
     options.source_key = "logging.googleapis.com/sourceLocation";
     const std::string with_source = with_pid(
-        R"({"time":"2026-11-25T10:20:30.123456700Z","logger":"name","severity":"ERROR","process":@PID@,"thread":77,)"
+        R"({"time":"2026-11-25T10:20:30.123456000Z","logger":"name","severity":"ERROR","process":@PID@,"thread":77,)"
         R"("logging.googleapis.com/sourceLocation":{"file":"a.cpp","line":12,"function":"fn"},"message":"hello"})"
     );
     CHECK(format_fixed(options) == with_source);
@@ -146,7 +146,7 @@ TEST_CASE("presets: otel", "[presets]")
     auto options = jspdlog::presets::otel();
     options.source_key = "source";
     const std::string expected = with_pid(
-        R"({"timestamp":"2026-11-25T10:20:30.123456700Z","logger":"name","severity_text":"ERROR","severity_number":17,)"
+        R"({"timestamp":"2026-11-25T10:20:30.123456000Z","logger":"name","severity_text":"ERROR","severity_number":17,)"
         R"("process.pid":@PID@,"thread.id":77,"code.file.path":"a.cpp","code.line.number":12,)"
         R"("code.function.name":"fn","body":"hello"})"
     );
