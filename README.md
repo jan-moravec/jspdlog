@@ -71,7 +71,7 @@ jspdlog is one header, [include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h), a
 
   ```cmake
   include(FetchContent)
-  FetchContent_Declare(jspdlog GIT_REPOSITORY https://github.com/jan-moravec/jspdlog.git GIT_TAG v0.1.0)
+  FetchContent_Declare(jspdlog GIT_REPOSITORY https://github.com/jan-moravec/jspdlog.git GIT_TAG v0.4.0)
   FetchContent_MakeAvailable(jspdlog)
   target_link_libraries(my_app PRIVATE jspdlog::jspdlog)
   ```
@@ -424,8 +424,9 @@ Things to know about each:
 
 - **ECS.** The keys are written flat and dotted, as ECS spells its field names, so `log.level` is a key with a dot in
   it, not a nested object. The ECS pages list `error.type` and `error.message`, which the exception object provides
-  after the dots are expanded, and they do not list `ecs.version`: bind it with `with({"ecs.version", "8.11.0"})` if
-  your pipeline needs it. `log.origin.file.line` and `process.thread.id` are numbers, as ECS types them.
+  after the dots are expanded. ECS requires `ecs.version` in every event, and the preset cannot know which version your
+  index templates use: bind it once with `with({"ecs.version", "8.11.0"})`. `log.origin.file.line` and
+  `process.thread.id` are numbers, as ECS types them.
 - **Google Cloud Logging.** The `severity` names are those of `LogSeverity`; `WARN` is not one of them, so warnings are
   `WARNING`, and `off` is written `DEFAULT`. The documentation types `sourceLocation.line` as an int64 in string form, and jspdlog
   writes a number, which the protobuf JSON mapping accepts for int64; this was not tried against a live agent. The
@@ -435,11 +436,14 @@ Things to know about each:
   `critical` critical. `timestamp` as epoch milliseconds is a format its date remapper recognizes. `logger.thread_name` is a
   string attribute, and jspdlog has the numeric thread id only, so it writes the number; remove the key with
   `thread_key = std::nullopt` if your pipeline is strict about the type. The documentation names `error.kind`; the
-  message stays `message` inside the object, so the line has `error.message` too.
+  message stays `message` inside the object, so the line has `error.message` too. Only the exception call forms use
+  `kind`: an exception passed as a value, `{"error", ex}`, always has `type` and `message`.
 - **OpenTelemetry.** The keys are the names of the log data model (`SeverityText`, `SeverityNumber`, `Body`) in
   snake case. They are not a convention that the collector's `filelog` receiver applies by itself: configure its
   `json_parser` to move `timestamp` and `severity_text` into place. `code.file.path` is meant to be a path, and jspdlog
-  writes the base name of the file. `thread.id` and `process.pid` are not stable in the semantic conventions yet.
+  writes the base name of the file. `code.function.name` is meant to be fully qualified, and jspdlog writes the name
+  the compiler gives the function, which GCC and Clang leave unqualified. `thread.id` is defined as a managed thread id
+  and jspdlog writes the operating system's; it and `process.pid` are not stable in the semantic conventions yet.
 
 ### Text encoding
 
