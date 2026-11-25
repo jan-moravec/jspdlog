@@ -68,6 +68,16 @@ target_link_libraries(jspdlog_assert_tests PRIVATE jspdlog::jspdlog Catch2::Catc
 jspdlog_set_warnings(jspdlog_assert_tests)
 catch_discover_tests(jspdlog_assert_tests)
 
+# The error handler tests run under a short timeout: a handler that deadlocks must show up as a failure, not a hang.
+add_executable(jspdlog_error_handler_tests test_error_handler.cpp)
+target_link_libraries(jspdlog_error_handler_tests PRIVATE jspdlog::jspdlog Catch2::Catch2WithMain)
+if(JSPDLOG_TEST_WITH_NLOHMANN)
+    target_link_libraries(jspdlog_error_handler_tests PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_definitions(jspdlog_error_handler_tests PRIVATE JSPDLOG_TEST_NLOHMANN=1)
+endif()
+jspdlog_set_warnings(jspdlog_error_handler_tests)
+catch_discover_tests(jspdlog_error_handler_tests PROPERTIES TIMEOUT 10)
+
 # The exception forms in a unit without RTTI. It has its own main, because Catch2 is built with RTTI. jspdlog::jspdlog
 # is linked for the include paths and spdlog.
 add_executable(jspdlog_nortti_tests test_exceptions_nortti.cpp)

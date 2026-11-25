@@ -71,6 +71,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -78,6 +79,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <ratio>
@@ -736,6 +738,23 @@ inline void patch_hex_size(spdlog::memory_buf_t &out, std::size_t at, std::size_
         const unsigned shift = NIBBLE_BITS * static_cast<unsigned>(SIZE_DIGITS - 1 - i);
         out.data()[at + i] = HEX_DIGITS[(size >> shift) & NIBBLE_MASK];
     }
+}
+
+/**
+ * @brief Appends the start of a payload: the token, the kind, the size of the fields and the fields that write_fields
+ * appends. The caller then appends the message. Used by json_logger and by the error handler, so both write the same
+ * protocol.
+ */
+template <typename WriteFields>
+void write_payload(spdlog::memory_buf_t &out, const payload_token &token, char kind, const WriteFields &write_fields)
+{
+    append(out, std::string_view{token.data(), token.size()});
+    out.push_back(kind);
+    const std::size_t size_at = out.size();
+    append(out, std::string_view{"00000000", SIZE_DIGITS});
+    const std::size_t fields_at = out.size();
+    write_fields(out);
+    patch_hex_size(out, size_at, out.size() - fields_at);
 }
 
 /**
@@ -3664,19 +3683,15 @@ private:
     {
         const context_data &ctx = *context_;
         const auto write = [&](spdlog::memory_buf_t &out) {
-            detail::append(out, std::string_view{ctx.token.data(), ctx.token.size()});
-            out.push_back(kind);
-            const std::size_t size_at = out.size();
-            detail::append(out, std::string_view{"00000000", detail::SIZE_DIGITS});
-            const std::size_t fields_at = out.size();
-            // The exception is held by reference and written here, when the line is, so a disabled level computes
-            // nothing and an exception from writing it reaches the error handler.
-            const detail::exception_arg arg{ex, {ctx.errors.type, ctx.errors.message}};
-            const detail::call_fields::ref leading{
-                ctx.errors.key, &arg, &detail::call_fields::write_item<&detail::write_exception_arg, false>
-            };
-            append_props_(out, props, ex != nullptr ? &leading : nullptr);
-            detail::patch_hex_size(out, size_at, out.size() - fields_at);
+            detail::write_payload(out, ctx.token, kind, [&](spdlog::memory_buf_t &fields_out) {
+                // The exception is held by reference and written here, when the line is, so a disabled level computes
+                // nothing and an exception from writing it reaches the error handler.
+                const detail::exception_arg arg{ex, {ctx.errors.type, ctx.errors.message}};
+                const detail::call_fields::ref leading{
+                    ctx.errors.key, &arg, &detail::call_fields::write_item<&detail::write_exception_arg, false>
+                };
+                append_props_(fields_out, props, ex != nullptr ? &leading : nullptr);
+            });
             write_message(out);
         };
         // The line type is int in spdlog v1 and unsigned in v2.
@@ -3694,6 +3709,128 @@ private:
     /** @brief The bound fields and what is derived from them, shared by every copy and never null. */
     std::shared_ptr<const context_data> context_;
 };
+
+/** @brief Where and how the error handler made by make_error_handler reports. */
+struct error_report_options
+{
+    /** @brief Keys and time format of the report line. Its process and thread keys apply too. */
+    json_options format{};
+    /**
+     * @brief A sink to write the report to. It must not be a sink of the logger that fails. Null writes to stream. The
+     * sink writes the line with its own formatter, so install a json_formatter on it with install_json_formatter.
+     */
+    spdlog::sink_ptr sink;
+    /** @brief Where the line goes when sink is null. */
+    std::FILE *stream = stderr;
+    /** @brief Reports closer together than this are counted and dropped, as spdlog's default handler does. */
+    std::chrono::milliseconds min_interval{1000};
+};
+
+/** @brief Implementation details. Not part of the public API. */
+namespace detail
+{
+/** @brief What an error handler keeps, shared by every copy of the handler and guarded by its own mutex. */
+struct error_state
+{
+    /** @brief Creates the state for one handler. */
+    error_state(std::string logger_name, error_report_options o)
+        : formatter(o.format), name(std::move(logger_name)), options(std::move(o))
+    {
+    }
+
+    /** @brief Serializes reports from several threads. It is not an spdlog mutex, so a report never waits on spdlog. */
+    std::mutex mutex;
+    /** @brief Writes the line to a stream. */
+    json_formatter formatter;
+    /** @brief The logger name of the report. */
+    std::string name;
+    /** @brief The options the handler was made with. */
+    error_report_options options;
+    /** @brief When the last report was written. */
+    std::chrono::steady_clock::time_point last{};
+    /** @brief Whether a report was written, so the first one is never dropped. */
+    bool reported = false;
+    /** @brief The reports dropped since the last one that was written. */
+    std::size_t dropped = 0;
+};
+
+/** @brief Writes one report, or counts it as dropped when the last one was too recent. */
+inline void write_error_report(error_state &s, const std::string &what)
+{
+    const std::lock_guard<std::mutex> lock(s.mutex);
+    const auto now = std::chrono::steady_clock::now();
+    if (s.reported && now - s.last < s.options.min_interval)
+    {
+        ++s.dropped;
+        return;
+    }
+    s.reported = true;
+    s.last = now;
+    spdlog::memory_buf_t payload;
+    write_payload(payload, process_token(), KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
+        if (s.dropped > 0)
+        {
+            append(out, std::string_view{",\"dropped\":"});
+            append_int(out, s.dropped);
+        }
+    });
+    append_json_quoted(payload, what);
+    s.dropped = 0;
+    const spdlog::details::log_msg msg(
+        spdlog::string_view_t(s.name.data(), s.name.size()),
+        level::err,
+        spdlog::string_view_t(payload.data(), payload.size())
+    );
+    if (s.options.sink)
+    {
+        s.options.sink->log(msg);
+        return;
+    }
+    spdlog::memory_buf_t line;
+    s.formatter.format(msg, line);
+    if (line.size() == 0 || line.data()[line.size() - 1] != '\n')
+    {
+        line.push_back('\n');
+    }
+    std::fwrite(line.data(), 1, line.size(), s.options.stream);
+    std::fflush(s.options.stream);
+}
+} // namespace detail
+
+/**
+ * @brief Returns an spdlog error handler that writes each error as one JSON line, never through a logger, so it cannot
+ * recurse or deadlock when the failing sink fails again. It does not throw: if the report itself fails, it writes a
+ * short plain-text line to stderr. Install it with spdlog::logger::set_error_handler, or in the config of an spdlog v2
+ * async_sink.
+ *
+ * Reports closer together than min_interval are not written; the next one carries their number as dropped. The state
+ * lives in the returned handler and its copies, which share it, so there is no global state. A thread-pool worker or
+ * async_sink thread may call the handler, and a mutex of its own serializes them.
+ *
+ * @code
+ * logger.spdlog_logger()->set_error_handler(jspdlog::make_error_handler(logger.name()));
+ * // {"timestamp":"...","logger":"app","level":"error","dropped":3,"message":"Failed writing to file ..."}
+ * @endcode
+ */
+inline spdlog::err_handler make_error_handler(std::string logger_name, error_report_options options = {})
+{
+    const auto state = std::make_shared<detail::error_state>(std::move(logger_name), std::move(options));
+    return [state](const std::string &what) noexcept {
+#if JSPDLOG_HAS_EXCEPTIONS
+        try
+        {
+            detail::write_error_report(*state, what);
+        }
+        catch (...)
+        {
+            // Last resort: a failure while reporting must not leave the logging call, nor log again.
+            std::fputs("jspdlog: the error handler failed\n", stderr);
+        }
+#else
+        detail::write_error_report(*state, what);
+#endif
+    };
+}
 
 } // namespace jspdlog
 
