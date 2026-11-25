@@ -40,7 +40,7 @@ These decide every feature below.
    may improve ergonomics but must not be required.
 1. **No JSON library dependency.** `raw_json` is the bridge to one.
 
-## 3. Where we are (0.3.0)
+## 3. Where we are (0.4.0)
 
 The header ([include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h))
 provides `json_logger` (five call shapes per level plus `log(level, ...)`),
@@ -63,10 +63,14 @@ loggers and sinks jspdlog does not wrap. Structural limits that remain:
 - The options belong to each sink's formatter, so loggers sharing a sink share
   the options of the one created last.
 
-On `main` after 0.3.0, strings are valid UTF-8 by default: invalid bytes become
-U+FFFD, or `\u00XX` escapes, or pass, as the compile-time `JSPDLOG_UTF8_POLICY`
-says. Level names can be replaced and a numeric severity added, and the
-timestamp has four formats. The fuzz oracles parse every line.
+Since 0.4.0 strings are valid UTF-8 by default: invalid bytes become U+FFFD, or
+`\u00XX` escapes, or pass, as the compile-time `JSPDLOG_UTF8_POLICY` says. Level
+names can be replaced and a numeric severity added, and the timestamp has four
+formats. The fuzz oracles parse every line. An exception is a value, and every
+level takes one as its first argument and writes it with its causes under
+`json_options::error_key`. The call site can be written as three fields of the
+line, and `jspdlog::presets` fills `json_options` for Elastic ECS, Google Cloud
+Logging, Datadog and the OpenTelemetry log data model.
 
 ## 4. Architecture decision: custom `spdlog::formatter` (proposed for 0.2)
 
@@ -204,11 +208,13 @@ possible, so numbers, booleans and nested data stay filterable as such
   optional numeric severity field.
 - [x] **Timestamps.** RFC 3339 in ms (default), µs or ns precision, or epoch
   milliseconds.
-- [ ] **Schema presets** for common ingestion formats: Elastic ECS (`@timestamp`,
+- [x] **Schema presets** for common ingestion formats: Elastic ECS (`@timestamp`,
   `log.level`), OpenTelemetry log data model, GCP (`severity`), Datadog.
-  Presets are just pre-filled options structs.
-- [ ] **Exceptions.** `logger.error(ex, "...")` emits
-  `"error":{"type":...,"message":...}`.
+  Presets are just pre-filled options structs. The call site can be written as
+  top-level fields (`source_flat`), which ECS and OpenTelemetry need.
+- [x] **Exceptions.** `logger.error(ex, "...")` emits
+  `"error":{"type":...,"message":...}`, with the nested causes under `cause`.
+  An exception is also a value type.
 
 ### 0.5.0: ergonomics
 

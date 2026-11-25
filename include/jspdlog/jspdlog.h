@@ -35,7 +35,7 @@
 /** @brief Major version of jspdlog. */
 #define JSPDLOG_VERSION_MAJOR 0
 /** @brief Minor version of jspdlog. */
-#define JSPDLOG_VERSION_MINOR 3
+#define JSPDLOG_VERSION_MINOR 4
 /** @brief Patch version of jspdlog. */
 #define JSPDLOG_VERSION_PATCH 0
 /** @brief The version as one number, major * 10000 + minor * 100 + patch, for #if comparisons. */
@@ -71,8 +71,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -84,12 +86,20 @@
 #include <string_view>
 #include <tuple>
 #include <type_traits>
+#include <typeinfo>
 #include <utility>
 #include <variant>
 #include <vector>
 
 #ifndef _WIN32
 #include <pthread.h>
+#endif
+
+#if defined(__GNUC__) && __has_include(<cxxabi.h>)
+#include <cxxabi.h>
+#define JSPDLOG_DETAIL_HAS_CXXABI 1
+#else
+#define JSPDLOG_DETAIL_HAS_CXXABI 0
 #endif
 
 #ifndef JSPDLOG_ASSERT
@@ -100,6 +110,20 @@
  * NDEBUG the default expands to nothing and the condition is not evaluated.
  */
 #define JSPDLOG_ASSERT(cond, msg) assert((cond) && (msg))
+#endif
+
+#if (defined(__cpp_exceptions) || defined(_CPPUNWIND)) && !defined(SPDLOG_NO_EXCEPTIONS)
+/** @brief 1 when the code is built with C++ exceptions, so a nested exception can be inspected, 0 otherwise. */
+#define JSPDLOG_HAS_EXCEPTIONS 1
+#else
+#define JSPDLOG_HAS_EXCEPTIONS 0
+#endif
+
+#if defined(__cpp_rtti) || defined(__GXX_RTTI) || defined(_CPPRTTI)
+/** @brief 1 when run-time type information is available, so the dynamic type of an exception can be named. */
+#define JSPDLOG_HAS_RTTI 1
+#else
+#define JSPDLOG_HAS_RTTI 0
 #endif
 
 // The policy values are not 0: the preprocessor reads an unknown name such as escape as 0, and the check below must
@@ -207,13 +231,31 @@ struct json_options
     /** @brief Key of the thread id, written as a number. */
     std::optional<std::string> thread_key = std::string{"thread"};
     /**
-     * @brief Key of the call site, written as an object with file (the base name), line and function. Off by default.
-     * json_logger calls record their call site. Lines without one, such as those logged through a plain spdlog macro
-     * without source information, have no such field.
+     * @brief Key of the call site, written as an object with the file (the base name), line and function. Off by
+     * default. json_logger calls record their call site. Lines without one, such as those logged through a plain spdlog
+     * macro without source information, have no such field. With source_flat, setting it only switches the call site
+     * on and its text is not used.
      */
     std::optional<std::string> source_key;
+    /** @brief Key of the file inside the call site object, or of the top-level field when source_flat is set. */
+    std::string source_file_key = "file";
+    /** @brief Key of the line inside the call site object, or of the top-level field when source_flat is set. */
+    std::string source_line_key = "line";
+    /** @brief Key of the function inside the call site object, or of the top-level field when source_flat is set. */
+    std::string source_function_key = "function";
+    /**
+     * @brief Write the call site as three fields of the line itself, under source_file_key, source_line_key and
+     * source_function_key, instead of an object under source_key. Schemas such as ECS and OpenTelemetry want that.
+     */
+    bool source_flat = false;
     /** @brief Key of the message. It is not optional, because a message from outside jspdlog needs a place to go. */
     std::string message_key = "message";
+    /** @brief Key of the exception passed first to a logging call. Used only by those call forms. */
+    std::string error_key = "error";
+    /** @brief Key of the exception's type name inside its object. Used only by the exception call forms. */
+    std::string error_type_key = "type";
+    /** @brief Key of the exception's message inside its object. Used only by the exception call forms. */
+    std::string error_message_key = "message";
 
     /** @brief How the timestamp is written. */
     timestamp_format timestamp_style = timestamp_format::rfc3339_millis;
@@ -706,7 +748,8 @@ class json_logger;
 /**
  * @brief An spdlog formatter that renders every message as one JSON object.
  *
- * The line holds the header fields chosen in json_options, the call site if source_key is set, the fields of a
+ * The line holds the header fields chosen in json_options, the call site if source_key is set (as an object, or as
+ * three fields with source_flat), the fields of a
  * json_logger call and the message. A payload written by a json_logger is split into fields and message. Any other
  * payload is escaped whole into the message field, so the line is valid JSON whoever logged it.
  *
@@ -777,8 +820,23 @@ public:
         }
         if (opts_.source_key && !msg.source.empty())
         {
-            key(source_key_);
-            append_source_(msg.source, dest);
+            if (opts_.source_flat)
+            {
+                const std::string_view file = source_file_(msg.source);
+                key(source_file_key_);
+                detail::append_json_quoted(dest, file);
+                key(source_line_key_);
+                detail::append_int(dest, msg.source.line);
+                key(source_function_key_);
+                detail::append_json_quoted(
+                    dest, std::string_view{msg.source.funcname != nullptr ? msg.source.funcname : ""}
+                );
+            }
+            else
+            {
+                key(source_key_);
+                append_source_(msg.source, dest);
+            }
         }
 
         const std::string_view payload = detail::view(msg.payload);
@@ -833,6 +891,9 @@ private:
         process_key_ = prepare(opts_.process_key);
         thread_key_ = prepare(opts_.thread_key);
         source_key_ = prepare(opts_.source_key);
+        source_file_key_ = quote_key_(opts_.source_file_key);
+        source_line_key_ = quote_key_(opts_.source_line_key);
+        source_function_key_ = quote_key_(opts_.source_function_key);
         for (std::size_t i = 0; i < LEVEL_COUNT; ++i)
         {
             const std::string_view name = opts_.level_names
@@ -965,23 +1026,32 @@ private:
         detail::append(dest, zone_);
     }
 
-    /**
-     * @brief Appends the call site as an object, with the base name of the file.
-     *
-     * Nothing is cached, because a file name pointer may be reused for different text once a dynamic call site ends.
-     */
-    static void append_source_(const spdlog::source_loc &src, spdlog::memory_buf_t &dest)
+    /** @brief The base name of the file of a call site. */
+    static std::string_view source_file_(const spdlog::source_loc &src) noexcept
     {
         std::string_view file{src.filename != nullptr ? src.filename : ""};
         if (const auto slash = file.find_last_of("/\\"); slash != std::string_view::npos)
         {
             file.remove_prefix(slash + 1);
         }
-        detail::append(dest, std::string_view{R"({"file":)"});
-        detail::append_json_quoted(dest, file);
-        detail::append(dest, std::string_view{R"(,"line":)"});
+        return file;
+    }
+
+    /**
+     * @brief Appends the call site as an object, with the base name of the file.
+     *
+     * Nothing is cached, because a file name pointer may be reused for different text once a dynamic call site ends.
+     */
+    void append_source_(const spdlog::source_loc &src, spdlog::memory_buf_t &dest) const
+    {
+        dest.push_back('{');
+        detail::append(dest, source_file_key_);
+        detail::append_json_quoted(dest, source_file_(src));
+        dest.push_back(',');
+        detail::append(dest, source_line_key_);
         detail::append_int(dest, src.line);
-        detail::append(dest, std::string_view{R"(,"function":)"});
+        dest.push_back(',');
+        detail::append(dest, source_function_key_);
         detail::append_json_quoted(dest, std::string_view{src.funcname != nullptr ? src.funcname : ""});
         dest.push_back('}');
     }
@@ -996,6 +1066,8 @@ private:
     std::string message_key_;
     /** @brief The header keys, quoted and followed by a colon. Empty for keys that are left out. */
     std::string timestamp_key_, logger_key_, level_key_, severity_key_, process_key_, thread_key_, source_key_;
+    /** @brief The call site keys, quoted and followed by a colon. */
+    std::string source_file_key_, source_line_key_, source_function_key_;
     /** @brief The level names as quoted JSON strings, indexed by level. */
     std::array<std::string, LEVEL_COUNT> level_texts_;
     /** @brief The severity numbers in decimal, indexed by level. */
@@ -1024,6 +1096,117 @@ inline void install_json_formatter(spdlog::sinks::sink &sink, const json_options
 {
     sink.set_formatter(std::make_unique<json_formatter>(options));
 }
+
+/**
+ * @brief Ready-made json_options for the field names of common log ingestion schemas.
+ *
+ * A preset is a function that returns a filled json_options, so change any member afterwards. Each one leaves the call
+ * site off: set source_key to any text, or to the key the schema names, to turn it on. Exceptions logged through the
+ * exception call forms go under the key the schema uses for them. Bind schema fields that are not per call, such as
+ * ecs.version, with json_logger::with.
+ *
+ * @code
+ * auto options = jspdlog::presets::ecs();
+ * options.source_key = "source"; // also write the call site
+ * jspdlog::json_logger logger("app", sink, options);
+ * @endcode
+ */
+namespace presets
+{
+
+/** @brief The table of level names of json_options, from trace to off. */
+using level_name_table = std::array<std::string, jspdlog::detail::LEVEL_COUNT>;
+
+/**
+ * @brief Elastic Common Schema: @timestamp in UTC, log.level, log.logger, process.pid, process.thread.id, the call
+ * site as log.origin.file.name, log.origin.file.line and log.origin.function, and exceptions under error with type and
+ * message, which are error.type and error.message once Elasticsearch expands the dotted keys. ECS requires ecs.version
+ * in every event; bind it with json_logger::with, since only you know which version your index templates use.
+ */
+inline json_options ecs()
+{
+    json_options o;
+    o.timestamp_key = "@timestamp";
+    o.time_type = spdlog::pattern_time_type::utc;
+    o.level_key = "log.level";
+    o.level_names = level_name_table{{"trace", "debug", "info", "warn", "error", "critical", "off"}};
+    o.logger_key = "log.logger";
+    o.process_key = "process.pid";
+    o.thread_key = "process.thread.id";
+    o.source_flat = true;
+    o.source_file_key = "log.origin.file.name";
+    o.source_line_key = "log.origin.file.line";
+    o.source_function_key = "log.origin.function";
+    o.eol = "\n";
+    return o;
+}
+
+/**
+ * @brief Google Cloud Logging structured logs, as read from stdout by Cloud Run, GKE and the Ops Agent: severity, time
+ * as an RFC 3339 string with nanoseconds in UTC, and the message. The logger, process and thread fields stay, as
+ * fields of the JSON payload. The call site is off. To write it where Cloud Logging
+ * looks, set source_key to logging.googleapis.com/sourceLocation: its file, line and function members already have
+ * the names of that field.
+ */
+inline json_options gcp()
+{
+    json_options o;
+    o.timestamp_key = "time";
+    o.time_type = spdlog::pattern_time_type::utc;
+    o.timestamp_style = timestamp_format::rfc3339_nanos;
+    o.level_key = "severity";
+    o.level_names = level_name_table{{"DEBUG", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "DEFAULT"}};
+    o.eol = "\n";
+    return o;
+}
+
+/**
+ * @brief Datadog log attributes: the status that Datadog remaps, the date as epoch milliseconds, logger.name and
+ * logger.thread_name, and exceptions under error with kind and message.
+ */
+inline json_options datadog()
+{
+    json_options o;
+    o.timestamp_key = "timestamp";
+    o.timestamp_style = timestamp_format::epoch_millis;
+    o.level_key = "status";
+    o.level_names = level_name_table{{"trace", "debug", "info", "warn", "error", "critical", "off"}};
+    o.logger_key = "logger.name";
+    o.thread_key = "logger.thread_name";
+    o.process_key = std::nullopt;
+    o.error_type_key = "kind";
+    o.eol = "\n";
+    return o;
+}
+
+/**
+ * @brief The OpenTelemetry log data model as flat JSON, for a collector's filelog receiver: timestamp, severity_text,
+ * severity_number and body, with the call site as code.file.path (the base name), code.line.number and
+ * code.function.name, process.pid, thread.id and exceptions under exception with type and message.
+ */
+inline json_options otel()
+{
+    json_options o;
+    o.timestamp_key = "timestamp";
+    o.time_type = spdlog::pattern_time_type::utc;
+    o.timestamp_style = timestamp_format::rfc3339_nanos;
+    o.level_key = "severity_text";
+    o.level_names = level_name_table{{"TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "OFF"}};
+    o.severity_key = "severity_number";
+    o.message_key = "body";
+    o.logger_key = "logger";
+    o.process_key = "process.pid";
+    o.thread_key = "thread.id";
+    o.source_flat = true;
+    o.source_file_key = "code.file.path";
+    o.source_line_key = "code.line.number";
+    o.source_function_key = "code.function.name";
+    o.error_key = "exception";
+    o.eol = "\n";
+    return o;
+}
+
+} // namespace presets
 
 class fields;
 
@@ -1072,7 +1255,9 @@ struct serializer
  * - Maps whose key converts to std::string_view: objects, in the iteration order of the map. A std::multimap can write
  *   a key twice.
  * - std::pair and std::tuple, and maps with other keys (as an array of [key, value] pairs): arrays.
- * - Your own types, through jspdlog_serialize or serializer.
+ * - Exceptions (anything derived from std::exception) and std::exception_ptr: an object with the type name and the
+ *   message, and the nested causes as a chain under cause. A null std::exception_ptr is null.
+ * - Your own types, through jspdlog_serialize or serializer. They win over the exception form.
  *
  * Everything is recursive, so a std::map of std::optional of std::vector of your own type works. Wide characters,
  * pointers other than C strings and types without a JSON form are rejected at compile time. std::filesystem::path is
@@ -1852,6 +2037,168 @@ std::string_view char_array_view(const A &array) noexcept
     return std::string_view{std::begin(array), static_cast<std::size_t>(end - std::begin(array))};
 }
 
+/** @brief The keys of an exception object. The value-type form uses the defaults; the call forms use json_options. */
+struct exception_keys
+{
+    /** @brief Key of the type name. */
+    std::string_view type = "type";
+    /** @brief Key of the message. */
+    std::string_view message = "message";
+};
+
+/** @brief How many nested causes are written at most. Deeper ones are left out. */
+inline constexpr int MAX_EXCEPTION_DEPTH = 8;
+
+/** @brief Removes a leading class or struct, which MSVC writes in front of a type name. */
+inline void strip_class_keyword(std::string &name)
+{
+    for (const std::string_view keyword : {std::string_view{"class "}, std::string_view{"struct "}})
+    {
+        if (name.compare(0, keyword.size(), keyword) == 0)
+        {
+            name.erase(0, keyword.size());
+            return;
+        }
+    }
+}
+
+/**
+ * @brief Makes a type name the same on every compiler and standard library: no class or struct keyword, no libc++
+ * inline namespace, and for the type that std::throw_with_nested throws, the user's type instead of the library's
+ * wrapper template, such as std::_Nested_exception of T on libstdc++ and MSVC. A name that does not look like such a
+ * wrapper stays as it is.
+ */
+inline std::string normalize_type_name(std::string name, bool nested)
+{
+    static constexpr std::string_view LIBCXX_NAMESPACE = "std::__1::";
+    for (std::size_t at = name.find(LIBCXX_NAMESPACE); at != std::string::npos; at = name.find(LIBCXX_NAMESPACE, at))
+    {
+        name.replace(at, LIBCXX_NAMESPACE.size(), "std::");
+    }
+    strip_class_keyword(name);
+    static constexpr std::string_view STD_NAMESPACE = "std::";
+    if (nested && name.compare(0, STD_NAMESPACE.size(), STD_NAMESPACE) == 0)
+    {
+        const std::size_t open = name.find('<');
+        const std::size_t close = name.rfind('>');
+        if (open != std::string::npos && close != std::string::npos && close > open + 1)
+        {
+            name = name.substr(open + 1, close - open - 1);
+            strip_class_keyword(name);
+        }
+    }
+    return name;
+}
+
+/** @brief The name of the dynamic type of an exception, demangled where the compiler mangles it. */
+// NOLINTNEXTLINE(modernize-use-string-view): only the build without RTTI returns a literal; the others build a name
+inline std::string exception_type_name(const std::exception &ex)
+{
+#if JSPDLOG_HAS_RTTI
+    const char *raw = typeid(ex).name();
+#if JSPDLOG_DETAIL_HAS_CXXABI
+    int status = 0;
+    const std::unique_ptr<char, void (*)(void *)> demangled(
+        abi::__cxa_demangle(raw, nullptr, nullptr, &status), &std::free
+    );
+    std::string name = status == 0 && demangled ? demangled.get() : raw;
+#else
+    std::string name = raw; // MSVC: "class std::runtime_error"
+#endif
+    return normalize_type_name(std::move(name), dynamic_cast<const std::nested_exception *>(&ex) != nullptr);
+#else
+    (void)ex;
+    return "std::exception"; // no RTTI: the static type is all there is
+#endif
+}
+
+/**
+ * @brief Writes an exception as an object with its type and message, and its nested causes as a chain.
+ *
+ * A std::nested_exception that holds no cause, such as one thrown by std::throw_with_nested outside a handler, has no
+ * cause member: std::rethrow_if_nested would call std::terminate for it.
+ */
+// NOLINTNEXTLINE(misc-no-recursion): the recursion stops at MAX_EXCEPTION_DEPTH
+inline void write_exception(json_writer &w, const std::exception &ex, const exception_keys &keys, int depth = 0)
+{
+    w.begin_object();
+    w.key(keys.type);
+    writer_access::string(w, exception_type_name(ex));
+    const char *what = ex.what();
+    w.key(keys.message);
+    writer_access::string(w, std::string_view{what != nullptr ? what : ""});
+#if JSPDLOG_HAS_EXCEPTIONS && JSPDLOG_HAS_RTTI
+    const auto *nested = dynamic_cast<const std::nested_exception *>(&ex);
+    if (depth < MAX_EXCEPTION_DEPTH && nested != nullptr && nested->nested_ptr() != nullptr)
+    {
+        try
+        {
+            nested->rethrow_nested();
+        }
+        catch (const std::exception &cause)
+        {
+            w.key("cause");
+            write_exception(w, cause, keys, depth + 1);
+        }
+        catch (...)
+        {
+            w.key("cause");
+            w.begin_object();
+            w.key(keys.type);
+            writer_access::string(w, "unknown");
+            w.end_object();
+        }
+    }
+#else
+    (void)depth;
+#endif
+    w.end_object();
+}
+
+/** @brief Writes the exception behind a pointer like write_exception, or null for a null pointer. */
+inline void write_exception_ptr(json_writer &w, const std::exception_ptr &p, const exception_keys &keys)
+{
+    if (!p)
+    {
+        writer_access::scalar(w, "null");
+        return;
+    }
+#if JSPDLOG_HAS_EXCEPTIONS
+    try
+    {
+        std::rethrow_exception(p);
+    }
+    catch (const std::exception &ex)
+    {
+        write_exception(w, ex, keys);
+        return;
+    }
+    catch (...) // NOLINT(bugprone-empty-catch): an exception of another type is written as unknown below
+    {
+    }
+#endif
+    w.begin_object();
+    w.key(keys.type);
+    writer_access::string(w, "unknown");
+    w.end_object();
+}
+
+/** @brief The exception of an exception call form and the keys to write it with. Lives on the caller's stack. */
+struct exception_arg
+{
+    /** @brief The exception. */
+    const std::exception *ex = nullptr;
+    /** @brief The keys of its object. */
+    exception_keys keys;
+};
+
+/** @brief Writes the exception_arg behind a pointer. It has the type of a per-call reference's writer function. */
+inline void write_exception_arg(json_writer &w, const void *p)
+{
+    const auto &arg = *static_cast<const exception_arg *>(p);
+    write_exception(w, *arg.ex, arg.keys);
+}
+
 /**
  * @brief Whether write_value has a branch for the type, that is, whether it has a JSON form. Mirrors the branches of
  * write_value, so a type is lazy exactly when none of them takes it.
@@ -1861,6 +2208,7 @@ inline constexpr bool has_json_form_v =
     std::is_arithmetic_v<T> || std::is_enum_v<T> || std::is_pointer_v<T> || is_char_array_v<T> ||
     std::is_same_v<T, std::nullptr_t> || std::is_same_v<T, std::monostate> || std::is_same_v<T, raw_json> ||
     std::is_same_v<T, fields> || has_serializer_v<T> || has_adl_serialize_v<T> ||
+    std::is_base_of_v<std::exception, T> || std::is_same_v<T, std::exception_ptr> ||
     std::is_convertible_v<const T &, std::string_view> || is_optional_v<T> || is_variant_v<T> || is_duration_v<T> ||
     is_time_point_v<T> || is_tuple_like_v<T> || is_string_keyed_map_v<T> || is_range_v<T>;
 
@@ -1943,6 +2291,14 @@ void write_value(json_writer &w, const T &v)
     else if constexpr (has_adl_serialize_v<value_type>)
     {
         serialize_adl::call(w, v);
+    }
+    else if constexpr (std::is_base_of_v<std::exception, value_type>)
+    {
+        write_exception(w, v, exception_keys{});
+    }
+    else if constexpr (std::is_same_v<value_type, std::exception_ptr>)
+    {
+        write_exception_ptr(w, v, exception_keys{});
     }
     else if constexpr (std::is_convertible_v<const value_type &, std::string_view>)
     {
@@ -2035,7 +2391,7 @@ public:
     /** @brief Creates an empty list. */
     reserved_keys() = default;
 
-    /** @brief Collects the enabled header keys, the source key and the message key. */
+    /** @brief Collects the enabled header keys, the call site keys and the message key. */
     explicit reserved_keys(const json_options &options)
     {
         const auto add = [this](const std::optional<std::string> &key) {
@@ -2050,7 +2406,16 @@ public:
         add(options.severity_key);
         add(options.process_key);
         add(options.thread_key);
-        add(options.source_key);
+        if (options.source_key && options.source_flat)
+        {
+            keys_.push_back(options.source_file_key);
+            keys_.push_back(options.source_line_key);
+            keys_.push_back(options.source_function_key);
+        }
+        else
+        {
+            add(options.source_key);
+        }
         keys_.push_back(options.message_key);
     }
 
@@ -2136,14 +2501,24 @@ template <typename S>
 using if_runtime_string = std::enable_if_t<is_runtime_string_v<S>, int>;
 
 /**
+ * @brief Enables an overload for exceptions only. The exception parameter is a template, not a const std::exception
+ * reference, because the standard library of MSVC gives std::exception a constructor that takes a const char pointer
+ * and an int, so a braced list such as {"k", 1} would convert to one.
+ */
+template <typename E>
+using if_exception = std::enable_if_t<std::is_base_of_v<std::exception, E>, int>;
+
+/**
  * @brief Whether a single argument is neither a string, a format string nor a fields object, so it cannot be a message.
  *
  * A fields object is excluded because a call form with fields converts it to the per-call parameter, and a template
- * that matches the type exactly would win over that conversion.
+ * that matches the type exactly would win over that conversion. An exception is excluded for the same reason against
+ * the exception call forms, which take a const std::exception reference.
  */
 template <typename T>
-inline constexpr bool is_rejected_message_v = !is_runtime_string_v<T> && !std::is_array_v<T> &&
-                                              !std::is_same_v<T, runtime_format_string> && !std::is_same_v<T, fields>;
+inline constexpr bool is_rejected_message_v =
+    !is_runtime_string_v<T> && !std::is_array_v<T> && !std::is_same_v<T, runtime_format_string> &&
+    !std::is_same_v<T, fields> && !std::is_base_of_v<std::exception, T>;
 
 /**
  * @brief Views a runtime string as a std::string_view. A null C string is an empty message, and a char array ends at
@@ -2222,52 +2597,8 @@ public:
     /** @brief The key of a reference. */
     [[nodiscard]] std::string_view key(std::size_t i) const noexcept { return refs_[i].key; }
 
-    /** @brief The index of the last reference with this key, or size() when there is none. */
-    [[nodiscard]] std::size_t last_with_key(std::string_view k) const noexcept
-    {
-        for (std::size_t i = size_; i > 0; --i)
-        {
-            if (refs_[i - 1].key == k)
-            {
-                return i - 1;
-            }
-        }
-        return size_;
-    }
-
-    /** @brief Whether a reference before i has the same key as reference i. */
-    [[nodiscard]] bool repeats_earlier(std::size_t i) const noexcept
-    {
-        for (std::size_t j = 0; j < i; ++j)
-        {
-            if (refs_[j].key == refs_[i].key)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /**
-     * @brief Appends a reference as a field: a comma, the quoted key, a colon and the serialized value. This runs the
-     * serializer of the value, so it throws what the serializer throws.
-     */
-    void append_to(std::string &out, std::size_t i) const
-    {
-        const ref &r = refs_[i];
-        out.push_back(',');
-        append_json_quoted(out, r.key);
-        out.push_back(':');
-        json_writer w(out);
-        r.write(w, r.value);
-        JSPDLOG_ASSERT(
-            writer_access::complete(w), "jspdlog: a serializer left an object or array open, or wrote no value"
-        );
-    }
-
-private:
-    /**
-     * @brief One key and value of a braced list.
+     * @brief One key and value of a braced list, or the exception of an exception call.
      *
      * The members have no initializers, so refs_ stays uninitialized and a call writes only the entries it uses.
      */
@@ -2282,6 +2613,26 @@ private:
         void (*write)(json_writer &, const void *);
     };
 
+    /** @brief The reference at index i. */
+    [[nodiscard]] const ref &at(std::size_t i) const noexcept { return refs_[i]; }
+
+    /**
+     * @brief Appends a reference as a field: a comma, the quoted key, a colon and the serialized value. This runs the
+     * serializer of the value, so it throws what the serializer throws.
+     */
+    static void append_ref(std::string &out, const ref &r)
+    {
+        out.push_back(',');
+        append_json_quoted(out, r.key);
+        out.push_back(':');
+        json_writer w(out);
+        r.write(w, r.value);
+        JSPDLOG_ASSERT(
+            writer_access::complete(w), "jspdlog: a serializer left an object or array open, or wrote no value"
+        );
+    }
+
+private:
 #ifdef _MSC_VER
 // A lazy value that always throws makes the code after the call unreachable in this function, which C4702 reports.
 #pragma warning(push)
@@ -2404,6 +2755,18 @@ using format_here_t = basic_format_here<typename detail::type_identity<Args>::ty
  * logger.info({"plan", [&] { return explain(q); }}, "planned");  // a lazy value
  * @endcode
  *
+ * Each level also has six call forms that take a std::exception first, with the same endings: no message, a message
+ * or a format string, and each with fields too. They write the exception as the first per-call field, under
+ * json_options::error_key, as an object with its type name and message, and its nested causes under cause. The
+ * exception is written only when the line is, so a call at a disabled level computes nothing. A per-call field with
+ * the error key is a mistake that debug builds report through JSPDLOG_ASSERT; a bound field with that key is replaced
+ * by the exception.
+ *
+ * @code
+ * try { connect(); }
+ * catch (const std::exception &ex) { logger.error(ex, {"host", host}, "connect failed"); }
+ * @endcode
+ *
  * A braced list is kept as references and serialized only when the line is written, so a call at a disabled level
  * serializes nothing and a braced list holds at most 16 pairs. A value in it may be a callable that takes no
  * arguments, which runs only when the line is written, in the calling thread, and whose result is the value. That
@@ -2506,35 +2869,76 @@ public:
     /** @brief Writes a line with fields only, without a message. */
     void log(level lvl, const detail::call_fields &f, detail::site where = detail::site()) const
     {
-        log_fields_(lvl, f, where);
+        log_fields_(lvl, nullptr, f, where);
     }
 
     /** @brief Writes a formatted message. The format string is checked at compile time. */
     template <typename... Args>
     void log(level lvl, format_here_t<Args...> fmt, Args &&...args) const
     {
-        log_fmt_(lvl, empty_call_fields_(), fmt, std::forward<Args>(args)...);
+        log_fmt_(lvl, nullptr, empty_call_fields_(), fmt, std::forward<Args>(args)...);
     }
 
     /** @brief Writes a runtime string as the message. */
     template <typename S, detail::if_runtime_string<S> = 0>
     void log(level lvl, const S &msg, detail::site where = detail::site()) const
     {
-        log_str_(lvl, empty_call_fields_(), detail::message_view(msg), where);
+        log_str_(lvl, nullptr, empty_call_fields_(), detail::message_view(msg), where);
     }
 
     /** @brief Writes fields and a formatted message. */
     template <typename... Args>
     void log(level lvl, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const
     {
-        log_fmt_(lvl, f, fmt, std::forward<Args>(args)...);
+        log_fmt_(lvl, nullptr, f, fmt, std::forward<Args>(args)...);
     }
 
     /** @brief Writes fields and a runtime string as the message. */
     template <typename S, detail::if_runtime_string<S> = 0>
     void log(level lvl, const detail::call_fields &f, const S &msg, detail::site where = detail::site()) const
     {
-        log_str_(lvl, f, detail::message_view(msg), where);
+        log_str_(lvl, nullptr, f, detail::message_view(msg), where);
+    }
+
+    /** @brief Writes an exception and a formatted message. */
+    template <typename E, detail::if_exception<E> = 0, typename... Args>
+    void log(level lvl, const E &ex, format_here_t<Args...> fmt, Args &&...args) const
+    {
+        log_fmt_(lvl, &ex, empty_call_fields_(), fmt, std::forward<Args>(args)...);
+    }
+
+    /** @brief Writes an exception and a runtime string as the message. */
+    template <typename E, typename S, detail::if_exception<E> = 0, detail::if_runtime_string<S> = 0>
+    void log(level lvl, const E &ex, const S &msg, detail::site where = detail::site()) const
+    {
+        log_str_(lvl, &ex, empty_call_fields_(), detail::message_view(msg), where);
+    }
+
+    /**
+     * @brief Writes an exception under json_options::error_key, with fields if given and without a message. The fields
+     * have a default and are not a separate overload, so a braced list cannot be taken for the call site.
+     */
+    template <typename E, detail::if_exception<E> = 0>
+    void log(
+        level lvl, const E &ex, const detail::call_fields &f = empty_call_fields_(), detail::site where = detail::site()
+    ) const
+    {
+        log_fields_(lvl, &ex, f, where);
+    }
+
+    /** @brief Writes an exception, fields and a formatted message. */
+    template <typename E, detail::if_exception<E> = 0, typename... Args>
+    void log(level lvl, const E &ex, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const
+    {
+        log_fmt_(lvl, &ex, f, fmt, std::forward<Args>(args)...);
+    }
+
+    /** @brief Writes an exception, fields and a runtime string as the message. */
+    template <typename E, typename S, detail::if_exception<E> = 0, detail::if_runtime_string<S> = 0>
+    void
+    log(level lvl, const E &ex, const detail::call_fields &f, const S &msg, detail::site where = detail::site()) const
+    {
+        log_str_(lvl, &ex, f, detail::message_view(msg), where);
     }
 
     /** @brief Rejects a single argument that is not a string. Put typed values in fields. */
@@ -2546,26 +2950,52 @@ public:
     template <typename... Args>                                                                                        \
     void name(format_here_t<Args...> fmt, Args &&...args) const                                                        \
     {                                                                                                                  \
-        log_fmt_(lvl, empty_call_fields_(), fmt, std::forward<Args>(args)...);                                         \
+        log_fmt_(lvl, nullptr, empty_call_fields_(), fmt, std::forward<Args>(args)...);                                \
     }                                                                                                                  \
     template <typename S, detail::if_runtime_string<S> = 0>                                                            \
     void name(const S &msg, detail::site where = detail::site()) const                                                 \
     {                                                                                                                  \
-        log_str_(lvl, empty_call_fields_(), detail::message_view(msg), where);                                         \
+        log_str_(lvl, nullptr, empty_call_fields_(), detail::message_view(msg), where);                                \
     }                                                                                                                  \
     void name(const detail::call_fields &f, detail::site where = detail::site()) const                                 \
     {                                                                                                                  \
-        log_fields_(lvl, f, where);                                                                                    \
+        log_fields_(lvl, nullptr, f, where);                                                                           \
     }                                                                                                                  \
     template <typename... Args>                                                                                        \
     void name(const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const                          \
     {                                                                                                                  \
-        log_fmt_(lvl, f, fmt, std::forward<Args>(args)...);                                                            \
+        log_fmt_(lvl, nullptr, f, fmt, std::forward<Args>(args)...);                                                   \
     }                                                                                                                  \
     template <typename S, detail::if_runtime_string<S> = 0>                                                            \
     void name(const detail::call_fields &f, const S &msg, detail::site where = detail::site()) const                   \
     {                                                                                                                  \
-        log_str_(lvl, f, detail::message_view(msg), where);                                                            \
+        log_str_(lvl, nullptr, f, detail::message_view(msg), where);                                                   \
+    }                                                                                                                  \
+    template <typename E, detail::if_exception<E> = 0, typename... Args>                                               \
+    void name(const E &ex, format_here_t<Args...> fmt, Args &&...args) const                                           \
+    {                                                                                                                  \
+        log_fmt_(lvl, &ex, empty_call_fields_(), fmt, std::forward<Args>(args)...);                                    \
+    }                                                                                                                  \
+    template <typename E, typename S, detail::if_exception<E> = 0, detail::if_runtime_string<S> = 0>                   \
+    void name(const E &ex, const S &msg, detail::site where = detail::site()) const                                    \
+    {                                                                                                                  \
+        log_str_(lvl, &ex, empty_call_fields_(), detail::message_view(msg), where);                                    \
+    }                                                                                                                  \
+    template <typename E, detail::if_exception<E> = 0>                                                                 \
+    void name(const E &ex, const detail::call_fields &f = empty_call_fields_(), detail::site where = detail::site())   \
+        const                                                                                                          \
+    {                                                                                                                  \
+        log_fields_(lvl, &ex, f, where);                                                                               \
+    }                                                                                                                  \
+    template <typename E, detail::if_exception<E> = 0, typename... Args>                                               \
+    void name(const E &ex, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const             \
+    {                                                                                                                  \
+        log_fmt_(lvl, &ex, f, fmt, std::forward<Args>(args)...);                                                       \
+    }                                                                                                                  \
+    template <typename E, typename S, detail::if_exception<E> = 0, detail::if_runtime_string<S> = 0>                   \
+    void name(const E &ex, const detail::call_fields &f, const S &msg, detail::site where = detail::site()) const      \
+    {                                                                                                                  \
+        log_str_(lvl, &ex, f, detail::message_view(msg), where);                                                       \
     }                                                                                                                  \
     template <typename T, std::enable_if_t<detail::is_rejected_message_v<T>, int> = 0>                                 \
     void name(const T &) const = delete;
@@ -2623,6 +3053,16 @@ private:
         detail::payload_token token{};
         /** @brief The keys the logger writes itself, for the debug check. */
         detail::reserved_keys reserved;
+        /** @brief Where an exception of an exception call form goes: its key and the keys inside its object. */
+        struct error_keys_data
+        {
+            /** @brief Key of the exception object. */
+            std::string key;
+            /** @brief Key of the type name inside it. */
+            std::string type;
+            /** @brief Key of the message inside it. */
+            std::string message;
+        } errors;
     };
 
     /** @brief Installs a json_formatter on a logger that is known not to be null. */
@@ -2638,6 +3078,7 @@ private:
         auto ctx = std::make_shared<context_data>();
         ctx->token = detail::process_token();
         ctx->reserved = detail::reserved_keys(options);
+        ctx->errors = {options.error_key, options.error_type_key, options.error_message_key};
         return ctx;
     }
 
@@ -2686,21 +3127,23 @@ private:
     }
 
     /** @brief Writes a line with fields only. */
-    void log_fields_(level lvl, const detail::call_fields &f, detail::site where) const
+    void log_fields_(level lvl, const std::exception *ex, const detail::call_fields &f, detail::site where) const
     {
         if (should_log(lvl))
         {
-            emit_(lvl, f, where, detail::KIND_FIELDS, [](spdlog::memory_buf_t & /*out*/) {});
+            emit_(lvl, ex, f, where, detail::KIND_FIELDS, [](spdlog::memory_buf_t & /*out*/) {});
         }
     }
 
     /** @brief Writes fields and a message formatted from a format string and its arguments. */
     template <typename... Args>
-    void log_fmt_(level lvl, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const
+    void log_fmt_(
+        level lvl, const std::exception *ex, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args
+    ) const
     {
         if (should_log(lvl))
         {
-            emit_(lvl, f, fmt.where(), detail::KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
+            emit_(lvl, ex, f, fmt.where(), detail::KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
                 spdlog::memory_buf_t msg;
                 spdlog::fmt_lib::format_to(std::back_inserter(msg), fmt.format(), std::forward<Args>(args)...);
                 append_message_(out, msg);
@@ -2709,81 +3152,114 @@ private:
     }
 
     /** @brief Writes fields and a message taken as it is. */
-    void log_str_(level lvl, const detail::call_fields &f, std::string_view msg, detail::site where) const
+    void log_str_(
+        level lvl, const std::exception *ex, const detail::call_fields &f, std::string_view msg, detail::site where
+    ) const
     {
         if (should_log(lvl))
         {
-            emit_(lvl, f, where, detail::KIND_MESSAGE, [msg](spdlog::memory_buf_t &out) {
+            emit_(lvl, ex, f, where, detail::KIND_MESSAGE, [msg](spdlog::memory_buf_t &out) {
                 detail::append_json_quoted(out, msg);
             });
         }
     }
 
-    /** @brief Appends the bound fields and the fields of a fields object, which are already serialized. */
-    void append_named_(spdlog::memory_buf_t &out, const fields &props) const
+    /**
+     * @brief Appends the bound fields and the per-call fields, serializing each per-call value that is written.
+     *
+     * The per-call items are, in order, an optional leading reference (the exception of an exception call) and then
+     * the entries of a fields object or the references of a braced list. A per-call item with the key of a bound field
+     * replaces its value at the bound field's position, and a key that appears twice among the items takes the last
+     * value at the first position. Only the last value of a repeated key is serialized, so an earlier one is never run.
+     * The cost is quadratic in the number of items, at most call_fields::CAPACITY plus one.
+     */
+    void append_props_(
+        spdlog::memory_buf_t &out, const detail::call_fields &props, const detail::call_fields::ref *leading
+    ) const
     {
         const context_data &ctx = *context_;
-        if (props.empty())
+        const fields *named = props.named();
+        if (leading == nullptr && (named != nullptr ? named->empty() : props.size() == 0))
         {
             detail::append(out, ctx.fragment);
             return;
         }
-        // Inside the deferred writer, so a handler that throws reaches spdlog's error handler.
-        JSPDLOG_ASSERT(
-            !ctx.reserved.clashes_with(props), "jspdlog: a field key equals a header, source or message key"
-        );
-        for (const auto &e : ctx.values.entries_)
-        {
-            const fields::entry *over = props.find_(e.key);
-            detail::append(out, over != nullptr ? over->text : e.text);
-        }
-        for (const auto &e : props.entries_)
-        {
-            if (!ctx.values.contains(e.key))
+        const std::size_t first = leading != nullptr ? 1 : 0;
+        const std::size_t count = first + (named != nullptr ? named->entries_.size() : props.size());
+        const auto key_of = [&](std::size_t i) -> std::string_view {
+            if (i < first)
             {
-                detail::append(out, e.text);
+                return leading->key;
             }
-        }
-    }
-
-    /**
-     * @brief Appends the bound fields and the fields of a braced list, serializing each value that is written.
-     *
-     * Only the last value of a repeated key is serialized, so an earlier one is never run. The cost is quadratic in the
-     * number of fields, at most call_fields::CAPACITY.
-     */
-    void append_refs_(spdlog::memory_buf_t &out, const detail::call_fields &props) const
-    {
-        const context_data &ctx = *context_;
-        for (std::size_t i = 0; i < props.size(); ++i)
+            return named != nullptr ? std::string_view{named->entries_[i - first].key} : props.key(i - first);
+        };
+        // Inside the deferred writer, so a handler that throws reaches spdlog's error handler.
+        for (std::size_t i = 0; i < count; ++i)
         {
             JSPDLOG_ASSERT(
-                !ctx.reserved.is_reserved(props.key(i)), "jspdlog: a field key equals a header, source or message key"
+                !ctx.reserved.is_reserved(key_of(i)), "jspdlog: a field key equals a header, source or message key"
+            );
+            JSPDLOG_ASSERT(
+                leading == nullptr || i < first || key_of(i) != leading->key,
+                "jspdlog: a field key equals the error key of an exception call"
             );
         }
         std::string scratch; // one per line; json_writer writes to a std::string
-        const auto append_ref = [&](std::size_t i) {
-            scratch.clear();
-            props.append_to(scratch, i);
-            detail::append(out, scratch);
+        const auto append_item = [&](std::size_t i) {
+            if (i < first)
+            {
+                scratch.clear();
+                detail::call_fields::append_ref(scratch, *leading);
+                detail::append(out, scratch);
+            }
+            else if (named != nullptr)
+            {
+                detail::append(out, named->entries_[i - first].text);
+            }
+            else
+            {
+                scratch.clear();
+                detail::call_fields::append_ref(scratch, props.at(i - first));
+                detail::append(out, scratch);
+            }
+        };
+        const auto last_with_key = [&](std::string_view k) {
+            for (std::size_t i = count; i > 0; --i)
+            {
+                if (key_of(i - 1) == k)
+                {
+                    return i - 1;
+                }
+            }
+            return count;
+        };
+        const auto repeats_earlier = [&](std::size_t i) {
+            for (std::size_t j = 0; j < i; ++j)
+            {
+                if (key_of(j) == key_of(i))
+                {
+                    return true;
+                }
+            }
+            return false;
         };
         for (const auto &e : ctx.values.entries_)
         {
-            const std::size_t over = props.last_with_key(e.key);
-            if (over == props.size())
+            const std::size_t over = last_with_key(e.key);
+            if (over == count)
             {
                 detail::append(out, e.text);
             }
             else
             {
-                append_ref(over);
+                append_item(over);
             }
         }
-        for (std::size_t i = 0; i < props.size(); ++i)
+        for (std::size_t i = 0; i < count; ++i)
         {
-            if (!ctx.values.contains(props.key(i)) && !props.repeats_earlier(i))
+            if (!ctx.values.contains(key_of(i)) && !repeats_earlier(i))
             {
-                append_ref(props.last_with_key(props.key(i)));
+                append_item(last_with_key(key_of(i)));
             }
         }
     }
@@ -2793,14 +3269,20 @@ private:
      * write_message appends. spdlog runs the serialization while it formats the line, inside its error handling, so
      * the values of a braced list are serialized here and only when the line is written.
      *
-     * The fields are an already escaped list, each entry starting with a comma. A per-call field with the key of a
-     * bound field replaces its value at the bound field's position, and a key that appears twice in one braced list
-     * takes the last value at the first position, as in a fields object. The message is appended as a quoted JSON
+     * The fields are an already escaped list, each entry starting with a comma. The exception of an exception call
+     * comes first among the per-call fields. A per-call field with the key of a bound field replaces its value at the
+     * bound field's position, and a key that appears twice in one braced list takes the last value at the first
+     * position, as in a fields object. The message is appended as a quoted JSON
      * string, so it is escaped once however many sinks the logger has.
      */
     template <typename WriteMessage>
     void emit_(
-        level lvl, const detail::call_fields &props, detail::site where, char kind, const WriteMessage &write_message
+        level lvl,
+        const std::exception *ex,
+        const detail::call_fields &props,
+        detail::site where,
+        char kind,
+        const WriteMessage &write_message
     ) const
     {
         const context_data &ctx = *context_;
@@ -2810,18 +3292,11 @@ private:
             const std::size_t size_at = out.size();
             detail::append(out, std::string_view{"00000000", detail::SIZE_DIGITS});
             const std::size_t fields_at = out.size();
-            if (props.named() != nullptr)
-            {
-                append_named_(out, *props.named());
-            }
-            else if (props.size() == 0)
-            {
-                detail::append(out, ctx.fragment);
-            }
-            else
-            {
-                append_refs_(out, props);
-            }
+            // The exception is held by reference and written here, when the line is, so a disabled level computes
+            // nothing and an exception from writing it reaches the error handler.
+            const detail::exception_arg arg{ex, {ctx.errors.type, ctx.errors.message}};
+            const detail::call_fields::ref leading{ctx.errors.key, &arg, &detail::write_exception_arg};
+            append_props_(out, props, ex != nullptr ? &leading : nullptr);
             detail::patch_hex_size(out, size_at, out.size() - fields_at);
             write_message(out);
         };

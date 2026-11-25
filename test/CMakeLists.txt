@@ -38,6 +38,8 @@ add_executable(
     test_formatter.cpp
     test_json_logger.cpp
     test_fields.cpp
+    test_exceptions.cpp
+    test_presets.cpp
     test_lazy.cpp
     test_macros.cpp
     test_active_level.cpp
@@ -65,6 +67,22 @@ add_executable(jspdlog_assert_tests test_assert.cpp)
 target_link_libraries(jspdlog_assert_tests PRIVATE jspdlog::jspdlog Catch2::Catch2WithMain)
 jspdlog_set_warnings(jspdlog_assert_tests)
 catch_discover_tests(jspdlog_assert_tests)
+
+# The exception forms in a unit without RTTI. It has its own main, because Catch2 is built with RTTI. jspdlog::jspdlog
+# is linked for the include paths and spdlog.
+add_executable(jspdlog_nortti_tests test_exceptions_nortti.cpp)
+target_link_libraries(jspdlog_nortti_tests PRIVATE jspdlog::jspdlog)
+if(MSVC)
+    target_compile_options(jspdlog_nortti_tests PRIVATE /GR-)
+else()
+    target_compile_options(jspdlog_nortti_tests PRIVATE -fno-rtti)
+endif()
+if(JSPDLOG_TEST_WITH_NLOHMANN)
+    target_link_libraries(jspdlog_nortti_tests PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_definitions(jspdlog_nortti_tests PRIVATE JSPDLOG_TEST_NLOHMANN=1)
+endif()
+jspdlog_set_warnings(jspdlog_nortti_tests)
+add_test(NAME exceptions_nortti COMMAND jspdlog_nortti_tests)
 
 # test_utf8.cpp again, once per other UTF-8 policy and once with line separator escaping. These targets do not link
 # jspdlog::jspdlog, whose interface definitions would clash with the policy defined here.

@@ -280,7 +280,7 @@ jobs:
           set -euo pipefail
           PY=python
           if command -v python3 >/dev/null; then PY=python3; fi
-          for exe in build/release/example/example_0*; do
+          for exe in build/release/example/example_*; do
             case "$exe" in *.pdb | *.ilk | *.manifest) continue ;; esac
             [ -x "$exe" ] && [ -f "$exe" ] || continue
             echo "::group::$exe"

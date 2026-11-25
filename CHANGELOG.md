@@ -6,8 +6,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-25
+
+Exceptions are logged with their causes, the field names of common log schemas are one function call away, and strings are
+valid UTF-8 by default.
+
 ### Added
 
+- Exceptions. A `std::exception` (or anything derived from it) and a `std::exception_ptr` are field values: an object
+  with the `type` name and `message`, and the nested causes under `cause`, up to eight deep. Every level and `log()`
+  take an exception first, with the same endings as the other forms, and write it under `json_options::error_key`,
+  with `error_type_key` and `error_message_key` for its members. It is written only when the line is, so a disabled
+  level computes nothing. The type name is the same on GCC, Clang and MSVC, also for `std::throw_with_nested`.
+- `json_options::source_flat` writes the call site as three fields of the line instead of an object, and
+  `source_file_key`, `source_line_key` and `source_function_key` name its parts in both layouts.
+- Schema presets, `jspdlog::presets::ecs()`, `gcp()`, `datadog()` and `otel()`, which return a filled `json_options`
+  for Elastic ECS, Google Cloud Logging, Datadog and the OpenTelemetry log data model.
 - A UTF-8 policy for every string jspdlog writes: keys, values, messages, logger names, level names and call sites.
   `JSPDLOG_UTF8_POLICY` (a macro, and a CMake cache variable that the `jspdlog::jspdlog` target passes on, installed
   or not) is `replace` (default, one U+FFFD per maximal invalid subsequence), `escape` (each invalid byte as `\u00XX`)
@@ -102,4 +116,5 @@ First release. jspdlog is a single-header library that writes one JSON object pe
 
 [0.2.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.2.0
 [0.3.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.3.0
-[unreleased]: https://github.com/jan-moravec/jspdlog/compare/v0.3.0...HEAD
+[0.4.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.4.0
+[unreleased]: https://github.com/jan-moravec/jspdlog/compare/v0.4.0...HEAD

@@ -1,6 +1,7 @@
 // Target 3: logger_line. Fuzzes everything a user configures: the logger name, every header key, the message key, the
-// time type, the line terminator and the message. Keys and names containing percent signs, quotes and control bytes
-// must never change the shape of the line.
+// time type, the line terminator and the message, on top of the defaults or of one of the schema presets, which add
+// their level names, timestamp style and flat call site. Keys and names containing percent signs, quotes and control
+// bytes must never change the shape of the line.
 #include "fuzz_support.h"
 
 #include <set>
@@ -26,6 +27,24 @@ std::string_view eol_for(std::uint8_t choice)
     return choice == 1 ? "\n" : "\r\n";
 }
 
+// The options to start from: the defaults, or one of the presets.
+jspdlog::json_options base_options(std::uint8_t choice)
+{
+    switch (choice % 5U)
+    {
+    case 1:
+        return jspdlog::presets::ecs();
+    case 2:
+        return jspdlog::presets::gcp();
+    case 3:
+        return jspdlog::presets::datadog();
+    case 4:
+        return jspdlog::presets::otel();
+    default:
+        return {};
+    }
+}
+
 } // namespace
 
 // NOLINTNEXTLINE(readability-identifier-naming): libFuzzer requires this name
@@ -34,12 +53,19 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     fuzz::reader r(fuzz::as_text(data, size));
 
     const std::uint8_t flags = r.byte();
+    jspdlog::json_options options = base_options(r.byte());
     const auto eol_choice = static_cast<std::uint8_t>(r.byte() % 3U);
     const std::string name = r.string(16);
 
     // Two equal keys would write a duplicate key, which is the caller's problem, so make them distinct as written: two
     // different invalid keys can be replaced by the same text.
     std::set<std::string> used;
+    if (options.source_flat)
+    {
+        used.insert(options.source_file_key);
+        used.insert(options.source_line_key);
+        used.insert(options.source_function_key);
+    }
     const auto next_key = [&](bool enabled) {
         std::string key = r.string(8);
         if (enabled)
@@ -62,7 +88,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     const std::string_view eol = eol_for(eol_choice);
     const std::string message{r.rest()};
 
-    jspdlog::json_options options;
     const auto optional_key = [](const header_key &k) {
         return k.enabled ? std::optional<std::string>{k.key} : std::nullopt;
     };
@@ -75,6 +100,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     options.message_key = message_key.key;
     options.time_type = utc ? spdlog::pattern_time_type::utc : spdlog::pattern_time_type::local;
     options.eol = std::string{eol};
+    options.severity_key.reset(); // a preset's severity field is not one of the fuzzed keys
 
     const fuzz::harness h(name, options);
     h.logger.info(message);
@@ -100,10 +126,18 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     std::vector<std::string> expected_keys;
     for (const header_key *k : {&timestamp, &logger, &level, &process, &thread, &source})
     {
-        if (k->enabled)
+        if (!k->enabled)
         {
-            expected_keys.push_back(fuzz::written_text(k->key));
+            continue;
         }
+        if (k == &source && options.source_flat)
+        {
+            expected_keys.push_back(options.source_file_key);
+            expected_keys.push_back(options.source_line_key);
+            expected_keys.push_back(options.source_function_key);
+            continue;
+        }
+        expected_keys.push_back(fuzz::written_text(k->key));
     }
     expected_keys.push_back(fuzz::written_text(message_key.key));
     FUZZ_CHECK(fuzz::keys_of(parsed) == expected_keys);
@@ -111,12 +145,19 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     if (timestamp.enabled)
     {
         const auto &ts = parsed.at(fuzz::written_text(timestamp.key));
-        FUZZ_CHECK(ts.is_string());
-        const std::string text = ts.get<std::string>();
-        FUZZ_CHECK(text.size() >= 20 && text[4] == '-' && text[7] == '-' && text[10] == 'T' && text[13] == ':');
-        if (utc)
+        if (options.timestamp_style == jspdlog::timestamp_format::epoch_millis)
         {
-            FUZZ_CHECK(text.back() == 'Z');
+            FUZZ_CHECK(ts.is_number_integer());
+        }
+        else
+        {
+            FUZZ_CHECK(ts.is_string());
+            const std::string text = ts.get<std::string>();
+            FUZZ_CHECK(text.size() >= 20 && text[4] == '-' && text[7] == '-' && text[10] == 'T' && text[13] == ':');
+            if (utc)
+            {
+                FUZZ_CHECK(text.back() == 'Z');
+            }
         }
     }
     if (logger.enabled)
@@ -125,7 +166,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     }
     if (level.enabled)
     {
-        FUZZ_CHECK(parsed.at(fuzz::written_text(level.key)) == ojson("info"));
+        const std::string info_name = options.level_names ? (*options.level_names)[2] : std::string{"info"};
+        FUZZ_CHECK(parsed.at(fuzz::written_text(level.key)) == ojson(info_name));
     }
     if (process.enabled)
     {
@@ -137,11 +179,17 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     }
     if (source.enabled)
     {
-        const auto &src = parsed.at(fuzz::written_text(source.key));
+        // The members of the call site, in an object under the source key or as fields of the line.
+        const ojson &src = options.source_flat ? parsed : parsed.at(fuzz::written_text(source.key));
         FUZZ_CHECK(src.is_object());
-        FUZZ_CHECK((fuzz::keys_of(src) == std::vector<std::string>{"file", "line", "function"}));
-        FUZZ_CHECK(src.at("file").get<std::string>().find_first_of("/\\") == std::string::npos);
-        FUZZ_CHECK(src.at("line").is_number_integer());
+        if (!options.source_flat)
+        {
+            FUZZ_CHECK((fuzz::keys_of(src) == std::vector<std::string>{"file", "line", "function"}));
+        }
+        const std::string file_key = options.source_flat ? options.source_file_key : "file";
+        const std::string line_key = options.source_flat ? options.source_line_key : "line";
+        FUZZ_CHECK(src.at(file_key).get<std::string>().find_first_of("/\\") == std::string::npos);
+        FUZZ_CHECK(src.at(line_key).is_number_integer());
     }
     FUZZ_CHECK(parsed.at(fuzz::written_text(message_key.key)) == ojson(fuzz::written_text(message)));
     return 0;

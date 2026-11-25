@@ -195,6 +195,56 @@ TEST_CASE("formatter: source_key writes the base name of the call site", "[forma
     CHECK(f.last().find(R"(,"message":"z"})") != std::string::npos);
 }
 
+TEST_CASE("formatter: the call site keys rename the object members", "[formatter]")
+{
+    auto opts = deterministic_options();
+    opts.source_key = "source";
+    opts.source_file_key = "f";
+    opts.source_line_key = "l";
+    opts.source_function_key = "fn";
+    const fixture f("t", opts);
+    f.logger.spdlog_logger()->log(spdlog::source_loc{"dir/a.cpp", 12, "run"}, jspdlog::level::info, "x");
+    const std::string expected =
+        R"({"logger":"t","level":"info","source":{"f":"a.cpp","l":12,"fn":"run"},"message":"x"})";
+    CHECK(f.last() == expected);
+}
+
+TEST_CASE("formatter: source_flat writes the call site as fields of the line", "[formatter]")
+{
+    auto opts = deterministic_options();
+    opts.source_key = "unused";
+    opts.source_flat = true;
+    const fixture f("t", opts);
+    f.logger.spdlog_logger()->log(spdlog::source_loc{"dir/a.cpp", 12, "run"}, jspdlog::level::info, "x");
+    const std::string expected =
+        R"({"logger":"t","level":"info","file":"a.cpp","line":12,"function":"run","message":"x"})";
+    CHECK(f.last() == expected);
+
+    // A call through json_logger records its own site, and bound fields follow the call site.
+    f.logger.with({"k", 1}).info({"n", 2}, "y");
+    const std::string line = f.last();
+    CHECK(line.find(R"("level":"info","file":"test_formatter.cpp","line":)") != std::string::npos);
+    CHECK(line.find(R"(,"k":1,"n":2,"message":"y"})") != std::string::npos);
+
+    // The renamed keys, and a line without a call site.
+    opts.source_file_key = "log.origin.file.name";
+    opts.source_line_key = "log.origin.file.line";
+    opts.source_function_key = "log.origin.function";
+    const fixture g("t", opts);
+    g.logger.spdlog_logger()->log(spdlog::source_loc{"a.cpp", 3, "fn"}, jspdlog::level::info, "x");
+    const std::string renamed =
+        R"({"logger":"t","level":"info","log.origin.file.name":"a.cpp","log.origin.file.line":3,)"
+        R"("log.origin.function":"fn","message":"x"})";
+    CHECK(g.last() == renamed);
+    g.logger.spdlog_logger()->log(spdlog::source_loc{}, jspdlog::level::info, "y");
+    CHECK(g.last() == R"({"logger":"t","level":"info","message":"y"})");
+
+    opts.source_key = std::nullopt;
+    const fixture off("t", opts);
+    off.logger.info("z");
+    CHECK(off.last() == R"({"logger":"t","level":"info","message":"z"})");
+}
+
 TEST_CASE("formatter: source_key is off by default", "[formatter]")
 {
     const fixture f;

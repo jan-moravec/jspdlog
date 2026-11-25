@@ -7,6 +7,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -265,3 +266,22 @@ TEST_CASE("utf8: the default build decodes to the replaced text", "[utf8]")
 #endif
 
 // NOLINTEND(modernize-raw-string-literal,misc-misleading-bidirectional,performance-inefficient-string-concatenation)
+
+TEST_CASE("utf8: exception messages follow the policy", "[utf8]")
+{
+    for (const utf8_case &c : CASES)
+    {
+        const std::string text = expected_for(c);
+        const std::string input(c.input);
+        INFO("input: " << input);
+        const fixture f;
+        const std::runtime_error ex(input);
+        const std::string expected =
+            R"({"logger":"t","level":"error","error":{"type":"std::runtime_error","message":")" + text + "\"}}";
+        f.logger.error(ex);
+        CHECK(f.last() == expected);
+        f.logger.error({"e", ex});
+        const std::string as_value = R"("e":{"type":"std::runtime_error","message":")" + text + "\"}";
+        CHECK(f.last().find(as_value) != std::string::npos);
+    }
+}
