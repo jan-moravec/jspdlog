@@ -126,6 +126,14 @@
 #define JSPDLOG_HAS_RTTI 0
 #endif
 
+#ifdef __cpp_consteval
+/** @brief consteval where the compiler has it, else constexpr: a compile-time check in C++20, a run-time one in C++17.
+ */
+#define JSPDLOG_CONSTEVAL consteval
+#else
+#define JSPDLOG_CONSTEVAL constexpr
+#endif
+
 // The policy values are not 0: the preprocessor reads an unknown name such as escape as 0, and the check below must
 // reject it instead of taking it for one of the policies.
 /** @brief JSPDLOG_UTF8_POLICY value: invalid UTF-8 is replaced by U+FFFD, one per maximal invalid subsequence. */
@@ -480,7 +488,7 @@ void append_json_quoted(Buffer &out, std::string_view s)
 
 /**
  * @brief Whether a string needs more than quotes around it to become a JSON string: a control character, a quote, a
- * backslash or a byte of 0x80 or more. Evaluated at compile time for a literal, and cheap to fold for the compiler.
+ * backslash or a byte of 0x80 or more. It can run in a constant expression, which the key type relies on.
  */
 constexpr bool needs_escape(std::string_view s) noexcept
 {
@@ -493,6 +501,13 @@ constexpr bool needs_escape(std::string_view s) noexcept
         }
     }
     return false;
+}
+
+/** @brief Whether a key needs no escaping, so it can be copied between quotes. Scans the key once. */
+template <typename K>
+constexpr bool is_plain_key(const K &key) noexcept
+{
+    return !needs_escape(std::string_view(key));
 }
 
 /** @brief Appends text to a buffer unchanged. The buffer can be a std::string or an spdlog memory buffer. */
@@ -1231,7 +1246,103 @@ class fields;
 namespace detail
 {
 struct writer_access;
+
+/**
+ * @brief Called by a key that needs escaping. It is not a constant expression, so in C++20 the key does not compile;
+ * in C++17 the key is checked when it is created and this throws std::invalid_argument.
+ */
+[[noreturn]] inline void key_needs_escape()
+{
+#if JSPDLOG_HAS_EXCEPTIONS
+    throw std::invalid_argument(
+        "jspdlog: a key needs escaping: it holds a control character, a quote, a backslash or "
+        "a byte of 0x80 or more"
+    );
+#else
+    std::abort();
+#endif
 }
+
+struct key_access;
+} // namespace detail
+
+/**
+ * @brief A field key checked when the program is compiled, so inserting it copies the key between quotes without a
+ * scan. A key with a control character, a quote, a backslash or a byte of 0x80 or more does not compile in C++20; in
+ * C++17 the check runs when the key is created and throws std::invalid_argument. Build one with the _key literal or
+ * with key{"name"}.
+ *
+ * @code
+ * using namespace jspdlog::literals;
+ * logger.info({"user_id"_key, 42}, "logged in");
+ * @endcode
+ */
+class key
+{
+public:
+    /** @brief Checks a string literal. Explicit, so that a plain literal stays a std::string_view. */
+    template <std::size_t N>
+    explicit JSPDLOG_CONSTEVAL key(const char (&s)[N])
+        : text_(s, N - 1)
+    {
+        check_();
+    }
+
+    /** @brief The key text. */
+    [[nodiscard]] constexpr std::string_view view() const noexcept { return text_; }
+
+    /** @brief Lets a key go wherever a string key is taken. */
+    // Implicit on purpose: a key is a string key that is known to need no escaping.
+    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
+    constexpr operator std::string_view() const noexcept { return text_; }
+
+private:
+    friend struct detail::key_access;
+
+    /** @brief Checks the text of a literal operator. */
+    JSPDLOG_CONSTEVAL key(const char *s, std::size_t n)
+        : text_(s, n)
+    {
+        check_();
+    }
+
+    /** @brief Fails to compile, or throws, when the key needs escaping. */
+    constexpr void check_() const
+    {
+        if (detail::needs_escape(text_))
+        {
+            detail::key_needs_escape();
+        }
+    }
+
+    /** @brief The key text. */
+    std::string_view text_;
+};
+
+namespace detail
+{
+/** @brief Gives the literal operator the private constructor of key. */
+struct key_access
+{
+    /** @brief Creates a key from the characters of a user-defined literal. */
+    static JSPDLOG_CONSTEVAL key make(const char *s, std::size_t n) { return key(s, n); }
+};
+
+/** @brief A key type is known to need no escaping. */
+constexpr bool is_plain_key(const key & /*key*/) noexcept
+{
+    return true;
+}
+} // namespace detail
+
+namespace literals
+{
+/** @brief "user_id"_key is a key checked when the program is compiled. */
+JSPDLOG_CONSTEVAL key operator""_key(const char *s, std::size_t n)
+{
+    return detail::key_access::make(s, n);
+}
+} // namespace literals
 
 namespace detail
 {
@@ -1548,6 +1659,13 @@ public:
         put_value_(key, !detail::needs_escape(key), value);
     }
 
+    /** @brief Inserts a value under a key that was checked when the program was compiled, so the key is not scanned. */
+    template <typename T>
+    void insert(const jspdlog::key &k, const T &value)
+    {
+        put_value_(k.view(), true, value);
+    }
+
     /**
      * @brief Adds every field of other. Where both have a key, the value from other wins and the key keeps its
      * position.
@@ -1669,7 +1787,7 @@ private:
             std::is_convertible_v<std::decay_t<K>, std::string_view>,
             "fields: key must be convertible to std::string_view"
         );
-        insert(std::string_view(key), std::forward<V>(value));
+        put_value_(std::string_view(key), detail::is_plain_key(key), std::forward<V>(value));
         if constexpr (sizeof...(Rest) > 0)
         {
             insert_pairs_(std::forward<Rest>(rest)...);
@@ -1702,12 +1820,21 @@ private:
         return entries_.size();
     }
 
-    /** @brief Writes a comma, the quoted key, a colon and the value to a string. */
+    /** @brief Writes a comma, the quoted key, a colon and the value to a string. A plain key is copied unscanned. */
     template <typename T>
-    static void write_field_(std::string &out, std::string_view key, const T &value)
+    static void write_field_(std::string &out, std::string_view key, bool plain_key, const T &value)
     {
         out.push_back(',');
-        detail::append_json_quoted(out, key);
+        if (plain_key)
+        {
+            out.push_back('"');
+            out.append(key.data(), key.size());
+            out.push_back('"');
+        }
+        else
+        {
+            detail::append_json_quoted(out, key);
+        }
         out.push_back(':');
         json_writer w(out);
         w.value(value);
@@ -1722,13 +1849,13 @@ private:
         if (i != entries_.size())
         {
             std::string text;
-            write_field_(text, key, value);
+            write_field_(text, key, plain_key, value);
             replace_(i, text);
             return;
         }
         truncate_guard guard(text_);
         const std::size_t begin = text_.size();
-        write_field_(text_, key, value);
+        write_field_(text_, key, plain_key, value);
         add_entry_(begin, key, plain_key);
         guard.release();
     }
@@ -2847,8 +2974,8 @@ public:
         std::string_view key;
         /** @brief The value, which the braced list owns. */
         const void *value;
-        /** @brief Serializes the value, with its type restored. */
-        void (*write)(json_writer &, const void *);
+        /** @brief Writes the whole field, with the type of the value restored: see write_item. */
+        void (*write)(spdlog::memory_buf_t &, const ref &);
     };
 
     /** @brief The reference at index i. */
@@ -2858,13 +2985,30 @@ public:
      * @brief Appends a reference as a field: a comma, the quoted key, a colon and the serialized value. This runs the
      * serializer of the value, so it throws what the serializer throws.
      */
-    static void append_ref(spdlog::memory_buf_t &out, const ref &r)
+    static void append_ref(spdlog::memory_buf_t &out, const ref &r) { r.write(out, r); }
+
+    /**
+     * @brief The function a reference stores to write its field. Value writes the value from its pointer; Plain says
+     * that the key needs no escaping, so it is copied between quotes without a scan. Whether the key is plain is part
+     * of the function, so a reference needs no flag, which keeps a braced list small and cheap to build.
+     */
+    template <void (*Value)(json_writer &, const void *), bool Plain>
+    static void write_item(spdlog::memory_buf_t &out, const ref &r)
     {
         out.push_back(',');
-        append_json_quoted(out, r.key);
+        if constexpr (Plain)
+        {
+            out.push_back('"');
+            out.append(r.key.data(), r.key.data() + r.key.size());
+            out.push_back('"');
+        }
+        else
+        {
+            append_json_quoted(out, r.key);
+        }
         out.push_back(':');
         json_writer w = writer_access::to_buffer(out);
-        r.write(w, r.value);
+        Value(w, r.value);
         JSPDLOG_ASSERT(
             writer_access::complete(w), "jspdlog: a serializer left an object or array open, or wrote no value"
         );
@@ -2910,7 +3054,10 @@ private:
         static_assert(
             std::is_convertible_v<const K &, std::string_view>, "fields: key must be convertible to std::string_view"
         );
-        refs_[size_++] = ref{std::string_view(key), static_cast<const void *>(std::addressof(value)), &write_ref_<V>};
+        refs_[size_++] =
+            ref{std::string_view(key),
+                static_cast<const void *>(std::addressof(value)),
+                &write_item<&write_ref_<V>, std::is_same_v<K, ::jspdlog::key>>};
         if constexpr (sizeof...(Rest) > 0)
         {
             add_(rest...);
@@ -3525,7 +3672,9 @@ private:
             // The exception is held by reference and written here, when the line is, so a disabled level computes
             // nothing and an exception from writing it reaches the error handler.
             const detail::exception_arg arg{ex, {ctx.errors.type, ctx.errors.message}};
-            const detail::call_fields::ref leading{ctx.errors.key, &arg, &detail::write_exception_arg};
+            const detail::call_fields::ref leading{
+                ctx.errors.key, &arg, &detail::call_fields::write_item<&detail::write_exception_arg, false>
+            };
             append_props_(out, props, ex != nullptr ? &leading : nullptr);
             detail::patch_hex_size(out, size_at, out.size() - fields_at);
             write_message(out);

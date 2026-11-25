@@ -583,3 +583,18 @@ TEST_CASE("lazy: an async logger runs a lazy value in the calling thread", "[laz
     CHECK(capture->lines[0] == R"({"logger":"t","level":"info","v":"gone after this block","message":"x"})");
 }
 #endif
+
+TEST_CASE("lazy: checked keys in a braced list give the line of string keys", "[lazy]")
+{
+    using namespace jspdlog::literals;
+    const fixture f;
+    f.logger.info({"user_id", 7, "ok", true}, "m");
+    const std::string plain = f.last();
+    f.logger.info({"user_id"_key, 7, "ok"_key, true}, "m");
+    CHECK(f.last() == plain);
+    f.logger.info({"user_id"_key, 7, "ok", true}, "m"); // checked and string keys mix
+    CHECK(f.last() == plain);
+    const auto bound = f.logger.with({"service"_key, "api"});
+    bound.info({"service"_key, "other"}, "m");
+    CHECK(f.last().find(R"("service":"other")") != std::string::npos);
+}

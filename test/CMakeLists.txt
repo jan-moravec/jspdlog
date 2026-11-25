@@ -113,8 +113,14 @@ jspdlog_add_utf8_variant(jspdlog_utf8_pass_separator_tests POLICY PASS SEPARATOR
 # A control target builds the same file with the offending line replaced by a valid one and must succeed, so a failure
 # for an unrelated reason (a broken include, a typo) cannot pass as the expected one. The tests build in the shared
 # build directory, so they hold a lock and never run in parallel.
+# A key checked when the program is compiled is a compile error only where consteval exists (C++20).
+set(JSPDLOG_COMPILE_FAIL_EXTRA)
+if(CMAKE_CXX_STANDARD AND CMAKE_CXX_STANDARD GREATER_EQUAL 20)
+    list(APPEND JSPDLOG_COMPILE_FAIL_EXTRA key_escape)
+endif()
 foreach(
     case
+    ${JSPDLOG_COMPILE_FAIL_EXTRA}
     info_int
     info_vector
     odd_fields

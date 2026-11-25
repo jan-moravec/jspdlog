@@ -232,3 +232,46 @@ TEST_CASE("fields: a serializer that throws leaves the set unchanged", "[fields]
     p.insert("c", 3);
     CHECK(p.to_json() == R"({"a":1,"b":2,"c":3})");
 }
+
+TEST_CASE("fields: checked keys", "[fields]")
+{
+    using namespace jspdlog::literals;
+
+    SECTION("insert, the constructor and a literal give the same text as a string key")
+    {
+        fields a;
+        a.insert("user_id"_key, 42);
+        a.insert(jspdlog::key{"ok"}, true);
+        const fields b{"user_id"_key, 42, "name"_key, "alice"};
+        CHECK(a.to_json() == R"({"user_id":42,"ok":true})");
+        CHECK(b.to_json() == fields{"user_id", 42, "name", "alice"}.to_json());
+        CHECK(a.contains("user_id"));
+    }
+    SECTION("a checked key replaces a string key of the same name, and the other way round")
+    {
+        fields p{"a", 1, "b", 2};
+        p.insert("a"_key, "one");
+        p.insert("b", "two");
+        CHECK(p.to_json() == R"({"a":"one","b":"two"})");
+    }
+    SECTION("a key is usable in a constant expression")
+    {
+        constexpr auto k = "user_id"_key;
+        static_assert(k.view() == "user_id");
+        CHECK(std::string{std::string_view{k}} == "user_id");
+    }
+    SECTION("an empty key is plain")
+    {
+        CHECK(fields{""_key, 1}.to_json() == R"({"":1})");
+    }
+}
+
+#ifndef __cpp_consteval
+TEST_CASE("fields: a key that needs escaping throws before C++20", "[fields]")
+{
+    CHECK_THROWS_AS(jspdlog::key{"a\"b"}, std::invalid_argument);
+    CHECK_THROWS_AS(jspdlog::key{"a\b"}, std::invalid_argument);
+    CHECK_THROWS_AS(jspdlog::key{"a\nb"}, std::invalid_argument);
+    CHECK_THROWS_AS(jspdlog::key{"d\xC3\xA9j\xC3\xA0"}, std::invalid_argument);
+}
+#endif

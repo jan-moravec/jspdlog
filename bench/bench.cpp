@@ -225,6 +225,36 @@ int main(int argc, char **argv)
                 7
             );
         });
+        // Checked keys: constexpr, so the check runs at compile time in C++17 too.
+        using namespace jspdlog::literals;
+        constexpr auto k_user = "user"_key;
+        constexpr auto k_status = "status"_key;
+        constexpr auto k_path = "path"_key;
+        constexpr auto k_bytes = "bytes"_key;
+        constexpr auto k_cached = "cached"_key;
+        constexpr auto k_ratio = "ratio"_key;
+        run("jspdlog, braced list (6 fields), checked short keys + message", [&] {
+            logger.info(
+                {k_user, user, k_status, 200, k_path, "/v1/items", k_bytes, 1234, k_cached, false, k_ratio, 0.25},
+                "request {} handled in {} ms",
+                42,
+                7
+            );
+        });
+        constexpr auto k_long1 = "user_identifier_key_0001"_key;
+        constexpr auto k_long2 = "http_status_code_key_002"_key;
+        constexpr auto k_long3 = "request_path_key_0000003"_key;
+        constexpr auto k_long4 = "response_bytes_key_00004"_key;
+        constexpr auto k_long5 = "served_from_cache_key_05"_key;
+        constexpr auto k_long6 = "cache_hit_ratio_key_0006"_key;
+        run("jspdlog, braced list (6 fields), checked 24-byte keys + message", [&] {
+            logger.info(
+                {k_long1, user, k_long2, 200, k_long3, "/v1/items", k_long4, 1234, k_long5, false, k_long6, 0.25},
+                "request {} handled in {} ms",
+                42,
+                7
+            );
+        });
         run("jspdlog, fields object (6 fields) built per call + message", [&] {
             const jspdlog::fields f{
                 "user", user, "status", 200, "path", "/v1/items", "bytes", 1234, "cached", false, "ratio", 0.25
