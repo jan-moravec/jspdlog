@@ -1216,6 +1216,62 @@ namespace detail
 struct writer_access;
 }
 
+namespace detail
+{
+/**
+ * @brief Where a json_writer appends: a std::string, or spdlog's own memory buffer when json_logger writes a line.
+ *
+ * json_logger writes per-call values straight into spdlog's buffer, with no intermediate string and one copy fewer per
+ * value. Each append branches on which target is set; both are written the same way, so the output is identical.
+ */
+class output_ref
+{
+public:
+    /** @brief Appends to a string. */
+    explicit output_ref(std::string &s) noexcept
+        : string_(&s)
+    {
+    }
+    /** @brief Appends to a buffer. */
+    explicit output_ref(
+        spdlog::memory_buf_t &b, int /*tag: tells the buffer from the string when they are one type*/
+    ) noexcept
+        : buffer_(&b)
+    {
+    }
+    /** @brief Appends one character. */
+    void push_back(char c)
+    {
+        if (buffer_ != nullptr)
+        {
+            buffer_->push_back(c);
+        }
+        else
+        {
+            string_->push_back(c);
+        }
+    }
+    /** @brief Appends the characters in [first, last). */
+    void append(const char *first, const char *last)
+    {
+        if (buffer_ != nullptr)
+        {
+            buffer_->append(first, last);
+        }
+        else
+        {
+            string_->append(first, last);
+        }
+    }
+
+private:
+    /** @brief The string, or null when writing to a buffer. */
+    std::string *string_ = nullptr;
+    /** @brief The buffer, or null when writing to a string. */
+    spdlog::memory_buf_t *buffer_ = nullptr;
+};
+} // namespace detail
+
 /**
  * @brief Specialize to give a type you do not own a JSON form. The primary template has no write member.
  *
@@ -1285,7 +1341,7 @@ class json_writer
 public:
     /** @brief Creates a writer that appends to out. The buffer must outlive the writer. */
     explicit json_writer(std::string &out) noexcept
-        : out_(&out)
+        : out_(out)
     {
     }
 
@@ -1303,8 +1359,8 @@ public:
     {
         JSPDLOG_ASSERT(depth_ > 0 && !after_key_, "jspdlog: key outside a container, or two keys in a row");
         separate_();
-        detail::append_json_quoted(*out_, k);
-        out_->push_back(':');
+        detail::append_json_quoted(out_, k);
+        out_.push_back(':');
         after_key_ = true;
     }
     /** @brief Closes the innermost object. */
@@ -1326,13 +1382,19 @@ private:
     friend struct detail::writer_access;
     friend class fields;
 
+    /** @brief Creates a writer that appends to spdlog's buffer. Used by json_logger through writer_access. */
+    json_writer(spdlog::memory_buf_t &out, int tag) noexcept
+        : out_(out, tag)
+    {
+    }
+
     /** @brief Writes a comma when a value precedes this one in the same container. */
     void separate_()
     {
         JSPDLOG_ASSERT(!need_comma_ || depth_ > 0, "jspdlog: a serializer wrote more than one value");
         if (need_comma_)
         {
-            out_->push_back(',');
+            out_.push_back(',');
         }
         need_comma_ = false;
     }
@@ -1348,7 +1410,7 @@ private:
     void scalar_(std::string_view text)
     {
         separate_();
-        detail::append(*out_, text);
+        detail::append(out_, text);
         done_();
     }
 
@@ -1356,7 +1418,7 @@ private:
     void string_(std::string_view text)
     {
         separate_();
-        detail::append_json_quoted(*out_, text);
+        detail::append_json_quoted(out_, text);
         done_();
     }
 
@@ -1365,7 +1427,7 @@ private:
     void integer_(T number)
     {
         separate_();
-        detail::append_int(*out_, number);
+        detail::append_int(out_, number);
         done_();
     }
 
@@ -1393,7 +1455,7 @@ private:
     void open_(char bracket)
     {
         separate_();
-        out_->push_back(bracket);
+        out_.push_back(bracket);
         ++depth_;
         need_comma_ = false;
         after_key_ = false;
@@ -1404,15 +1466,15 @@ private:
     {
         JSPDLOG_ASSERT(depth_ > 0 && !after_key_, "jspdlog: closing without an open container, or after a key");
         --depth_;
-        out_->push_back(bracket);
+        out_.push_back(bracket);
         done_();
     }
 
     /** @brief Whether exactly one value was written and nothing is left open. */
     [[nodiscard]] bool complete_() const noexcept { return depth_ == 0 && !after_key_ && need_comma_; }
 
-    /** @brief The buffer written to. */
-    std::string *out_;
+    /** @brief The string or buffer written to. */
+    detail::output_ref out_;
     /** @brief Whether the next value or key needs a comma before it. */
     bool need_comma_ = false;
     /** @brief The number of open objects and arrays. Stored in every build, so the layout does not depend on NDEBUG. */
@@ -1736,6 +1798,8 @@ struct writer_access
     static void object(json_writer &w, const fields &f) { w.scalar_(f.to_json()); }
     /** @brief Whether exactly one value was written and nothing is left open. */
     static bool complete(const json_writer &w) noexcept { return w.complete_(); }
+    /** @brief Creates a writer that appends to spdlog's buffer. */
+    static json_writer to_buffer(spdlog::memory_buf_t &out) noexcept { return json_writer(out, 0); }
 };
 
 /** @brief Multiplies by a positive factor, stopping at the limits of the type instead of overflowing. */
@@ -2620,12 +2684,12 @@ public:
      * @brief Appends a reference as a field: a comma, the quoted key, a colon and the serialized value. This runs the
      * serializer of the value, so it throws what the serializer throws.
      */
-    static void append_ref(std::string &out, const ref &r)
+    static void append_ref(spdlog::memory_buf_t &out, const ref &r)
     {
         out.push_back(',');
         append_json_quoted(out, r.key);
         out.push_back(':');
-        json_writer w(out);
+        json_writer w = writer_access::to_buffer(out);
         r.write(w, r.value);
         JSPDLOG_ASSERT(
             writer_access::complete(w), "jspdlog: a serializer left an object or array open, or wrote no value"
@@ -3204,13 +3268,10 @@ private:
                 "jspdlog: a field key equals the error key of an exception call"
             );
         }
-        std::string scratch; // one per line; json_writer writes to a std::string
         const auto append_item = [&](std::size_t i) {
             if (i < first)
             {
-                scratch.clear();
-                detail::call_fields::append_ref(scratch, *leading);
-                detail::append(out, scratch);
+                detail::call_fields::append_ref(out, *leading);
             }
             else if (named != nullptr)
             {
@@ -3218,9 +3279,7 @@ private:
             }
             else
             {
-                scratch.clear();
-                detail::call_fields::append_ref(scratch, props.at(i - first));
-                detail::append(out, scratch);
+                detail::call_fields::append_ref(out, props.at(i - first));
             }
         };
         const auto last_with_key = [&](std::string_view k) {
