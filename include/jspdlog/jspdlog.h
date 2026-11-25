@@ -478,6 +478,23 @@ void append_json_quoted(Buffer &out, std::string_view s)
     out.push_back('"');
 }
 
+/**
+ * @brief Whether a string needs more than quotes around it to become a JSON string: a control character, a quote, a
+ * backslash or a byte of 0x80 or more. Evaluated at compile time for a literal, and cheap to fold for the compiler.
+ */
+constexpr bool needs_escape(std::string_view s) noexcept
+{
+    for (const char ch : s)
+    {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c < 0x20U || c == '"' || c == '\\' || c >= 0x80U)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 /** @brief Appends text to a buffer unchanged. The buffer can be a std::string or an spdlog memory buffer. */
 template <typename Buffer>
 void append(Buffer &out, std::string_view s)
@@ -1492,7 +1509,9 @@ private:
  * and when two sets are merged the right-hand side wins.
  *
  * Fields are meant to be small: a lookup scans the keys, which beats a map for the handful of keys a log line carries.
- * A braced list passed to a logging call is not a fields object: it is serialized only when the line is written.
+ * The serialized text of all fields lives in one string, so building a set costs two allocations however many fields
+ * it has. A braced list passed to a logging call is not a fields object: it is serialized only when the line is
+ * written.
  *
  * A key equal to one of the logger's header keys, to its source key or to its message key produces a duplicate key in
  * the line. Avoiding that is up to the caller; debug builds check it through JSPDLOG_ASSERT.
@@ -1510,6 +1529,8 @@ public:
     fields(K &&key, V &&value, Rest &&...rest)
     {
         static_assert(sizeof...(Rest) % 2 == 0, "fields: expected key/value pairs");
+        entries_.reserve((sizeof...(Rest) / 2) + 1);
+        text_.reserve(estimate_size_(key, value, rest...));
         insert_pairs_(std::forward<K>(key), std::forward<V>(value), std::forward<Rest>(rest)...);
     }
 
@@ -1518,21 +1539,13 @@ public:
      * be a temporary; a key that exists gets the new value at its old position.
      *
      * A type without a JSON form, a wide character and a pointer other than a C string are rejected at compile time.
-     * Give your own types a form with jspdlog_serialize or a specialization of serializer.
+     * Give your own types a form with jspdlog_serialize or a specialization of serializer. Throws std::length_error
+     * when the fields would exceed 4 GiB.
      */
     template <typename T>
     void insert(std::string_view key, const T &value)
     {
-        static constexpr std::size_t PUNCTUATION_AND_SHORT_VALUE = 8; // comma, quotes, colon and a few characters
-        std::string text;
-        text.reserve(key.size() + PUNCTUATION_AND_SHORT_VALUE);
-        text.push_back(',');
-        detail::append_json_quoted(text, key);
-        text.push_back(':');
-        json_writer w(text);
-        w.value(value);
-        JSPDLOG_ASSERT(w.complete_(), "jspdlog: a serializer left an object or array open, or wrote no value");
-        put_(key, std::move(text));
+        put_value_(key, !detail::needs_escape(key), value);
     }
 
     /**
@@ -1545,9 +1558,10 @@ public:
         {
             return;
         }
-        for (const auto &e : other.entries_)
+        for (const entry &e : other.entries_)
         {
-            put_(e.key, std::string{e.text});
+            const std::string_view text{other.text_.data() + e.begin, e.size};
+            put_text_(other.key_of_(e), e.key_in_text, text);
         }
     }
 
@@ -1563,18 +1577,23 @@ public:
     /** @brief The number of distinct keys. */
     [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
     /** @brief Whether a key is present. */
-    [[nodiscard]] bool contains(std::string_view key) const noexcept { return find_(key) != nullptr; }
+    [[nodiscard]] bool contains(std::string_view key) const noexcept { return index_of_(key) != entries_.size(); }
     /** @brief Removes every field. */
-    void clear() noexcept { entries_.clear(); }
+    void clear() noexcept
+    {
+        text_.clear();
+        entries_.clear();
+        keys_.clear();
+    }
 
     /** @brief Returns the fields as a JSON object in insertion order. An empty set gives {}. */
     [[nodiscard]] std::string to_json() const
     {
-        std::string out = fragment_();
-        if (out.empty())
+        if (text_.empty())
         {
             return "{}";
         }
+        std::string out = text_;
         out.front() = '{';
         out.push_back('}');
         return out;
@@ -1583,14 +1602,65 @@ public:
 private:
     friend class json_logger;
 
-    /** @brief One field: the raw key for lookups and the serialized text ready to append. */
+    /** @brief Where one field lies in text_. */
     struct entry
     {
-        /** @brief The key as given, for lookups and merges. */
-        std::string key;
-        /** @brief A comma, the quoted key, a colon and the value. */
-        std::string text;
+        /** @brief Offset of the comma that starts the field. */
+        std::uint32_t begin;
+        /** @brief Size of the whole field, from the comma to the end of the value. */
+        std::uint32_t size;
+        /** @brief Offset of the raw key: in text_ when the key needed no escaping, else in keys_. */
+        std::uint32_t key_begin;
+        /** @brief Size of the raw key. */
+        std::uint32_t key_size;
+        /** @brief Whether the raw key is the quoted key inside text_, as opposed to a copy in keys_. */
+        bool key_in_text;
     };
+
+    /** @brief Cuts text_ back to the size it had, unless released, so a field that fails half-written leaves no trace.
+     */
+    class truncate_guard
+    {
+    public:
+        /** @brief Remembers the current size of s. */
+        explicit truncate_guard(std::string &s) noexcept
+            : s_(&s), size_(s.size())
+        {
+        }
+        truncate_guard(const truncate_guard &) = delete;
+        truncate_guard &operator=(const truncate_guard &) = delete;
+        /** @brief Cuts the string back unless release was called. */
+        ~truncate_guard()
+        {
+            if (s_ != nullptr)
+            {
+                s_->resize(size_);
+            }
+        }
+        /** @brief Keeps what was appended. */
+        void release() noexcept { s_ = nullptr; }
+
+    private:
+        std::string *s_;
+        std::size_t size_;
+    };
+
+    /** @brief A rough size of the text of the pairs of the variadic constructor, so one allocation usually suffices. */
+    template <typename K, typename V, typename... Rest>
+    static std::size_t estimate_size_(const K &key, const V & /*value*/, const Rest &...rest) noexcept
+    {
+        static constexpr std::size_t PUNCTUATION_AND_VALUE = 16; // comma, quotes, colon and a short value
+        std::size_t size = PUNCTUATION_AND_VALUE;
+        if constexpr (std::is_convertible_v<const K &, std::string_view>)
+        {
+            size += std::string_view(key).size();
+        }
+        if constexpr (sizeof...(Rest) > 0)
+        {
+            size += estimate_size_(rest...);
+        }
+        return size;
+    }
 
     template <typename K, typename V, typename... Rest>
     void insert_pairs_(K &&key, V &&value, Rest &&...rest)
@@ -1606,46 +1676,150 @@ private:
         }
     }
 
-    /** @brief The entry with this key, or null. */
-    [[nodiscard]] const entry *find_(std::string_view key) const noexcept
+    /** @brief The raw key of an entry. */
+    [[nodiscard]] std::string_view key_of_(const entry &e) const noexcept
     {
-        for (const auto &e : entries_)
+        const char *base = e.key_in_text ? text_.data() : keys_.data();
+        return {base + e.key_begin, e.key_size};
+    }
+
+    /** @brief The text of an entry: a comma, the quoted key, a colon and the value. */
+    [[nodiscard]] std::string_view text_of_(std::size_t i) const noexcept
+    {
+        return {text_.data() + entries_[i].begin, entries_[i].size};
+    }
+
+    /** @brief The index of the entry with this raw key, or the number of entries when there is none. */
+    [[nodiscard]] std::size_t index_of_(std::string_view key) const noexcept
+    {
+        for (std::size_t i = 0; i < entries_.size(); ++i)
         {
-            if (e.key == key)
+            if (key_of_(entries_[i]) == key)
             {
-                return &e;
+                return i;
             }
         }
-        return nullptr;
+        return entries_.size();
+    }
+
+    /** @brief Writes a comma, the quoted key, a colon and the value to a string. */
+    template <typename T>
+    static void write_field_(std::string &out, std::string_view key, const T &value)
+    {
+        out.push_back(',');
+        detail::append_json_quoted(out, key);
+        out.push_back(':');
+        json_writer w(out);
+        w.value(value);
+        JSPDLOG_ASSERT(w.complete_(), "jspdlog: a serializer left an object or array open, or wrote no value");
+    }
+
+    /** @brief Stores a field from a value. A key that exists keeps its position. */
+    template <typename T>
+    void put_value_(std::string_view key, bool plain_key, const T &value)
+    {
+        const std::size_t i = index_of_(key);
+        if (i != entries_.size())
+        {
+            std::string text;
+            write_field_(text, key, value);
+            replace_(i, text);
+            return;
+        }
+        truncate_guard guard(text_);
+        const std::size_t begin = text_.size();
+        write_field_(text_, key, value);
+        add_entry_(begin, key, plain_key);
+        guard.release();
     }
 
     /** @brief Stores a field whose text is ready. A key that exists keeps its position. */
-    void put_(std::string_view key, std::string text)
+    void put_text_(std::string_view key, bool plain_key, std::string_view text)
     {
-        for (auto &e : entries_)
+        const std::size_t i = index_of_(key);
+        if (i != entries_.size())
         {
-            if (e.key == key)
+            replace_(i, text);
+            return;
+        }
+        truncate_guard guard(text_);
+        const std::size_t begin = text_.size();
+        text_.append(text.data(), text.size());
+        add_entry_(begin, key, plain_key);
+        guard.release();
+    }
+
+    /** @brief Records the field that starts at begin and ends at the end of text_. */
+    void add_entry_(std::size_t begin, std::string_view key, bool plain_key)
+    {
+        if (text_.size() > detail::MAX_FIELDS_SIZE)
+        {
+            throw std::length_error("jspdlog: fields larger than 4 GiB");
+        }
+        entry e{};
+        e.begin = static_cast<std::uint32_t>(begin);
+        e.size = static_cast<std::uint32_t>(text_.size() - begin);
+        e.key_size = static_cast<std::uint32_t>(key.size());
+        e.key_in_text = plain_key;
+        if (plain_key)
+        {
+            // The quoted key follows the comma and the opening quote, so the raw key is a view into text_.
+            e.key_begin = e.begin + 2;
+            entries_.push_back(e);
+            return;
+        }
+        e.key_begin = static_cast<std::uint32_t>(keys_.size());
+        keys_.append(key.data(), key.size());
+        push_with_key_(e);
+    }
+
+    /** @brief Adds an entry whose key was just appended to keys_, taking the key back out when adding fails. */
+    void push_with_key_(const entry &e)
+    {
+#if JSPDLOG_HAS_EXCEPTIONS
+        try
+        {
+            entries_.push_back(e);
+        }
+        catch (...)
+        {
+            keys_.resize(e.key_begin);
+            throw;
+        }
+#else
+        entries_.push_back(e);
+#endif
+    }
+
+    /** @brief Replaces the text of entry i, moving the later fields. */
+    void replace_(std::size_t i, std::string_view text)
+    {
+        entry &e = entries_[i];
+        const std::size_t old_size = e.size;
+        if (text_.size() - old_size + text.size() > detail::MAX_FIELDS_SIZE)
+        {
+            throw std::length_error("jspdlog: fields larger than 4 GiB");
+        }
+        text_.replace(e.begin, old_size, text.data(), text.size());
+        e.size = static_cast<std::uint32_t>(text.size());
+        const auto delta = static_cast<std::int64_t>(text.size()) - static_cast<std::int64_t>(old_size);
+        for (std::size_t j = i + 1; j < entries_.size(); ++j)
+        {
+            entries_[j].begin = static_cast<std::uint32_t>(static_cast<std::int64_t>(entries_[j].begin) + delta);
+            if (entries_[j].key_in_text)
             {
-                e.text = std::move(text);
-                return;
+                entries_[j].key_begin =
+                    static_cast<std::uint32_t>(static_cast<std::int64_t>(entries_[j].key_begin) + delta);
             }
         }
-        entries_.push_back(entry{std::string{key}, std::move(text)});
     }
 
-    /** @brief Every entry text joined, so each field starts with a comma. */
-    [[nodiscard]] std::string fragment_() const
-    {
-        std::string out;
-        for (const auto &e : entries_)
-        {
-            out += e.text;
-        }
-        return out;
-    }
-
-    /** @brief The fields in insertion order. */
+    /** @brief Every field, each starting with a comma, in insertion order. This is also the serialized form. */
+    std::string text_;
+    /** @brief Where each field lies in text_, in the same order. */
     std::vector<entry> entries_;
+    /** @brief Raw keys that needed escaping, so lookups compare raw keys. Usually empty. */
+    std::string keys_;
 };
 
 namespace detail
@@ -2921,7 +3095,6 @@ public:
         );
         auto ctx = std::make_shared<context_data>(*context_);
         ctx->values.merge(f);
-        ctx->fragment = ctx->values.fragment_();
         json_logger child = *this;
         child.context_ = std::move(ctx);
         return child;
@@ -3111,8 +3284,6 @@ private:
     {
         /** @brief The bound fields. */
         fields values;
-        /** @brief The values serialized once, each field starting with a comma. */
-        std::string fragment;
         /** @brief The token that starts every payload, the same as in the formatter this logger installed. */
         detail::payload_token token{};
         /** @brief The keys the logger writes itself, for the debug check. */
@@ -3245,7 +3416,7 @@ private:
         const fields *named = props.named();
         if (leading == nullptr && (named != nullptr ? named->empty() : props.size() == 0))
         {
-            detail::append(out, ctx.fragment);
+            detail::append(out, ctx.values.text_);
             return;
         }
         const std::size_t first = leading != nullptr ? 1 : 0;
@@ -3255,7 +3426,7 @@ private:
             {
                 return leading->key;
             }
-            return named != nullptr ? std::string_view{named->entries_[i - first].key} : props.key(i - first);
+            return named != nullptr ? named->key_of_(named->entries_[i - first]) : props.key(i - first);
         };
         // Inside the deferred writer, so a handler that throws reaches spdlog's error handler.
         for (std::size_t i = 0; i < count; ++i)
@@ -3275,7 +3446,7 @@ private:
             }
             else if (named != nullptr)
             {
-                detail::append(out, named->entries_[i - first].text);
+                detail::append(out, named->text_of_(i - first));
             }
             else
             {
@@ -3302,12 +3473,12 @@ private:
             }
             return false;
         };
-        for (const auto &e : ctx.values.entries_)
+        for (std::size_t b = 0; b < ctx.values.entries_.size(); ++b)
         {
-            const std::size_t over = last_with_key(e.key);
+            const std::size_t over = last_with_key(ctx.values.key_of_(ctx.values.entries_[b]));
             if (over == count)
             {
-                detail::append(out, e.text);
+                detail::append(out, ctx.values.text_of_(b));
             }
             else
             {
