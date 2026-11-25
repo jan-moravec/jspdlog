@@ -6,6 +6,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A UTF-8 policy for every string jspdlog writes: keys, values, messages, logger names, level names and call sites.
+  `JSPDLOG_UTF8_POLICY` (a macro, and a CMake cache variable that the `jspdlog::jspdlog` target passes on, installed
+  or not) is `replace` (default, one U+FFFD per maximal invalid subsequence), `escape` (each invalid byte as `\u00XX`)
+  or `pass` (copied, the behavior before this release). `JSPDLOG_ESCAPE_LINE_SEPARATORS` writes U+2028 and U+2029 as
+  escapes. `raw_json` is still not checked.
+- `json_options::level_names` replaces the level names, `severity_key` and `severity_numbers` add a numeric severity
+  after the level (OpenTelemetry numbers by default).
+- `json_options::timestamp_style` with `timestamp_format::rfc3339_millis` (default), `rfc3339_micros`,
+  `rfc3339_nanos` and `epoch_millis`.
+- Tests for each policy, level names, severity and timestamp formats, benchmark cases for UTF-8 and timestamps, and a
+  "Text encoding" section in the README.
+
+### Changed
+
+- Invalid UTF-8 is replaced by U+FFFD by default. It was copied unchanged, which wrote invalid JSON; set
+  `JSPDLOG_UTF8_POLICY=pass` for the old behavior. Two different invalid keys of one object can now be replaced by the
+  same text and appear twice.
+- The fuzz oracles parse every line instead of checking only its shape when a string is not valid UTF-8, and the
+  `escape` target compares the result with an independent decoder.
+
 ## [0.3.0] - 2026-11-24
 
 Field values cover most of JSON, a disabled level costs a few nanoseconds, and expensive values and arguments can be

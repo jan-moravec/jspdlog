@@ -182,6 +182,77 @@ inline bool is_valid_utf8(std::string_view s)
 namespace text_detail
 {
 
+inline void append_utf8(std::string &out, unsigned cp);
+
+/**
+ * Splits text into well-formed sequences and maximal ill-formed subparts, with the state machine of the WHATWG UTF-8
+ * decoder. It shares nothing with the library's validator. on_valid and on_invalid get the bytes of each piece.
+ */
+template <typename OnValid, typename OnInvalid>
+void scan_utf8(std::string_view s, OnValid on_valid, OnInvalid on_invalid)
+{
+    unsigned needed = 0; // continuation bytes still expected
+    unsigned lower = 0x80U;
+    unsigned upper = 0xBFU;
+    std::size_t start = 0; // first byte of the sequence in progress
+    std::size_t i = 0;
+    while (i < s.size())
+    {
+        const auto b = static_cast<unsigned>(static_cast<unsigned char>(s[i]));
+        if (needed == 0)
+        {
+            start = i;
+            if (b < 0x80U)
+            {
+                on_valid(s.substr(i, 1));
+            }
+            else if (b >= 0xC2U && b <= 0xDFU)
+            {
+                needed = 1;
+            }
+            else if (b >= 0xE0U && b <= 0xEFU)
+            {
+                lower = b == 0xE0U ? 0xA0U : 0x80U;
+                upper = b == 0xEDU ? 0x9FU : 0xBFU;
+                needed = 2;
+            }
+            else if (b >= 0xF0U && b <= 0xF4U)
+            {
+                lower = b == 0xF0U ? 0x90U : 0x80U;
+                upper = b == 0xF4U ? 0x8FU : 0xBFU;
+                needed = 3;
+            }
+            else
+            {
+                on_invalid(s.substr(i, 1));
+            }
+            ++i;
+            continue;
+        }
+        if (b < lower || b > upper)
+        {
+            // The sequence in progress ends before this byte, which is read again as the start of the next one.
+            on_invalid(s.substr(start, i - start));
+            needed = 0;
+            lower = 0x80U;
+            upper = 0xBFU;
+            continue;
+        }
+        lower = 0x80U;
+        upper = 0xBFU;
+        --needed;
+        ++i;
+        if (needed == 0)
+        {
+            on_valid(s.substr(start, i - start));
+        }
+    }
+    if (needed != 0)
+    {
+        on_invalid(s.substr(start)); // cut off by the end of the text
+    }
+}
+
 inline int hex_digit(char c)
 {
     if (c >= '0' && c <= '9')
@@ -226,6 +297,64 @@ inline void append_utf8(std::string &out, unsigned cp)
 }
 
 } // namespace text_detail
+
+/** The text with one U+FFFD for each maximal ill-formed subpart: what the replace policy writes, decoded. */
+inline std::string reference_replace(std::string_view s)
+{
+    std::string out;
+    text_detail::scan_utf8(
+        s,
+        [&out](std::string_view valid) { out.append(valid); },
+        [&out](std::string_view) { out.append("\xEF\xBF\xBD"); }
+    );
+    return out;
+}
+
+/** The text with each ill-formed byte as U+00XX: what the escape policy writes, decoded. */
+inline std::string reference_escape(std::string_view s)
+{
+    std::string out;
+    text_detail::scan_utf8(
+        s,
+        [&out](std::string_view valid) { out.append(valid); },
+        [&out](std::string_view bad) {
+            for (const char c : bad)
+            {
+                text_detail::append_utf8(out, static_cast<unsigned char>(c));
+            }
+        }
+    );
+    return out;
+}
+
+/**
+ * The text as the build of the library writes it, decoded. A model applies this to every key and string it stores. With
+ * the pass policy it is the input itself, which the line then holds as invalid UTF-8 if the input is.
+ */
+inline std::string written_text(std::string_view s)
+{
+#if JSPDLOG_UTF8_POLICY == JSPDLOG_UTF8_REPLACE
+    return reference_replace(s);
+#elif JSPDLOG_UTF8_POLICY == JSPDLOG_UTF8_ESCAPE
+    return reference_escape(s);
+#else
+    return std::string{s};
+#endif
+}
+
+/**
+ * Whether a line with this string in it can be parsed by a JSON library. Always true unless the build copies invalid
+ * UTF-8, which is the only case where an oracle falls back to checking the shape of the line.
+ */
+inline bool parseable(std::string_view s)
+{
+#if JSPDLOG_UTF8_POLICY == JSPDLOG_UTF8_PASS
+    return is_valid_utf8(s);
+#else
+    (void)s;
+    return true;
+#endif
+}
 
 /**
  * Decodes a JSON string literal byte by byte, for text that is not valid UTF-8 and so cannot go through nlohmann.

@@ -9,6 +9,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <regex>
 #include <string>
 #include <vector>
@@ -346,4 +347,253 @@ TEST_CASE("formatter: a payload with fields but no message", "[formatter]")
     const auto &token = jspdlog::detail::process_token();
     const std::string payload = std::string(token.data(), token.size()) + "F00000006,\"k\":1";
     CHECK(format_payload(formatter, payload) == "{\"k\":1}\n");
+}
+
+namespace
+{
+
+// The line the formatter writes for a message at the given time, with only the timestamp header.
+std::string format_at(jspdlog::json_options opts, spdlog::log_clock::time_point time)
+{
+    opts.logger_key = std::nullopt;
+    opts.level_key = std::nullopt;
+    opts.timestamp_key = "ts";
+    opts.time_type = spdlog::pattern_time_type::utc;
+    jspdlog::json_formatter formatter(opts);
+    spdlog::details::log_msg msg("name", jspdlog::level::info, "x");
+    msg.time = time;
+    spdlog::memory_buf_t buf;
+    formatter.format(msg, buf);
+    const std::string line(buf.data(), buf.size());
+    // The payload "x" is not from a json_logger, so the line also holds the message. Keep the header part only.
+    const auto cut = line.find(",\"message\"");
+    return line.substr(0, cut) + "}\n";
+}
+
+// The nanoseconds of the second that a time point falls in, found without the formatter's arithmetic.
+long long nanos_of_second(spdlog::log_clock::time_point time)
+{
+    constexpr long long NANOS_PER_SECOND = 1'000'000'000;
+    const long long nanos =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count() % NANOS_PER_SECOND;
+    return nanos < 0 ? nanos + NANOS_PER_SECOND : nanos;
+}
+
+// The nanoseconds as nine decimal digits, cut to the first digits.
+std::string fraction(long long nanos, std::size_t digits)
+{
+    std::string text = std::to_string(nanos);
+    text.insert(0, 9 - text.size(), '0');
+    return text.substr(0, digits);
+}
+
+// 2026-05-13T08:00:00Z plus 123456789 ns, cut to the resolution of the clock.
+spdlog::log_clock::time_point known_time()
+{
+    const auto offset = std::chrono::seconds(1778659200) + std::chrono::nanoseconds(123456789);
+    return spdlog::log_clock::time_point{std::chrono::duration_cast<spdlog::log_clock::duration>(offset)};
+}
+
+} // namespace
+
+TEST_CASE("formatter: level names default to the names of spdlog", "[formatter]")
+{
+    const fixture f;
+    f.logger.warn("w");
+    CHECK(f.last() == R"({"logger":"t","level":"warning","message":"w"})");
+
+    // Every level, through the function that spdlog's own formatters use, so SPDLOG_LEVEL_NAMES keeps working.
+    for (int i = 0; i < static_cast<int>(jspdlog::level::off); ++i)
+    {
+        const auto lvl = static_cast<jspdlog::level>(i);
+        f.logger.log(lvl, "x");
+        const std::string expected = std::string(R"({"logger":"t","level":")") +
+                                     std::string(jspdlog::detail::level_name(lvl)) + R"(","message":"x"})";
+        CHECK(f.last() == expected);
+    }
+}
+
+TEST_CASE("formatter: level_names replaces the names", "[formatter]")
+{
+    auto opts = deterministic_options();
+    opts.level_names = {{"TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "OFF"}};
+    const fixture f("t", opts);
+
+    f.logger.log(jspdlog::level::trace, "a");
+    CHECK(f.last() == R"({"logger":"t","level":"TRACE","message":"a"})");
+    f.logger.warn("b");
+    CHECK(f.last() == R"({"logger":"t","level":"WARN","message":"b"})");
+    f.logger.critical("c");
+    CHECK(f.last() == R"({"logger":"t","level":"FATAL","message":"c"})");
+    f.logger.spdlog_logger()->error("d");
+    CHECK(f.last() == R"({"logger":"t","level":"ERROR","message":"d"})");
+}
+
+TEST_CASE("formatter: level names are escaped", "[formatter]")
+{
+    auto opts = deterministic_options();
+    opts.level_names = {{"t\"", "d", "i", "w", "e", "c", "o"}};
+    const fixture f("t", opts);
+    f.logger.log(jspdlog::level::trace, "a");
+    // MSVC 19.44 mis-stringifies raw strings with backslashes inside Catch2 macros.
+    const std::string expected = R"({"logger":"t","level":"t\"","message":"a"})";
+    CHECK(f.last() == expected);
+}
+
+TEST_CASE("formatter: severity_key writes a number after the level", "[formatter]")
+{
+    auto opts = deterministic_options();
+    opts.severity_key = "severity";
+    SECTION("default numbers")
+    {
+        const fixture f("t", opts);
+        f.logger.log(jspdlog::level::trace, "a");
+        CHECK(f.last() == R"({"logger":"t","level":"trace","severity":1,"message":"a"})");
+        f.logger.debug("a");
+        CHECK(f.last() == R"({"logger":"t","level":"debug","severity":5,"message":"a"})");
+        f.logger.info("a");
+        CHECK(f.last() == R"({"logger":"t","level":"info","severity":9,"message":"a"})");
+        f.logger.warn("a");
+        CHECK(f.last() == R"({"logger":"t","level":"warning","severity":13,"message":"a"})");
+        f.logger.error("a");
+        CHECK(f.last() == R"({"logger":"t","level":"error","severity":17,"message":"a"})");
+        f.logger.critical("a");
+        CHECK(f.last() == R"({"logger":"t","level":"critical","severity":21,"message":"a"})");
+    }
+    SECTION("custom numbers and names")
+    {
+        opts.severity_numbers = {0, 10, 20, 30, 40, 50, -1};
+        opts.level_names = {{"TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "OFF"}};
+        const fixture f("t", opts);
+        f.logger.warn("a");
+        CHECK(f.last() == R"({"logger":"t","level":"WARN","severity":30,"message":"a"})");
+        f.logger.log(jspdlog::level::trace, "a");
+        CHECK(f.last() == R"({"logger":"t","level":"TRACE","severity":0,"message":"a"})");
+    }
+    SECTION("without the level key")
+    {
+        opts.level_key = std::nullopt;
+        const fixture f("t", opts);
+        f.logger.info({"k", 1}, "a");
+        CHECK(f.last() == R"({"logger":"t","severity":9,"k":1,"message":"a"})");
+    }
+    SECTION("between the level and the process")
+    {
+        opts.process_key = "pid";
+        opts.timestamp_key = "ts";
+        jspdlog::json_formatter formatter(opts);
+        const std::string line = format_payload(formatter, "x");
+        INFO(line);
+        // MSVC 19.44 mis-stringifies raw strings with backslashes inside Catch2 macros.
+        const std::regex order(R"re(^\{"ts":"[^"]*","logger":"name","level":"info","severity":9,"pid":\d+,)re");
+        CHECK(std::regex_search(line, order));
+    }
+    SECTION("off by default")
+    {
+        const fixture f;
+        f.logger.info("a");
+        CHECK(f.last().find("severity") == std::string::npos);
+    }
+}
+
+TEST_CASE("formatter: the timestamp formats", "[formatter]")
+{
+    const auto time = known_time();
+    const long long nanos = nanos_of_second(time);
+    auto opts = deterministic_options();
+
+    SECTION("milliseconds, the default")
+    {
+        const std::string expected = R"({"ts":"2026-05-13T08:00:00.)" + fraction(nanos, 3) + "Z\"}\n";
+        CHECK(format_at(opts, time) == expected);
+        CHECK(fraction(nanos, 3) == "123");
+    }
+    SECTION("microseconds")
+    {
+        opts.timestamp_style = jspdlog::timestamp_format::rfc3339_micros;
+        const std::string expected = R"({"ts":"2026-05-13T08:00:00.)" + fraction(nanos, 6) + "Z\"}\n";
+        CHECK(format_at(opts, time) == expected);
+        CHECK(fraction(nanos, 6) == "123456");
+    }
+    SECTION("nanoseconds")
+    {
+        opts.timestamp_style = jspdlog::timestamp_format::rfc3339_nanos;
+        const std::string expected = R"({"ts":"2026-05-13T08:00:00.)" + fraction(nanos, 9) + "Z\"}\n";
+        CHECK(format_at(opts, time) == expected);
+        // The clock cuts the digits it cannot count: 123456789 with 1 ns, 123456700 with 100 ns, 123456000 with 1 us.
+        CHECK(fraction(nanos, 6) == "123456");
+    }
+    SECTION("epoch milliseconds are a number")
+    {
+        opts.timestamp_style = jspdlog::timestamp_format::epoch_millis;
+        const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(time.time_since_epoch()).count();
+        CHECK(millis == 1778659200123);
+        CHECK(format_at(opts, time) == "{\"ts\":" + std::to_string(millis) + "}\n");
+    }
+    SECTION("epoch milliseconds ignore the time type")
+    {
+        opts.timestamp_style = jspdlog::timestamp_format::epoch_millis;
+        opts.timestamp_key = "ts";
+        opts.time_type = spdlog::pattern_time_type::local;
+        jspdlog::json_formatter formatter(opts);
+        spdlog::details::log_msg msg("name", jspdlog::level::info, "x");
+        msg.time = time;
+        spdlog::memory_buf_t buf;
+        formatter.format(msg, buf);
+        const std::string line(buf.data(), buf.size());
+        CHECK(line.rfind("{\"ts\":1778659200123,", 0) == 0);
+    }
+    SECTION("the cached second is rebuilt, and the fraction changes within a second")
+    {
+        opts.timestamp_style = jspdlog::timestamp_format::rfc3339_micros;
+        opts.timestamp_key = "ts";
+        opts.time_type = spdlog::pattern_time_type::utc;
+        jspdlog::json_formatter formatter(opts);
+        spdlog::details::log_msg msg("name", jspdlog::level::info, "x");
+        spdlog::memory_buf_t buf;
+        msg.time = spdlog::log_clock::time_point{std::chrono::seconds(1778659200) + std::chrono::microseconds(5)};
+        formatter.format(msg, buf);
+        CHECK(std::string(buf.data(), buf.size()).rfind(R"({"ts":"2026-05-13T08:00:00.000005Z",)", 0) == 0);
+        msg.time = spdlog::log_clock::time_point{std::chrono::seconds(1778659201) + std::chrono::microseconds(999999)};
+        buf.clear();
+        formatter.format(msg, buf);
+        CHECK(std::string(buf.data(), buf.size()).rfind(R"({"ts":"2026-05-13T08:00:01.999999Z",)", 0) == 0);
+    }
+}
+
+TEST_CASE("formatter: times before the epoch round down", "[formatter]")
+{
+    // -750.123456 ms is 249.876544 ms into 1969-12-31T23:59:59, and -751 as a floor in milliseconds.
+    const spdlog::log_clock::time_point time{
+        std::chrono::duration_cast<spdlog::log_clock::duration>(-std::chrono::nanoseconds(750'123'456))
+    };
+    auto opts = deterministic_options();
+
+    SECTION("epoch milliseconds")
+    {
+        opts.timestamp_style = jspdlog::timestamp_format::epoch_millis;
+        CHECK(format_at(opts, time) == "{\"ts\":-751}\n");
+    }
+#ifndef _WIN32 // The Windows C runtime does not convert times before the epoch.
+    const long long nanos = nanos_of_second(time);
+    SECTION("milliseconds")
+    {
+        const std::string expected = R"({"ts":"1969-12-31T23:59:59.)" + fraction(nanos, 3) + "Z\"}\n";
+        CHECK(format_at(opts, time) == expected);
+        CHECK(fraction(nanos, 3) == "249");
+    }
+    SECTION("microseconds")
+    {
+        opts.timestamp_style = jspdlog::timestamp_format::rfc3339_micros;
+        const std::string expected = R"({"ts":"1969-12-31T23:59:59.)" + fraction(nanos, 6) + "Z\"}\n";
+        CHECK(format_at(opts, time) == expected);
+        CHECK((fraction(nanos, 6) == "249876" || fraction(nanos, 6) == "249877")); // 1 us clocks truncate toward zero
+    }
+    SECTION("nanoseconds")
+    {
+        opts.timestamp_style = jspdlog::timestamp_format::rfc3339_nanos;
+        const std::string expected = R"({"ts":"1969-12-31T23:59:59.)" + fraction(nanos, 9) + "Z\"}\n";
+        CHECK(format_at(opts, time) == expected);
+    }
+#endif
 }

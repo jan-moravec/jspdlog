@@ -118,13 +118,14 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     FUZZ_CHECK(line.compare(0, PREFIX.size(), PREFIX) == 0);
     FUZZ_CHECK(line.compare(line.size() - 2, 2, "}\n") == 0);
     const std::string_view quoted = std::string_view{line}.substr(PREFIX.size(), line.size() - PREFIX.size() - 2);
-    FUZZ_CHECK(fuzz::decode_json_string_or_abort(quoted) == payload);
+    const std::string expected_message = fuzz::written_text(payload);
+    FUZZ_CHECK(fuzz::decode_json_string_or_abort(quoted) == expected_message);
     fuzz::check_shape(line, "\n");
-    if (fuzz::is_valid_utf8(payload))
+    if (fuzz::parseable(payload))
     {
         const fuzz::ojson parsed = fuzz::parse_line(line, "\n");
         FUZZ_CHECK((fuzz::keys_of(parsed) == std::vector<std::string>{"logger", "level", "message"}));
-        FUZZ_CHECK(parsed.at("message") == fuzz::ojson(payload));
+        FUZZ_CHECK(parsed.at("message") == fuzz::ojson(expected_message));
     }
     return 0;
 }

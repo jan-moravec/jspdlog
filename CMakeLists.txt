@@ -73,6 +73,21 @@ target_include_directories(
 )
 target_link_libraries(jspdlog INTERFACE spdlog::spdlog)
 
+# The UTF-8 policy is read by inline functions of the header, so every translation unit must see the same value. The
+# interface definitions make a CMake build consistent, and the installed config file carries them to consumers.
+set(JSPDLOG_UTF8_POLICY "replace" CACHE STRING "Invalid UTF-8 in logged strings: replace, escape or pass")
+set_property(CACHE JSPDLOG_UTF8_POLICY PROPERTY STRINGS replace escape pass)
+option(JSPDLOG_ESCAPE_LINE_SEPARATORS "Escape U+2028 and U+2029, for consumers that embed lines in JavaScript" OFF)
+
+string(TOUPPER "${JSPDLOG_UTF8_POLICY}" _jspdlog_policy)
+if(NOT _jspdlog_policy MATCHES "^(REPLACE|ESCAPE|PASS)$")
+    message(FATAL_ERROR "JSPDLOG_UTF8_POLICY must be replace, escape or pass, not '${JSPDLOG_UTF8_POLICY}'")
+endif()
+target_compile_definitions(jspdlog INTERFACE JSPDLOG_UTF8_POLICY=JSPDLOG_UTF8_${_jspdlog_policy})
+if(JSPDLOG_ESCAPE_LINE_SEPARATORS)
+    target_compile_definitions(jspdlog INTERFACE JSPDLOG_ESCAPE_LINE_SEPARATORS=1)
+endif()
+
 # --- Install rules ------------------------------------------------------------
 # jspdlog is a pure INTERFACE (header-only) target. To stay friendly to users
 # who pull spdlog via FetchContent (which is incompatible with install(EXPORT)),
@@ -90,6 +105,13 @@ if(JSPDLOG_INSTALL)
     )
 
     set(JSPDLOG_INSTALL_CMAKEDIR ${CMAKE_INSTALL_LIBDIR}/cmake/jspdlog)
+    # Written into the config file, so an installed consumer gets the policy the package was built with.
+    string(TOUPPER "${JSPDLOG_UTF8_POLICY}" JSPDLOG_UTF8_POLICY_UPPER)
+    if(JSPDLOG_ESCAPE_LINE_SEPARATORS)
+        set(JSPDLOG_ESCAPE_LINE_SEPARATORS_VALUE 1)
+    else()
+        set(JSPDLOG_ESCAPE_LINE_SEPARATORS_VALUE 0)
+    endif()
 
     configure_package_config_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/cmake/jspdlogConfig.cmake.in

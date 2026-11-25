@@ -80,16 +80,18 @@ With the Visual Studio generator, add `-G "Visual Studio 17 2022" -A x64` to the
 `JSPDLOG_BUILD_TESTS`, `JSPDLOG_BUILD_EXAMPLES` and `JSPDLOG_INSTALL` default to `ON` only when jspdlog is the top-level
 project, so an embedding project gets a quiet build.
 
-| Option                       | Description                                                                               |
-| ---------------------------- | ----------------------------------------------------------------------------------------- |
-| `JSPDLOG_BUILD_TESTS`        | Build the Catch2 tests.                                                                   |
-| `JSPDLOG_BUILD_EXAMPLES`     | Build the programs under `example/`.                                                      |
-| `JSPDLOG_INSTALL`            | Generate install rules for the header and the CMake package.                              |
-| `JSPDLOG_TEST_WITH_NLOHMANN` | Build the tests that need nlohmann/json: interop and fuzz replay. Default `ON`.           |
-| `JSPDLOG_BUILD_FUZZERS`      | Build the libFuzzer targets (Clang only). Default `OFF`; the `clang-fuzz` preset sets it. |
-| `JSPDLOG_BUILD_BENCH`        | Build the benchmark program. Default `OFF`; the `bench` preset sets it.                   |
-| `JSPDLOG_WARNINGS_AS_ERRORS` | Treat warnings in the tests and examples as errors. Default `OFF`; presets set it.        |
-| `JSPDLOG_SPDLOG_GIT_TAG`     | spdlog tag or commit to fetch when no installed spdlog is found.                          |
+| Option                           | Description                                                                               |
+| -------------------------------- | ----------------------------------------------------------------------------------------- |
+| `JSPDLOG_BUILD_TESTS`            | Build the Catch2 tests.                                                                   |
+| `JSPDLOG_BUILD_EXAMPLES`         | Build the programs under `example/`.                                                      |
+| `JSPDLOG_INSTALL`                | Generate install rules for the header and the CMake package.                              |
+| `JSPDLOG_TEST_WITH_NLOHMANN`     | Build the tests that need nlohmann/json: interop and fuzz replay. Default `ON`.           |
+| `JSPDLOG_BUILD_FUZZERS`          | Build the libFuzzer targets (Clang only). Default `OFF`; the `clang-fuzz` preset sets it. |
+| `JSPDLOG_BUILD_BENCH`            | Build the benchmark program. Default `OFF`; the `bench` preset sets it.                   |
+| `JSPDLOG_WARNINGS_AS_ERRORS`     | Treat warnings in the tests and examples as errors. Default `OFF`; presets set it.        |
+| `JSPDLOG_SPDLOG_GIT_TAG`         | spdlog tag or commit to fetch when no installed spdlog is found.                          |
+| `JSPDLOG_UTF8_POLICY`            | Invalid UTF-8 in logged strings: `replace` (default), `escape` or `pass`.                 |
+| `JSPDLOG_ESCAPE_LINE_SEPARATORS` | Write U+2028 and U+2029 as escapes. Default `OFF`.                                        |
 
 The tests and examples compile with a strict warning set ([cmake/CompilerWarnings.cmake](cmake/CompilerWarnings.cmake)):
 `/W4 /permissive-` on MSVC, and `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Wold-style-cast` and
@@ -139,7 +141,7 @@ jspdlog promises that every line is one valid JSON object, whatever the input. T
 
 | Target            | What it checks                                                                                                                                  |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `escape`          | The escaped string decodes back to the input bytes, valid UTF-8 or not.                                                                         |
+| `escape`          | The escaped string decodes to the input with each maximal invalid UTF-8 subpart replaced, for every input.                                      |
 | `fields`          | Operations on `fields`, `with()` and per-call fields against a short reference model; a braced list gives the line of the same `fields` object. |
 | `logger_line`     | Fuzzed logger name, header keys, time type, line terminator and message: one object per line.                                                   |
 | `foreign_payload` | Payloads logged straight on the `spdlog::logger`, with prefixes of the payload token: no injection.                                             |
@@ -178,9 +180,11 @@ an editor over them.
 - A fuzz finding is fixed with its minimized input added to `test/fuzz/regressions/<target>/`, so it replays in every
   build. Minimize it with `fuzz_<target> -minimize_crash=1 -runs=10000 crash-<hash>`.
 - Targets are deterministic and fast: no sleeps, no files, no network, no threads.
-- The oracle must not give false alarms. A failing oracle is fixed before merging, not ignored. Until the UTF-8 policy of
-  0.4, jspdlog passes invalid UTF-8 through and nlohmann/json rejects it, so targets parse a line only when every string
-  in it is valid UTF-8 and otherwise check its shape.
+- The oracle must not give false alarms. A failing oracle is fixed before merging, not ignored. With the default UTF-8
+  policy every line is valid UTF-8, so targets parse every line, and a model applies `fuzz::written_text` to each key and
+  string it stores. Only a build with `JSPDLOG_UTF8_POLICY=pass` copies invalid UTF-8, which nlohmann/json rejects, so
+  there the targets check only the shape of such a line. Fuzzing runs with the default policy; the replay tests of the
+  escape and pass test executables cover the others.
 - Keep each corpus under about 50 small files. Shrink one with `fuzz_<target> -merge=1 new_corpus work/<target> test/fuzz/corpus/<target>` and copy the result back.
 - Change `escape`, the formatter or `fields`? Run `clang-fuzz` for 60 seconds per target before opening the PR.
 

@@ -63,6 +63,11 @@ loggers and sinks jspdlog does not wrap. Structural limits that remain:
 - The options belong to each sink's formatter, so loggers sharing a sink share
   the options of the one created last.
 
+On `main` after 0.3.0, strings are valid UTF-8 by default: invalid bytes become
+U+FFFD, or `\u00XX` escapes, or pass, as the compile-time `JSPDLOG_UTF8_POLICY`
+says. Level names can be replaced and a numeric severity added, and the
+timestamp has four formats. The fuzz oracles parse every line.
+
 ## 4. Architecture decision: custom `spdlog::formatter` (proposed for 0.2)
 
 The proof of concept on the
@@ -192,16 +197,17 @@ possible, so numbers, booleans and nested data stay filterable as such
 
 ### 0.4.0: correctness and schema
 
-- **UTF-8.** Replace invalid sequences with U+FFFD (default), or pass them
-  through or `\u`-escape them, as an option. Optionally escape U+2028/2029.
-- **Level names.** Mapping table (`warning` vs `warn`, uppercase) plus an
+- [x] **UTF-8.** Replace invalid sequences with U+FFFD (default), or pass them
+  through or `\u`-escape them, as a compile-time setting (decision 19).
+  Optionally escape U+2028/2029.
+- [x] **Level names.** Mapping table (`warning` vs `warn`, uppercase) plus an
   optional numeric severity field.
-- **Timestamps.** RFC 3339 in ms (default), µs or ns precision, or epoch
+- [x] **Timestamps.** RFC 3339 in ms (default), µs or ns precision, or epoch
   milliseconds.
-- **Schema presets** for common ingestion formats: Elastic ECS (`@timestamp`,
+- [ ] **Schema presets** for common ingestion formats: Elastic ECS (`@timestamp`,
   `log.level`), OpenTelemetry log data model, GCP (`severity`), Datadog.
   Presets are just pre-filled options structs.
-- **Exceptions.** `logger.error(ex, "...")` emits
+- [ ] **Exceptions.** `logger.error(ex, "...")` emits
   `"error":{"type":...,"message":...}`.
 
 ### 0.5.0: ergonomics
@@ -248,14 +254,14 @@ line with nlohmann/json.
 
 ### Targets
 
-| #   | Target                    | Input                                                                                                        | Checks                                                                                                                     |
-| --- | ------------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `escape`                  | Raw bytes                                                                                                    | The escaped string parses back to the same bytes (for valid UTF-8; from 0.4, invalid UTF-8 follows the configured policy). |
-| 2   | `fields`                  | A byte-coded sequence of operations: insert typed values under fuzzed keys, merge, `with()`, per-call fields | The line parses; keys, values, insertion order and override rules match a simple reference model.                          |
-| 3   | `logger_line`             | Fuzzed logger name, header keys, time type, eol and message                                                  | Every line is one object; header fields are present with the configured keys; the message round-trips.                     |
-| 4   | `foreign_payload` (0.2)   | Raw payloads logged directly on the underlying `spdlog::logger`, including prefixes of the payload token     | The line is valid JSON and the payload appears only inside the message; no injected fields.                                |
-| 5   | `value_types` (0.3, done) | `FuzzedDataProvider`-built nested optionals, variants, ranges and maps                                       | The parsed value equals the serialized structure.                                                                          |
-| 6   | `numbers`                 | Bit patterns for every integer width, `float`, `double`, `long double`                                       | Integers round-trip exactly; floats round-trip; NaN and infinity become `null`.                                            |
+| #   | Target                    | Input                                                                                                        | Checks                                                                                                                                   |
+| --- | ------------------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `escape`                  | Raw bytes                                                                                                    | The escaped string decodes to what the UTF-8 policy makes of the input, for every input: an independent decoder gives the replaced text. |
+| 2   | `fields`                  | A byte-coded sequence of operations: insert typed values under fuzzed keys, merge, `with()`, per-call fields | The line parses; keys, values, insertion order and override rules match a simple reference model.                                        |
+| 3   | `logger_line`             | Fuzzed logger name, header keys, time type, eol and message                                                  | Every line is one object; header fields are present with the configured keys; the message round-trips.                                   |
+| 4   | `foreign_payload` (0.2)   | Raw payloads logged directly on the underlying `spdlog::logger`, including prefixes of the payload token     | The line is valid JSON and the payload appears only inside the message; no injected fields.                                              |
+| 5   | `value_types` (0.3, done) | `FuzzedDataProvider`-built nested optionals, variants, ranges and maps                                       | The parsed value equals the serialized structure.                                                                                        |
+| 6   | `numbers`                 | Bit patterns for every integer width, `float`, `double`, `long double`                                       | Integers round-trip exactly; floats round-trip; NaN and infinity become `null`.                                                          |
 
 ### CI
 
@@ -303,26 +309,28 @@ separate per-version headers aren't needed.
 
 ## 9. Decisions (2026-11-21 to 2026-11-24)
 
-| #   | Question                             | Decision                                                                                                                                                                                                                                                                                                  |
-| --- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Key order                            | Insertion order: outer context, inner context, per-call fields, message. A replaced key keeps its position.                                                                                                                                                                                               |
-| 2   | Source location                      | Always captured; written only when enabled (off by default); file base name.                                                                                                                                                                                                                              |
-| 3   | Fields that clash with header keys   | Caller's responsibility. Debug-build `JSPDLOG_ASSERT`, like bounds checks in `std::vector`; no release cost.                                                                                                                                                                                              |
-| 4   | Value types                          | Keys are strings; values map to native JSON types wherever possible (section 5, milestone 0.3.0). The message is always a string; `info(value)` takes runtime strings only.                                                                                                                               |
-| 5   | Naming                               | `jspdlog::fields`, `logger.with(...)`.                                                                                                                                                                                                                                                                    |
-| 6   | Payload token                        | One immutable process-wide token. Accepted exception to "no global state": it is a constant, not configurable shared state. `adopt()` keeps installing the formatter.                                                                                                                                     |
-| 7   | Minimum spdlog                       | 1.12.                                                                                                                                                                                                                                                                                                     |
-| 8   | Raw-message sinks                    | A documented route per sink, no stripping helper; `mongo_sink` and `kafka_sink` unsupported.                                                                                                                                                                                                              |
-| 9   | Source `file`                        | Base name, written by the formatter from 0.2.0 on.                                                                                                                                                                                                                                                        |
-| 10  | Process id                           | Cached, because getpid is a system call on Linux; a pthread_atfork handler clears it in a forked child.                                                                                                                                                                                                   |
-| 11  | Per-call key replacing a context key | Context position: a key stays where it first appeared.                                                                                                                                                                                                                                                    |
-| 12  | Getter name for bound fields         | `context()`.                                                                                                                                                                                                                                                                                              |
-| 13  | Deprecated aliases for 0.1 names     | None, clean rename.                                                                                                                                                                                                                                                                                       |
-| 14  | Test option name                     | `JSPDLOG_TEST_NLOHMANN_INTEROP` becomes `JSPDLOG_TEST_WITH_NLOHMANN`.                                                                                                                                                                                                                                     |
-| 15  | Releases                             | Each milestone is tagged `v0.N.0` when complete; the API may break between minor versions until `v1.0.0`.                                                                                                                                                                                                 |
-| 16  | Per-call fields (2026-11-24)         | A braced list passed to a logging call is a separate type, `detail::call_fields`, that holds references to its keys and values and is serialized only when the line is written; at most 16 pairs. A disabled call costs a few nanoseconds, with no change at the call site.                               |
-| 17  | Lazy values (2026-11-24)             | A value in a per-call braced list may be a callable taking no arguments, run only when the line is written. `fields` and `with()` reject callables at compile time, and a type with a JSON form is never lazy.                                                                                            |
-| 18  | Level macros (2026-11-24)            | Optional `JSPDLOG_*` statement macros skip every argument of a call whose level is off. `JSPDLOG_ACTIVE_LEVEL` is read only inside macros, so translation units with different values link together. A removed call is `if (false)`, not `(void)0`, so it stays type-checked and its variables stay used. |
+| #   | Question                             | Decision                                                                                                                                                                                                                                                                                                            |
+| --- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Key order                            | Insertion order: outer context, inner context, per-call fields, message. A replaced key keeps its position.                                                                                                                                                                                                         |
+| 2   | Source location                      | Always captured; written only when enabled (off by default); file base name.                                                                                                                                                                                                                                        |
+| 3   | Fields that clash with header keys   | Caller's responsibility. Debug-build `JSPDLOG_ASSERT`, like bounds checks in `std::vector`; no release cost.                                                                                                                                                                                                        |
+| 4   | Value types                          | Keys are strings; values map to native JSON types wherever possible (section 5, milestone 0.3.0). The message is always a string; `info(value)` takes runtime strings only.                                                                                                                                         |
+| 5   | Naming                               | `jspdlog::fields`, `logger.with(...)`.                                                                                                                                                                                                                                                                              |
+| 6   | Payload token                        | One immutable process-wide token. Accepted exception to "no global state": it is a constant, not configurable shared state. `adopt()` keeps installing the formatter.                                                                                                                                               |
+| 7   | Minimum spdlog                       | 1.12.                                                                                                                                                                                                                                                                                                               |
+| 8   | Raw-message sinks                    | A documented route per sink, no stripping helper; `mongo_sink` and `kafka_sink` unsupported.                                                                                                                                                                                                                        |
+| 9   | Source `file`                        | Base name, written by the formatter from 0.2.0 on.                                                                                                                                                                                                                                                                  |
+| 10  | Process id                           | Cached, because getpid is a system call on Linux; a pthread_atfork handler clears it in a forked child.                                                                                                                                                                                                             |
+| 11  | Per-call key replacing a context key | Context position: a key stays where it first appeared.                                                                                                                                                                                                                                                              |
+| 12  | Getter name for bound fields         | `context()`.                                                                                                                                                                                                                                                                                                        |
+| 13  | Deprecated aliases for 0.1 names     | None, clean rename.                                                                                                                                                                                                                                                                                                 |
+| 14  | Test option name                     | `JSPDLOG_TEST_NLOHMANN_INTEROP` becomes `JSPDLOG_TEST_WITH_NLOHMANN`.                                                                                                                                                                                                                                               |
+| 15  | Releases                             | Each milestone is tagged `v0.N.0` when complete; the API may break between minor versions until `v1.0.0`.                                                                                                                                                                                                           |
+| 16  | Per-call fields (2026-11-24)         | A braced list passed to a logging call is a separate type, `detail::call_fields`, that holds references to its keys and values and is serialized only when the line is written; at most 16 pairs. A disabled call costs a few nanoseconds, with no change at the call site.                                         |
+| 17  | Lazy values (2026-11-24)             | A value in a per-call braced list may be a callable taking no arguments, run only when the line is written. `fields` and `with()` reject callables at compile time, and a type with a JSON form is never lazy.                                                                                                      |
+| 18  | Level macros (2026-11-24)            | Optional `JSPDLOG_*` statement macros skip every argument of a call whose level is off. `JSPDLOG_ACTIVE_LEVEL` is read only inside macros, so translation units with different values link together. A removed call is `if (false)`, not `(void)0`, so it stays type-checked and its variables stay used.           |
+| 19  | UTF-8 policy (2026-11-24)            | A compile-time setting, `JSPDLOG_UTF8_POLICY` (also a CMake cache variable), not a per-logger option: a `fields` object and bound context are serialized before any logger sees them, so one rule must cover every string, and a braced list and a `fields` object must give the same line. Replace is the default. |
+| 20  | Escaped invalid bytes (2026-11-24)   | The escape policy writes `\u00XX` for each invalid byte. Lone surrogate escapes are not offered, because strict parsers, nlohmann/json included, reject them.                                                                                                                                                       |
 
 ## 10. Quality gates (every milestone)
 

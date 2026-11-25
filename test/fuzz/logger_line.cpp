@@ -37,13 +37,14 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     const auto eol_choice = static_cast<std::uint8_t>(r.byte() % 3U);
     const std::string name = r.string(16);
 
-    // Two equal keys would write a duplicate key, which is the caller's problem, so make them distinct.
+    // Two equal keys would write a duplicate key, which is the caller's problem, so make them distinct as written: two
+    // different invalid keys can be replaced by the same text.
     std::set<std::string> used;
     const auto next_key = [&](bool enabled) {
         std::string key = r.string(8);
         if (enabled)
         {
-            while (!used.insert(key).second)
+            while (!used.insert(fuzz::written_text(key)).second)
             {
                 key += '~';
             }
@@ -81,14 +82,14 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     FUZZ_CHECK(h.sink->lines.size() == 1);
     const std::string &line = h.sink->lines.front();
 
-    bool utf8 = fuzz::is_valid_utf8(name) && fuzz::is_valid_utf8(message);
+    // Every line parses, unless the build copies invalid UTF-8, which nlohmann rejects: then only the shape is checked.
+    bool utf8 = fuzz::parseable(name) && fuzz::parseable(message);
     for (const header_key *k : {&timestamp, &logger, &level, &process, &thread, &source, &message_key})
     {
-        utf8 = utf8 && fuzz::is_valid_utf8(k->key);
+        utf8 = utf8 && fuzz::parseable(k->key);
     }
     if (!utf8)
     {
-        // nlohmann cannot read invalid UTF-8; until a UTF-8 policy exists (ROADMAP 0.4) only the shape is checked.
         fuzz::check_shape(line, eol);
         return 0;
     }
@@ -101,15 +102,15 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     {
         if (k->enabled)
         {
-            expected_keys.push_back(k->key);
+            expected_keys.push_back(fuzz::written_text(k->key));
         }
     }
-    expected_keys.push_back(message_key.key);
+    expected_keys.push_back(fuzz::written_text(message_key.key));
     FUZZ_CHECK(fuzz::keys_of(parsed) == expected_keys);
 
     if (timestamp.enabled)
     {
-        const auto &ts = parsed.at(timestamp.key);
+        const auto &ts = parsed.at(fuzz::written_text(timestamp.key));
         FUZZ_CHECK(ts.is_string());
         const std::string text = ts.get<std::string>();
         FUZZ_CHECK(text.size() >= 20 && text[4] == '-' && text[7] == '-' && text[10] == 'T' && text[13] == ':');
@@ -120,28 +121,28 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     }
     if (logger.enabled)
     {
-        FUZZ_CHECK(parsed.at(logger.key) == ojson(name));
+        FUZZ_CHECK(parsed.at(fuzz::written_text(logger.key)) == ojson(fuzz::written_text(name)));
     }
     if (level.enabled)
     {
-        FUZZ_CHECK(parsed.at(level.key) == ojson("info"));
+        FUZZ_CHECK(parsed.at(fuzz::written_text(level.key)) == ojson("info"));
     }
     if (process.enabled)
     {
-        FUZZ_CHECK(parsed.at(process.key).is_number_integer());
+        FUZZ_CHECK(parsed.at(fuzz::written_text(process.key)).is_number_integer());
     }
     if (thread.enabled)
     {
-        FUZZ_CHECK(parsed.at(thread.key).is_number_integer());
+        FUZZ_CHECK(parsed.at(fuzz::written_text(thread.key)).is_number_integer());
     }
     if (source.enabled)
     {
-        const auto &src = parsed.at(source.key);
+        const auto &src = parsed.at(fuzz::written_text(source.key));
         FUZZ_CHECK(src.is_object());
         FUZZ_CHECK((fuzz::keys_of(src) == std::vector<std::string>{"file", "line", "function"}));
         FUZZ_CHECK(src.at("file").get<std::string>().find_first_of("/\\") == std::string::npos);
         FUZZ_CHECK(src.at("line").is_number_integer());
     }
-    FUZZ_CHECK(parsed.at(message_key.key) == ojson(message));
+    FUZZ_CHECK(parsed.at(fuzz::written_text(message_key.key)) == ojson(fuzz::written_text(message)));
     return 0;
 }
