@@ -1,7 +1,7 @@
 // Target 3: logger_line. Fuzzes everything a user configures: the logger name, every header key, the message key, the
 // time type, the line terminator and the message, on top of the defaults or of one of the schema presets, which add
-// their level names, timestamp style and flat call site. Keys and names containing percent signs, quotes and control bytes
-// must never change the shape of the line.
+// their level names, timestamp style and flat call site. Keys and names containing percent signs, quotes and control
+// bytes must never change the shape of the line.
 #include "fuzz_support.h"
 
 #include <set>

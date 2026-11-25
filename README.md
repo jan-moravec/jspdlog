@@ -21,6 +21,8 @@ with spdlog **v1.x (1.12 or newer)** and **v2.x**.
 - **Typed fields.** Numbers and booleans stay numbers and booleans, so log tools can filter on them. Optionals, enums,
   durations, time points, containers and your own types have a JSON form too.
 - **Context for inner code.** `with()` gives a child logger that adds fields to every line it writes.
+- **Exceptions and schema presets.** `logger.error(ex, "...")` writes the exception with its causes, and one function
+  call gives the field names of Elastic ECS, OpenTelemetry, Google Cloud Logging or Datadog.
 - **Always valid JSON, and valid UTF-8 by default** for lines written through jspdlog: messages, keys, values and
   logger names are escaped, and invalid UTF-8 is replaced.
 
@@ -124,7 +126,10 @@ written, so a call at a disabled level serializes nothing (see [Expensive values
 
 Every call also records its file, line and function. They are written when `json_options::source_key` is set, as
 `"source":{"file":"main.cpp","line":12,"function":"handle"}`. The function is the short name your compiler gives, so it
-can differ between compilers. No macro is needed: [08_source_location.cpp](example/08_source_location.cpp).
+can differ between compilers. No macro is needed: [08_source_location.cpp](example/08_source_location.cpp). With
+`source_flat` the three values are fields of the line instead of an object, as ECS and OpenTelemetry want them;
+`source_file_key`, `source_line_key` and `source_function_key` rename them in both layouts (see
+[Schema presets](#schema-presets)).
 
 Example: [01_console.cpp](example/01_console.cpp).
 
@@ -211,17 +216,18 @@ jspdlog defaults to trace and removes nothing.
 Values keep their JSON type, however deeply they are nested. Everything below also works inside containers, so
 `std::map<std::string, std::optional<std::vector<int>>>` and `std::vector<jspdlog::fields>` are fine.
 
-| C++ type                                                    | JSON                                                                   |
-| ----------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `std::optional<T>`                                          | the value, or `null` when empty                                        |
-| enums                                                       | the name if {fmt} has a formatter for the enum, otherwise the number   |
-| `std::chrono::duration`                                     | milliseconds as a number                                               |
-| `std::chrono::system_clock::time_point` (any duration)      | RFC 3339 UTC string with milliseconds, `"2026-11-23T08:00:00.123Z"`    |
-| ranges (`vector`, `array`, `span`, `list`, `set`, C arrays) | array                                                                  |
-| maps whose key converts to `std::string_view`               | object, in the iteration order of the map                              |
-| `std::pair`, `std::tuple`, maps with other keys             | array (`[key, value]` pairs for such maps)                             |
-| `std::variant`, `std::monostate`                            | the active alternative; `null` for `monostate` and a valueless variant |
-| your own types                                              | through `jspdlog_serialize` or `jspdlog::serializer`, see below        |
+| C++ type                                                         | JSON                                                                                                |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `std::optional<T>`                                               | the value, or `null` when empty                                                                     |
+| enums                                                            | the name if {fmt} has a formatter for the enum, otherwise the number                                |
+| `std::chrono::duration`                                          | milliseconds as a number                                                                            |
+| `std::chrono::system_clock::time_point` (any duration)           | RFC 3339 UTC string with milliseconds, `"2026-11-23T08:00:00.123Z"`                                 |
+| ranges (`vector`, `array`, `span`, `list`, `set`, C arrays)      | array                                                                                               |
+| maps whose key converts to `std::string_view`                    | object, in the iteration order of the map                                                           |
+| `std::pair`, `std::tuple`, maps with other keys                  | array (`[key, value]` pairs for such maps)                                                          |
+| `std::variant`, `std::monostate`                                 | the active alternative; `null` for `monostate` and a valueless variant                              |
+| `std::exception` and types derived from it, `std::exception_ptr` | object with `type`, `message` and `cause`, see [Exceptions](#exceptions); `null` for a null pointer |
+| your own types                                                   | through `jspdlog_serialize` or `jspdlog::serializer`, see below                                     |
 
 - **Enums.** An enum written as a name needs a `fmt::formatter` specialization, or `format_as` with {fmt} 10 and newer.
   `format_as` that returns an integer gives a number. {fmt} 9, which spdlog 1.12 bundles, formats every unscoped enum
@@ -281,6 +287,45 @@ check its structure in release builds, as with `raw_json`; debug builds check wh
 can choose its own JSON form.
 
 Example: [09_value_types.cpp](example/09_value_types.cpp).
+
+### Exceptions
+
+An exception is a value. It is written as an object with its type name and message, and its nested causes (the ones
+`std::throw_with_nested` adds) under `cause`, at most eight deep:
+
+```cpp
+try { db.connect(); }
+catch (const std::exception &ex)
+{
+    logger.error({"error", ex, "host", host}, "connect failed");
+}
+// {...,"level":"error","error":{"type":"std::system_error","message":"Connection refused"},"host":"db1","message":"connect failed"}
+```
+
+A `catch (...)` handler has `std::current_exception()`, which is written the same way: `{"error", std::current_exception()}`.
+A null pointer is `null`, and an exception that is not a `std::exception` is `{"type":"unknown"}`.
+
+Every level and `log(level, ...)` also take the exception as the first argument, with the same endings as the other
+forms. The exception is then written first among the fields of the call, under `json_options::error_key`:
+
+```cpp
+logger.error(ex);                                  // no message
+logger.error(ex, "connect failed");                // a message, or a format string with arguments
+logger.error(ex, {"host", host}, "connect failed"); // fields and a message
+JSPDLOG_ERROR(logger, ex, {"host", host}, "connect failed");
+```
+
+The exception is held by reference and written only when the line is, so a call at a disabled level computes nothing,
+not even the type name. `error_key` (default `error`), `error_type_key` (`type`) and `error_message_key` (`message`)
+rename the parts for these call forms; the value form always writes `type` and `message`. A bound field with the error
+key is replaced by the exception at its position. A per-call field with the error key is a mistake: debug builds report
+it through `JSPDLOG_ASSERT`, and release builds write the field's value in the exception's place.
+
+The type name is the dynamic type, demangled, and the same on GCC, Clang and MSVC for standard exceptions and your own
+types in a named namespace: `std::runtime_error`, `std::system_error`, `shop::payment_error`. For the type that
+`std::throw_with_nested` throws it is the type you passed. Without RTTI the type is `std::exception`, and without
+RTTI or exceptions the causes are not inspected. A type with its own `jspdlog_serialize` or `serializer` is written by
+that, in the value form. Example: [11_presets.cpp](example/11_presets.cpp).
 
 ### Context: child loggers
 
@@ -355,6 +400,46 @@ opts.severity_key = "severity";
 The digits below the resolution of the clock are zero: `spdlog::log_clock` is `std::chrono::system_clock`, which counts
 nanoseconds with libstdc++ and libc++ and 100 ns ticks with MSVC. `epoch_millis` ignores `time_type`, because an epoch
 has no zone.
+
+### Schema presets
+
+A preset is a function that returns a filled `json_options`. Change any member afterwards:
+
+```cpp
+auto options = jspdlog::presets::ecs();
+options.source_key = "source";  // the call site is off in every preset; any text switches it on in the flat layouts
+const jspdlog::json_logger logger("app", sink, options);
+```
+
+Each row shows what the preset writes. Example: [11_presets.cpp](example/11_presets.cpp).
+
+| Preset               | Header fields                                                                                                                   | Call site (when enabled)                                                                                 | Exceptions                     | Documentation checked on 2026-11-25                                                                                                                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `presets::ecs()`     | `@timestamp` (UTC, ms), `log.logger`, `log.level` (lowercase), `process.pid`, `process.thread.id`                               | flat: `log.origin.file.name`, `log.origin.file.line`, `log.origin.function`                              | `error`: `type`, `message`     | [ECS base, log, process and error field sets](https://www.elastic.co/docs/reference/ecs/ecs-log). The pages show no ECS version; the names are those of ECS 8.x.                                                    |
+| `presets::gcp()`     | `time` (UTC, ns), `severity` (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`; trace is `DEBUG`), `logger`, `process`, `thread` | set `source_key = "logging.googleapis.com/sourceLocation"` for an object with `file`, `line`, `function` | `error`: `type`, `message`     | [Structured logging](https://cloud.google.com/logging/docs/structured-logging) and [LogEntry](https://cloud.google.com/logging/docs/reference/v2/rest/v2/LogEntry).                                                 |
+| `presets::datadog()` | `timestamp` (epoch ms), `logger.name`, `status`, `logger.thread_name`                                                           | object under the `source_key` you choose                                                                 | `error`: `kind`, `message`     | [Attributes and aliasing](https://docs.datadoghq.com/logs/log_configuration/attributes_naming_convention/), [status remapper](https://docs.datadoghq.com/logs/log_configuration/processors/log_status_remapper.md). |
+| `presets::otel()`    | `timestamp` (UTC, ns), `logger`, `severity_text` (`TRACE` ... `FATAL`), `severity_number`, `process.pid`, `thread.id`, `body`   | flat: `code.file.path`, `code.line.number`, `code.function.name`                                         | `exception`: `type`, `message` | [Logs data model](https://opentelemetry.io/docs/specs/otel/logs/data-model/) and the [code](https://opentelemetry.io/docs/specs/semconv/registry/attributes/code/) and exception attribute registries.              |
+
+Things to know about each:
+
+- **ECS.** The keys are written flat and dotted, as ECS spells its field names, so `log.level` is a key with a dot in
+  it, not a nested object. The ECS pages list `error.type` and `error.message`, which the exception object provides
+  after the dots are expanded, and they do not list `ecs.version`: bind it with `with({"ecs.version", "8.11.0"})` if
+  your pipeline needs it. `log.origin.file.line` and `process.thread.id` are numbers, as ECS types them.
+- **Google Cloud Logging.** The `severity` names are those of `LogSeverity`; `WARN` is not one of them, so warnings are
+  `WARNING`, and `off` is written `DEFAULT`. The documentation types `sourceLocation.line` as an int64 in string form, and jspdlog
+  writes a number, which the protobuf JSON mapping accepts for int64; this was not tried against a live agent. The
+  structured logging page does not say which format `time` takes; the `LogEntry` reference defines timestamps as RFC 3339
+  with up to nanoseconds, which is what the preset writes. Trace correlation uses `logging.googleapis.com/trace`.
+- **Datadog.** The reserved `status` is remapped by its first letters, so `trace` becomes debug, `warn` warning and
+  `critical` critical. `timestamp` as epoch milliseconds is a format its date remapper recognizes. `logger.thread_name` is a
+  string attribute, and jspdlog has the numeric thread id only, so it writes the number; remove the key with
+  `thread_key = std::nullopt` if your pipeline is strict about the type. The documentation names `error.kind`; the
+  message stays `message` inside the object, so the line has `error.message` too.
+- **OpenTelemetry.** The keys are the names of the log data model (`SeverityText`, `SeverityNumber`, `Body`) in
+  snake case. They are not a convention that the collector's `filelog` receiver applies by itself: configure its
+  `json_parser` to move `timestamp` and `severity_text` into place. `code.file.path` is meant to be a path, and jspdlog
+  writes the base name of the file. `thread.id` and `process.pid` are not stable in the semantic conventions yet.
 
 ### Text encoding
 
@@ -619,6 +704,14 @@ public:
     // Fields: a braced list {"key", value, ...} of at most 16 pairs, serialized when the line is written and with
     // callables allowed as values, or a jspdlog::fields object.
 
+    // Each level and log(level, ...) also take an exception first, with the same five endings and a sixth, none:
+    void info(const E &ex) const;                           // E: anything derived from std::exception
+    void info(const E &ex, format_here_t<Args...> fmt, Args &&...args) const;
+    void info(const E &ex, const S &msg) const;
+    void info(const E &ex, Fields f) const;
+    void info(const E &ex, Fields f, format_here_t<Args...> fmt, Args &&...args) const;
+    void info(const E &ex, Fields f, const S &msg) const;
+
     json_logger with(const fields &f) const;  // new values win on collisions; keys keep their position
     const fields &context() const noexcept;
 
@@ -642,11 +735,26 @@ struct json_options {
     std::optional<std::string> process_key = "process";
     std::optional<std::string> thread_key = "thread";
     std::optional<std::string> source_key;  // {"file":...,"line":...,"function":...} when known; off by default
+    std::string source_file_key = "file";   // the members of that object, or the fields of the line with source_flat
+    std::string source_line_key = "line";
+    std::string source_function_key = "function";
+    bool source_flat = false;               // write them as fields of the line; source_key then only switches them on
     std::string message_key = "message";
+    std::string error_key = "error";        // where the exception of an exception call goes
+    std::string error_type_key = "type";
+    std::string error_message_key = "message";
     timestamp_format timestamp_style = timestamp_format::rfc3339_millis;  // or _micros, _nanos, epoch_millis
     spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local;
     std::optional<std::string> eol;  // nullopt: spdlog's default
 };
+
+// Filled json_options for common schemas: change any member afterwards.
+namespace presets {
+json_options ecs();      // Elastic Common Schema
+json_options gcp();      // Google Cloud Logging
+json_options datadog();  // Datadog
+json_options otel();     // OpenTelemetry log data model
+}  // namespace presets
 
 class fields {
 public:

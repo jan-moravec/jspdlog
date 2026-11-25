@@ -204,7 +204,8 @@ TEST_CASE("formatter: the call site keys rename the object members", "[formatter
     opts.source_function_key = "fn";
     const fixture f("t", opts);
     f.logger.spdlog_logger()->log(spdlog::source_loc{"dir/a.cpp", 12, "run"}, jspdlog::level::info, "x");
-    const std::string expected = R"({"logger":"t","level":"info","source":{"f":"a.cpp","l":12,"fn":"run"},"message":"x"})";
+    const std::string expected =
+        R"({"logger":"t","level":"info","source":{"f":"a.cpp","l":12,"fn":"run"},"message":"x"})";
     CHECK(f.last() == expected);
 }
 
@@ -215,7 +216,8 @@ TEST_CASE("formatter: source_flat writes the call site as fields of the line", "
     opts.source_flat = true;
     const fixture f("t", opts);
     f.logger.spdlog_logger()->log(spdlog::source_loc{"dir/a.cpp", 12, "run"}, jspdlog::level::info, "x");
-    const std::string expected = R"({"logger":"t","level":"info","file":"a.cpp","line":12,"function":"run","message":"x"})";
+    const std::string expected =
+        R"({"logger":"t","level":"info","file":"a.cpp","line":12,"function":"run","message":"x"})";
     CHECK(f.last() == expected);
 
     // A call through json_logger records its own site, and bound fields follow the call site.

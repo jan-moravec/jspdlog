@@ -204,11 +204,13 @@ possible, so numbers, booleans and nested data stay filterable as such
   optional numeric severity field.
 - [x] **Timestamps.** RFC 3339 in ms (default), µs or ns precision, or epoch
   milliseconds.
-- [ ] **Schema presets** for common ingestion formats: Elastic ECS (`@timestamp`,
+- [x] **Schema presets** for common ingestion formats: Elastic ECS (`@timestamp`,
   `log.level`), OpenTelemetry log data model, GCP (`severity`), Datadog.
-  Presets are just pre-filled options structs.
-- [ ] **Exceptions.** `logger.error(ex, "...")` emits
-  `"error":{"type":...,"message":...}`.
+  Presets are just pre-filled options structs. The call site can be written as
+  top-level fields (`source_flat`), which ECS and OpenTelemetry need.
+- [x] **Exceptions.** `logger.error(ex, "...")` emits
+  `"error":{"type":...,"message":...}`, with the nested causes under `cause`.
+  An exception is also a value type.
 
 ### 0.5.0: ergonomics
 

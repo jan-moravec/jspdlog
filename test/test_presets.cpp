@@ -25,11 +25,9 @@ std::string format_fixed(const jspdlog::json_options &options)
 {
     jspdlog::json_formatter formatter(options);
     spdlog::details::log_msg msg("name", jspdlog::level::err, "hello");
-    msg.time = spdlog::log_clock::time_point{
-        std::chrono::duration_cast<spdlog::log_clock::duration>(
-            std::chrono::seconds(FIXED_SECONDS) + std::chrono::nanoseconds(FIXED_NANOS)
-        )
-    };
+    msg.time = spdlog::log_clock::time_point{std::chrono::duration_cast<spdlog::log_clock::duration>(
+        std::chrono::seconds(FIXED_SECONDS) + std::chrono::nanoseconds(FIXED_NANOS)
+    )};
     msg.thread_id = FIXED_THREAD;
     msg.source = spdlog::source_loc{"dir/a.cpp", 12, "fn"};
     spdlog::memory_buf_t buf;
@@ -83,8 +81,15 @@ TEST_CASE("presets: ecs", "[presets]")
     CHECK(off.find("log.origin") == std::string::npos);
 #ifdef JSPDLOG_TEST_NLOHMANN
     const std::set<std::string> keys{
-        "@timestamp", "log.logger", "log.level", "process.pid", "process.thread.id",
-        "log.origin.file.name", "log.origin.file.line", "log.origin.function", "message"
+        "@timestamp",
+        "log.logger",
+        "log.level",
+        "process.pid",
+        "process.thread.id",
+        "log.origin.file.name",
+        "log.origin.file.line",
+        "log.origin.function",
+        "message"
     };
     CHECK(keys_of(format_fixed(options)) == keys);
 #endif
@@ -115,8 +120,10 @@ TEST_CASE("presets: gcp", "[presets]")
         CHECK(known.count(name) == 1);
     }
 #ifdef JSPDLOG_TEST_NLOHMANN
-    CHECK(keys_of(format_fixed(jspdlog::presets::gcp())) ==
-          std::set<std::string>{"time", "logger", "severity", "process", "thread", "message"});
+    CHECK(
+        keys_of(format_fixed(jspdlog::presets::gcp())) ==
+        std::set<std::string>{"time", "logger", "severity", "process", "thread", "message"}
+    );
 #endif
 }
 
@@ -127,8 +134,10 @@ TEST_CASE("presets: datadog", "[presets]")
         R"("message":"hello"})";
     CHECK(format_fixed(jspdlog::presets::datadog()) == expected);
 #ifdef JSPDLOG_TEST_NLOHMANN
-    CHECK(keys_of(format_fixed(jspdlog::presets::datadog())) ==
-          std::set<std::string>{"timestamp", "logger.name", "status", "logger.thread_name", "message"});
+    CHECK(
+        keys_of(format_fixed(jspdlog::presets::datadog())) ==
+        std::set<std::string>{"timestamp", "logger.name", "status", "logger.thread_name", "message"}
+    );
 #endif
 }
 
@@ -145,8 +154,16 @@ TEST_CASE("presets: otel", "[presets]")
     CHECK(format_fixed(jspdlog::presets::otel()).find("code.") == std::string::npos);
 #ifdef JSPDLOG_TEST_NLOHMANN
     const std::set<std::string> keys{
-        "timestamp", "logger", "severity_text", "severity_number", "process.pid", "thread.id", "code.file.path",
-        "code.line.number", "code.function.name", "body"
+        "timestamp",
+        "logger",
+        "severity_text",
+        "severity_number",
+        "process.pid",
+        "thread.id",
+        "code.file.path",
+        "code.line.number",
+        "code.function.name",
+        "body"
     };
     CHECK(keys_of(format_fixed(options)) == keys);
 #endif
@@ -190,15 +207,23 @@ TEST_CASE("presets: an exception call is written under the key of the schema", "
         logger.error(ex, {"k", 1}, "m");
         return sink->last();
     };
-    CHECK(line_of(jspdlog::presets::ecs()) ==
-          R"({"log.level":"error","error":{"type":"std::runtime_error","message":"boom"},"k":1,"message":"m"})");
-    CHECK(line_of(jspdlog::presets::gcp()) ==
-          R"({"severity":"ERROR","error":{"type":"std::runtime_error","message":"boom"},"k":1,"message":"m"})");
-    CHECK(line_of(jspdlog::presets::datadog()) ==
-          R"({"status":"error","error":{"kind":"std::runtime_error","message":"boom"},"k":1,"message":"m"})");
-    CHECK(line_of(jspdlog::presets::otel()) ==
-          R"({"severity_text":"ERROR","severity_number":17,"exception":{"type":"std::runtime_error","message":"boom"},)"
-          R"("k":1,"body":"m"})");
+    CHECK(
+        line_of(jspdlog::presets::ecs()) ==
+        R"({"log.level":"error","error":{"type":"std::runtime_error","message":"boom"},"k":1,"message":"m"})"
+    );
+    CHECK(
+        line_of(jspdlog::presets::gcp()) ==
+        R"({"severity":"ERROR","error":{"type":"std::runtime_error","message":"boom"},"k":1,"message":"m"})"
+    );
+    CHECK(
+        line_of(jspdlog::presets::datadog()) ==
+        R"({"status":"error","error":{"kind":"std::runtime_error","message":"boom"},"k":1,"message":"m"})"
+    );
+    CHECK(
+        line_of(jspdlog::presets::otel()) ==
+        R"({"severity_text":"ERROR","severity_number":17,"exception":{"type":"std::runtime_error","message":"boom"},)"
+        R"("k":1,"body":"m"})"
+    );
 }
 
 TEST_CASE("presets: a logger with a preset, bound schema fields and the call site", "[presets]")
@@ -212,8 +237,11 @@ TEST_CASE("presets: a logger with a preset, bound schema fields and the call sit
     const jspdlog::json_logger logger("svc", sink, options);
     logger.with({"ecs.version", "8.11.0"}).info({"user", 7}, "hi");
     const std::string line = sink->last();
-    CHECK(line.find(R"({"log.logger":"svc","log.level":"info","log.origin.file.name":"test_presets.cpp","log.origin.file.line":)") ==
-          0);
+    CHECK(
+        line.find(
+            R"({"log.logger":"svc","log.level":"info","log.origin.file.name":"test_presets.cpp","log.origin.file.line":)"
+        ) == 0
+    );
     CHECK(line.find(R"(,"log.origin.function":)") != std::string::npos);
     CHECK(line.find(R"(,"ecs.version":"8.11.0","user":7,"message":"hi"})") != std::string::npos);
 }

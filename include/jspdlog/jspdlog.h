@@ -828,7 +828,9 @@ public:
                 key(source_line_key_);
                 detail::append_int(dest, msg.source.line);
                 key(source_function_key_);
-                detail::append_json_quoted(dest, std::string_view{msg.source.funcname != nullptr ? msg.source.funcname : ""});
+                detail::append_json_quoted(
+                    dest, std::string_view{msg.source.funcname != nullptr ? msg.source.funcname : ""}
+                );
             }
             else
             {
@@ -2504,9 +2506,9 @@ using if_exception = std::enable_if_t<std::is_base_of_v<std::exception, E>, int>
  * the exception call forms, which take a const std::exception reference.
  */
 template <typename T>
-inline constexpr bool is_rejected_message_v = !is_runtime_string_v<T> && !std::is_array_v<T> &&
-                                              !std::is_same_v<T, runtime_format_string> && !std::is_same_v<T, fields> &&
-                                              !std::is_base_of_v<std::exception, T>;
+inline constexpr bool is_rejected_message_v =
+    !is_runtime_string_v<T> && !std::is_array_v<T> && !std::is_same_v<T, runtime_format_string> &&
+    !std::is_same_v<T, fields> && !std::is_base_of_v<std::exception, T>;
 
 /**
  * @brief Views a runtime string as a std::string_view. A null C string is an empty message, and a char array ends at
@@ -2925,9 +2927,8 @@ public:
 
     /** @brief Writes an exception, fields and a runtime string as the message. */
     template <typename E, typename S, detail::if_exception<E> = 0, detail::if_runtime_string<S> = 0>
-    void log(
-        level lvl, const E &ex, const detail::call_fields &f, const S &msg, detail::site where = detail::site()
-    ) const
+    void
+    log(level lvl, const E &ex, const detail::call_fields &f, const S &msg, detail::site where = detail::site()) const
     {
         log_str_(lvl, &ex, f, detail::message_view(msg), where);
     }
@@ -2983,15 +2984,12 @@ public:
         log_fields_(lvl, &ex, f, where);                                                                               \
     }                                                                                                                  \
     template <typename E, detail::if_exception<E> = 0, typename... Args>                                               \
-    void name(const E &ex, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args)                   \
-        const                                                                                                          \
+    void name(const E &ex, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const             \
     {                                                                                                                  \
         log_fmt_(lvl, &ex, f, fmt, std::forward<Args>(args)...);                                                       \
     }                                                                                                                  \
     template <typename E, typename S, detail::if_exception<E> = 0, detail::if_runtime_string<S> = 0>                   \
-    void name(                                                                                                         \
-        const E &ex, const detail::call_fields &f, const S &msg, detail::site where = detail::site()                   \
-    ) const                                                                                                            \
+    void name(const E &ex, const detail::call_fields &f, const S &msg, detail::site where = detail::site()) const      \
     {                                                                                                                  \
         log_str_(lvl, &ex, f, detail::message_view(msg), where);                                                       \
     }                                                                                                                  \

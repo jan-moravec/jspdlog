@@ -70,8 +70,10 @@ TEST_CASE("active level: exception forms through the macros", "[active_level]")
     const std::string by_macro = f.last();
     f.logger.error(ex, {"v", 1}, "kept {}", 1);
     CHECK(f.last() == by_macro);
-    CHECK(by_macro.find(R"("error":{"type":"std::runtime_error","message":"boom"},"v":1,"message":"kept 1")") !=
-          std::string::npos);
+    CHECK(
+        by_macro.find(R"("error":{"type":"std::runtime_error","message":"boom"},"v":1,"message":"kept 1")") !=
+        std::string::npos
+    );
 }
 
 TEST_CASE("active level: units built with different values link into one program", "[active_level]")

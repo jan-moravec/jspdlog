@@ -1,4 +1,5 @@
-// Exceptions as a field value, the exception-first call forms of every level and of log(), nested causes and type names.
+// Exceptions as a field value, the exception-first call forms of every level and of log(), nested causes and type
+// names.
 
 #include <jspdlog/jspdlog.h>
 
@@ -96,12 +97,15 @@ std::string logged_type(const Ex &ex)
 
 } // namespace
 
-TEST_CASE("exceptions: the call form writes the exception under error_key, before the other per-call fields", "[exceptions]")
+TEST_CASE(
+    "exceptions: the call form writes the exception under error_key, before the other per-call fields", "[exceptions]"
+)
 {
     const fixture f;
     const std::runtime_error ex("boom");
     f.logger.error(ex, {"host", "db1"}, "connect failed");
-    const std::string expected = std::string(R"({"logger":"t","level":"error",)") + error_object("std::runtime_error", "boom") +
+    const std::string expected = std::string(R"({"logger":"t","level":"error",)") +
+                                 error_object("std::runtime_error", "boom") +
                                  R"(,"host":"db1","message":"connect failed"})";
     CHECK(f.last() == expected);
 }
@@ -124,8 +128,9 @@ TEST_CASE("exceptions: nested causes are written as a chain", "[exceptions]")
     {
         f.logger.error(ex);
     }
-    const std::string expected = R"({"logger":"t","level":"error","error":{"type":"std::logic_error","message":"outer",)"
-                                 R"("cause":{"type":"std::runtime_error","message":"inner"}}})";
+    const std::string expected =
+        R"({"logger":"t","level":"error","error":{"type":"std::logic_error","message":"outer",)"
+        R"("cause":{"type":"std::runtime_error","message":"inner"}}})";
     CHECK(f.last() == expected);
 }
 
@@ -211,8 +216,9 @@ TEST_CASE("exceptions: a cause that is not a std::exception is unknown", "[excep
     {
         f.logger.error(ex);
     }
-    const std::string expected = R"({"logger":"t","level":"error","error":{"type":"std::runtime_error","message":"wrapper",)"
-                                 R"("cause":{"type":"unknown"}}})";
+    const std::string expected =
+        R"({"logger":"t","level":"error","error":{"type":"std::runtime_error","message":"wrapper",)"
+        R"("cause":{"type":"unknown"}}})";
     CHECK(f.last() == expected);
 }
 
@@ -237,8 +243,10 @@ TEST_CASE("exceptions: type names are normalized", "[exceptions]")
     CHECK(normalize_type_name("std::__1::__nested<std::__1::logic_error>", true) == "std::logic_error");
     // Only the library's wrapper is unwrapped, and only for an exception that is a nested_exception.
     CHECK(normalize_type_name("app::tmpl<int>", true) == "app::tmpl<int>");
-    CHECK(normalize_type_name("std::_Nested_exception<std::logic_error>", false) ==
-          "std::_Nested_exception<std::logic_error>");
+    CHECK(
+        normalize_type_name("std::_Nested_exception<std::logic_error>", false) ==
+        "std::_Nested_exception<std::logic_error>"
+    );
 }
 
 TEST_CASE("exceptions: an exception is a value type, and the call forms match it", "[exceptions]")
@@ -262,8 +270,13 @@ TEST_CASE("exceptions: every form on every level and on log()", "[exceptions]")
     const fields named{"k", 1};
     const std::string text = "a 7";
 
-    const auto check_level = [&](jspdlog::level lvl, const auto &call_plain, const auto &call_fmt, const auto &call_str,
-                                 const auto &call_fields, const auto &call_fields_fmt, const auto &call_fields_str) {
+    const auto check_level = [&](jspdlog::level lvl,
+                                 const auto &call_plain,
+                                 const auto &call_fmt,
+                                 const auto &call_str,
+                                 const auto &call_fields,
+                                 const auto &call_fields_fmt,
+                                 const auto &call_fields_str) {
         f.logger.log(lvl, {"error", ex});
         const std::string none = f.last();
         call_plain();
@@ -327,13 +340,15 @@ TEST_CASE("exceptions: a single exception, a temporary and a named fields object
 {
     const fixture f;
     f.logger.error(std::runtime_error("x"));
-    const std::string expected = std::string(R"({"logger":"t","level":"error",)") + error_object("std::runtime_error", "x") + "}";
+    const std::string expected =
+        std::string(R"({"logger":"t","level":"error",)") + error_object("std::runtime_error", "x") + "}";
     CHECK(f.last() == expected);
 
     const fields named{"k", 1};
     const std::runtime_error ex("y");
     f.logger.error(ex, named);
-    const std::string with_named = std::string(R"({"logger":"t","level":"error",)") + error_object("std::runtime_error", "y") + R"(,"k":1})";
+    const std::string with_named =
+        std::string(R"({"logger":"t","level":"error",)") + error_object("std::runtime_error", "y") + R"(,"k":1})";
     CHECK(f.last() == with_named);
     f.logger.error(ex, named, "m");
     CHECK(f.last().find(R"("k":1,"message":"m")") != std::string::npos);
@@ -421,7 +436,8 @@ TEST_CASE("exceptions: a null std::exception_ptr is null and a current exception
     {
         f.logger.info({"e", std::current_exception()});
     }
-    const std::string expected = std::string(R"({"logger":"t","level":"info","e":{"type":"std::runtime_error","message":"boom"}})");
+    const std::string expected =
+        std::string(R"({"logger":"t","level":"info","e":{"type":"std::runtime_error","message":"boom"}})");
     CHECK(f.last() == expected);
 }
 
@@ -445,11 +461,15 @@ TEST_CASE("exceptions: the keys come from the options", "[exceptions]")
     const fixture f("t", opts);
     const std::runtime_error ex("boom");
     f.logger.error(ex, {"k", 1});
-    CHECK(f.last() == R"({"logger":"t","level":"error","exception":{"kind":"std::runtime_error","text":"boom"},"k":1})");
+    CHECK(
+        f.last() == R"({"logger":"t","level":"error","exception":{"kind":"std::runtime_error","text":"boom"},"k":1})"
+    );
 
     // A child sees the same keys, and the value-type form keeps the default ones.
     f.logger.with({"a", 1}).error(ex);
-    CHECK(f.last() == R"({"logger":"t","level":"error","a":1,"exception":{"kind":"std::runtime_error","text":"boom"}})");
+    CHECK(
+        f.last() == R"({"logger":"t","level":"error","a":1,"exception":{"kind":"std::runtime_error","text":"boom"}})"
+    );
     f.logger.info({"e", ex});
     CHECK(f.last() == R"({"logger":"t","level":"info","e":{"type":"std::runtime_error","message":"boom"}})");
 }

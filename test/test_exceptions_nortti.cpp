@@ -58,7 +58,9 @@ int main()
     catch (const std::exception &nested)
     {
         f.logger.error(nested);
-        check(f.last(), R"({"logger":"t","level":"error","error":{"type":"std::exception","message":"outer"}})", "nested");
+        check(
+            f.last(), R"({"logger":"t","level":"error","error":{"type":"std::exception","message":"outer"}})", "nested"
+        );
     }
 
     if (failures == 0)
