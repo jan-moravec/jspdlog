@@ -175,3 +175,19 @@ TEST_CASE("assert: a per-call field with the error key of an exception call is r
     f.logger.error({"error", 1});
     CHECK(failures().empty());
 }
+
+TEST_CASE("assert: flat call site keys are reserved instead of the source key", "[assert]")
+{
+    failures().clear();
+    auto opts = test_support::deterministic_options();
+    opts.source_key = "src";
+    opts.source_flat = true;
+    const fixture f("t", opts);
+
+    f.logger.info({"src", 1}); // the text of source_key is not used in flat mode
+    CHECK(failures().empty());
+    f.logger.info({"file", 1});
+    f.logger.info({"line", 1});
+    f.logger.info({"function", 1});
+    CHECK(failures().size() == 3);
+}

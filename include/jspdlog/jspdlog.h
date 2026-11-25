@@ -231,11 +231,23 @@ struct json_options
     /** @brief Key of the thread id, written as a number. */
     std::optional<std::string> thread_key = std::string{"thread"};
     /**
-     * @brief Key of the call site, written as an object with file (the base name), line and function. Off by default.
-     * json_logger calls record their call site. Lines without one, such as those logged through a plain spdlog macro
-     * without source information, have no such field.
+     * @brief Key of the call site, written as an object with the file (the base name), line and function. Off by
+     * default. json_logger calls record their call site. Lines without one, such as those logged through a plain spdlog
+     * macro without source information, have no such field. With source_flat, setting it only switches the call site
+     * on and its text is not used.
      */
     std::optional<std::string> source_key;
+    /** @brief Key of the file inside the call site object, or of the top-level field when source_flat is set. */
+    std::string source_file_key = "file";
+    /** @brief Key of the line inside the call site object, or of the top-level field when source_flat is set. */
+    std::string source_line_key = "line";
+    /** @brief Key of the function inside the call site object, or of the top-level field when source_flat is set. */
+    std::string source_function_key = "function";
+    /**
+     * @brief Write the call site as three fields of the line itself, under source_file_key, source_line_key and
+     * source_function_key, instead of an object under source_key. Schemas such as ECS and OpenTelemetry want that.
+     */
+    bool source_flat = false;
     /** @brief Key of the message. It is not optional, because a message from outside jspdlog needs a place to go. */
     std::string message_key = "message";
     /** @brief Key of the exception passed first to a logging call. Used only by those call forms. */
@@ -736,7 +748,8 @@ class json_logger;
 /**
  * @brief An spdlog formatter that renders every message as one JSON object.
  *
- * The line holds the header fields chosen in json_options, the call site if source_key is set, the fields of a
+ * The line holds the header fields chosen in json_options, the call site if source_key is set (as an object, or as
+ * three fields with source_flat), the fields of a
  * json_logger call and the message. A payload written by a json_logger is split into fields and message. Any other
  * payload is escaped whole into the message field, so the line is valid JSON whoever logged it.
  *
@@ -807,8 +820,21 @@ public:
         }
         if (opts_.source_key && !msg.source.empty())
         {
-            key(source_key_);
-            append_source_(msg.source, dest);
+            if (opts_.source_flat)
+            {
+                const std::string_view file = source_file_(msg.source);
+                key(source_file_key_);
+                detail::append_json_quoted(dest, file);
+                key(source_line_key_);
+                detail::append_int(dest, msg.source.line);
+                key(source_function_key_);
+                detail::append_json_quoted(dest, std::string_view{msg.source.funcname != nullptr ? msg.source.funcname : ""});
+            }
+            else
+            {
+                key(source_key_);
+                append_source_(msg.source, dest);
+            }
         }
 
         const std::string_view payload = detail::view(msg.payload);
@@ -863,6 +889,9 @@ private:
         process_key_ = prepare(opts_.process_key);
         thread_key_ = prepare(opts_.thread_key);
         source_key_ = prepare(opts_.source_key);
+        source_file_key_ = quote_key_(opts_.source_file_key);
+        source_line_key_ = quote_key_(opts_.source_line_key);
+        source_function_key_ = quote_key_(opts_.source_function_key);
         for (std::size_t i = 0; i < LEVEL_COUNT; ++i)
         {
             const std::string_view name = opts_.level_names
@@ -995,23 +1024,32 @@ private:
         detail::append(dest, zone_);
     }
 
-    /**
-     * @brief Appends the call site as an object, with the base name of the file.
-     *
-     * Nothing is cached, because a file name pointer may be reused for different text once a dynamic call site ends.
-     */
-    static void append_source_(const spdlog::source_loc &src, spdlog::memory_buf_t &dest)
+    /** @brief The base name of the file of a call site. */
+    static std::string_view source_file_(const spdlog::source_loc &src) noexcept
     {
         std::string_view file{src.filename != nullptr ? src.filename : ""};
         if (const auto slash = file.find_last_of("/\\"); slash != std::string_view::npos)
         {
             file.remove_prefix(slash + 1);
         }
-        detail::append(dest, std::string_view{R"({"file":)"});
-        detail::append_json_quoted(dest, file);
-        detail::append(dest, std::string_view{R"(,"line":)"});
+        return file;
+    }
+
+    /**
+     * @brief Appends the call site as an object, with the base name of the file.
+     *
+     * Nothing is cached, because a file name pointer may be reused for different text once a dynamic call site ends.
+     */
+    void append_source_(const spdlog::source_loc &src, spdlog::memory_buf_t &dest) const
+    {
+        dest.push_back('{');
+        detail::append(dest, source_file_key_);
+        detail::append_json_quoted(dest, source_file_(src));
+        dest.push_back(',');
+        detail::append(dest, source_line_key_);
         detail::append_int(dest, src.line);
-        detail::append(dest, std::string_view{R"(,"function":)"});
+        dest.push_back(',');
+        detail::append(dest, source_function_key_);
         detail::append_json_quoted(dest, std::string_view{src.funcname != nullptr ? src.funcname : ""});
         dest.push_back('}');
     }
@@ -1026,6 +1064,8 @@ private:
     std::string message_key_;
     /** @brief The header keys, quoted and followed by a colon. Empty for keys that are left out. */
     std::string timestamp_key_, logger_key_, level_key_, severity_key_, process_key_, thread_key_, source_key_;
+    /** @brief The call site keys, quoted and followed by a colon. */
+    std::string source_file_key_, source_line_key_, source_function_key_;
     /** @brief The level names as quoted JSON strings, indexed by level. */
     std::array<std::string, LEVEL_COUNT> level_texts_;
     /** @brief The severity numbers in decimal, indexed by level. */
@@ -2229,7 +2269,7 @@ public:
     /** @brief Creates an empty list. */
     reserved_keys() = default;
 
-    /** @brief Collects the enabled header keys, the source key and the message key. */
+    /** @brief Collects the enabled header keys, the call site keys and the message key. */
     explicit reserved_keys(const json_options &options)
     {
         const auto add = [this](const std::optional<std::string> &key) {
@@ -2244,7 +2284,16 @@ public:
         add(options.severity_key);
         add(options.process_key);
         add(options.thread_key);
-        add(options.source_key);
+        if (options.source_key && options.source_flat)
+        {
+            keys_.push_back(options.source_file_key);
+            keys_.push_back(options.source_line_key);
+            keys_.push_back(options.source_function_key);
+        }
+        else
+        {
+            add(options.source_key);
+        }
         keys_.push_back(options.message_key);
     }
 
