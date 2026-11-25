@@ -364,7 +364,7 @@ std::string format_at(jspdlog::json_options opts, spdlog::log_clock::time_point 
     msg.time = time;
     spdlog::memory_buf_t buf;
     formatter.format(msg, buf);
-    std::string line(buf.data(), buf.size());
+    const std::string line(buf.data(), buf.size());
     // The payload "x" is not from a json_logger, so the line also holds the message. Keep the header part only.
     const auto cut = line.find(",\"message\"");
     return line.substr(0, cut) + "}\n";
@@ -520,8 +520,8 @@ TEST_CASE("formatter: the timestamp formats", "[formatter]")
         opts.timestamp_style = jspdlog::timestamp_format::rfc3339_nanos;
         const std::string expected = R"({"ts":"2026-05-13T08:00:00.)" + fraction(nanos, 9) + "Z\"}\n";
         CHECK(format_at(opts, time) == expected);
-        // 123456789 where the clock has nanoseconds, 123456700 where it has ticks of 100 ns.
-        CHECK((fraction(nanos, 9) == "123456789" || fraction(nanos, 9) == "123456700"));
+        // The clock cuts the digits it cannot count: 123456789 with 1 ns, 123456700 with 100 ns, 123456000 with 1 us.
+        CHECK(fraction(nanos, 6) == "123456");
     }
     SECTION("epoch milliseconds are a number")
     {
@@ -587,7 +587,7 @@ TEST_CASE("formatter: times before the epoch round down", "[formatter]")
         opts.timestamp_style = jspdlog::timestamp_format::rfc3339_micros;
         const std::string expected = R"({"ts":"1969-12-31T23:59:59.)" + fraction(nanos, 6) + "Z\"}\n";
         CHECK(format_at(opts, time) == expected);
-        CHECK(fraction(nanos, 6) == "249876");
+        CHECK((fraction(nanos, 6) == "249876" || fraction(nanos, 6) == "249877")); // 1 us clocks truncate toward zero
     }
     SECTION("nanoseconds")
     {

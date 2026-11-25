@@ -13,6 +13,10 @@
 using test_support::deterministic_options;
 using test_support::fixture;
 
+// Escapes stay in ordinary literals: MSVC reads a backslash-u in a raw string as the character it names, and the
+// separators U+2028 and U+2029 are the point of some cases. Test code does not care about temporary strings.
+// NOLINTBEGIN(modernize-raw-string-literal,misc-misleading-bidirectional,performance-inefficient-string-concatenation)
+
 namespace
 {
 
@@ -108,7 +112,7 @@ TEST_CASE("utf8: the build's policy on every path", "[utf8]")
             CHECK(f.last() == expected);
             check_line(f.last(), text, "braced list value");
 
-            f.logger.info({"k", [&] { return input; }});
+            f.logger.info({"k", [&]() -> const std::string & { return input; }});
             CHECK(f.last() == expected);
 
             f.logger.info(jspdlog::fields{"k", c.input});
@@ -163,9 +167,8 @@ TEST_CASE("utf8: the build's policy on every path", "[utf8]")
             auto opts = deterministic_options();
             opts.source_key = "src";
             const fixture sourced("t", opts);
-            const std::string function = input;
             sourced.logger.spdlog_logger()->log(
-                spdlog::source_loc{"f.cpp", 7, function.c_str()}, jspdlog::level::info, "m"
+                spdlog::source_loc{"f.cpp", 7, input.c_str()}, jspdlog::level::info, "m"
             );
             const std::string expected = R"({"logger":"t","level":"info","src":{"file":"f.cpp","line":7,"function":")" +
                                          text + R"("},"message":"m"})";
@@ -260,3 +263,5 @@ TEST_CASE("utf8: the default build decodes to the replaced text", "[utf8]")
 #endif
 }
 #endif
+
+// NOLINTEND(modernize-raw-string-literal,misc-misleading-bidirectional,performance-inefficient-string-concatenation)

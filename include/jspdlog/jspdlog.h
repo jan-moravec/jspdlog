@@ -152,6 +152,15 @@ using spdlog::level;
 using level = spdlog::level::level_enum;
 #endif
 
+/** @brief Implementation details. Not part of the public API. */
+namespace detail
+{
+/** @brief The number of levels, from trace to off. */
+inline constexpr std::size_t LEVEL_COUNT = 7;
+/** @brief The OpenTelemetry severity number of each level's range, from trace to off. */
+inline constexpr std::array<int, LEVEL_COUNT> DEFAULT_SEVERITY_NUMBERS = {1, 5, 9, 13, 17, 21, 0};
+} // namespace detail
+
 /** @brief How the timestamp is written. */
 enum class timestamp_format
 {
@@ -185,14 +194,14 @@ struct json_options
      * @brief Names written under level_key, indexed by level from trace to off. An empty optional uses spdlog's names,
      * including names set with SPDLOG_LEVEL_NAMES.
      */
-    std::optional<std::array<std::string, 7>> level_names;
+    std::optional<std::array<std::string, detail::LEVEL_COUNT>> level_names;
     /** @brief Key of a numeric severity, written right after the level. Off by default. */
     std::optional<std::string> severity_key;
     /**
      * @brief The numbers written under severity_key, indexed like level_names. The default is the OpenTelemetry
      * severity number of each level's range: TRACE 1, DEBUG 5, INFO 9, WARN 13, ERROR 17, FATAL 21; off is 0.
      */
-    std::array<int, 7> severity_numbers = {1, 5, 9, 13, 17, 21, 0};
+    std::array<int, detail::LEVEL_COUNT> severity_numbers = detail::DEFAULT_SEVERITY_NUMBERS;
     /** @brief Key of the process id, written as a number. */
     std::optional<std::string> process_key = std::string{"process"};
     /** @brief Key of the thread id, written as a number. */
@@ -256,66 +265,51 @@ struct utf8_step
  */
 inline utf8_step next_utf8(const unsigned char *p, const unsigned char *end) noexcept
 {
+    // A sequence is a lead byte in [first, last], then len - 1 continuation bytes. The second byte has the range
+    // [lo, hi], which excludes overlong forms, surrogates and code points above U+10FFFF. The rows are the Unicode
+    // table of well-formed byte sequences.
+    struct lead_range
+    {
+        unsigned first;
+        unsigned last;
+        std::size_t len;
+        unsigned lo;
+        unsigned hi;
+    };
+    static constexpr unsigned CONTINUATION_MIN = 0x80U;
+    static constexpr unsigned CONTINUATION_MAX = 0xBFU;
+    static constexpr std::array<lead_range, 8> LEADS = {{
+        {0xC2U, 0xDFU, 2, 0x80U, 0xBFU},
+        {0xE0U, 0xE0U, 3, 0xA0U, 0xBFU},
+        {0xE1U, 0xECU, 3, 0x80U, 0xBFU},
+        {0xEDU, 0xEDU, 3, 0x80U, 0x9FU},
+        {0xEEU, 0xEFU, 3, 0x80U, 0xBFU},
+        {0xF0U, 0xF0U, 4, 0x90U, 0xBFU},
+        {0xF1U, 0xF3U, 4, 0x80U, 0xBFU},
+        {0xF4U, 0xF4U, 4, 0x80U, 0x8FU},
+    }};
     const unsigned b0 = p[0];
-    // Expected length and the valid range of the second byte, from the Unicode table of well-formed byte sequences.
-    std::size_t len = 0;
-    unsigned lo = 0x80U;
-    unsigned hi = 0xBFU;
-    if (b0 >= 0xC2U && b0 <= 0xDFU)
-    {
-        len = 2;
-    }
-    else if (b0 == 0xE0U)
-    {
-        len = 3;
-        lo = 0xA0U;
-    }
-    else if (b0 >= 0xE1U && b0 <= 0xECU)
-    {
-        len = 3;
-    }
-    else if (b0 == 0xEDU)
-    {
-        len = 3;
-        hi = 0x9FU;
-    }
-    else if (b0 >= 0xEEU && b0 <= 0xEFU)
-    {
-        len = 3;
-    }
-    else if (b0 == 0xF0U)
-    {
-        len = 4;
-        lo = 0x90U;
-    }
-    else if (b0 >= 0xF1U && b0 <= 0xF3U)
-    {
-        len = 4;
-    }
-    else if (b0 == 0xF4U)
-    {
-        len = 4;
-        hi = 0x8FU;
-    }
-    else
+    const auto lead =
+        std::find_if(LEADS.begin(), LEADS.end(), [b0](const lead_range &r) { return b0 >= r.first && b0 <= r.last; });
+    if (lead == LEADS.end())
     {
         return {false, 1}; // 80 to C1 and F5 to FF never start a sequence.
     }
-    for (std::size_t i = 1; i < len; ++i)
+    for (std::size_t i = 1; i < lead->len; ++i)
     {
         if (p + i == end)
         {
             return {false, i};
         }
         const unsigned b = p[i];
-        const unsigned min = i == 1 ? lo : 0x80U;
-        const unsigned max = i == 1 ? hi : 0xBFU;
+        const unsigned min = i == 1 ? lead->lo : CONTINUATION_MIN;
+        const unsigned max = i == 1 ? lead->hi : CONTINUATION_MAX;
         if (b < min || b > max)
         {
             return {false, i};
         }
     }
-    return {true, len};
+    return {true, lead->len};
 }
 
 /**
@@ -335,6 +329,10 @@ void append_json_quoted(Buffer &out, std::string_view s)
     // Whether bytes of 0x80 or more need a look: the pass policy copies them unless line separators are escaped.
     static constexpr bool CHECK_UTF8 = JSPDLOG_UTF8_POLICY != JSPDLOG_UTF8_PASS || JSPDLOG_ESCAPE_LINE_SEPARATORS != 0;
     static constexpr std::size_t SEPARATOR_SIZE = 3; // U+2028 and U+2029 are E2 80 A8 and E2 80 A9.
+    static constexpr unsigned SEPARATOR_LEAD = 0xE2U;
+    static constexpr unsigned SEPARATOR_SECOND = 0x80U;
+    static constexpr unsigned LINE_SEPARATOR_LAST = 0xA8U;
+    static constexpr unsigned PARAGRAPH_SEPARATOR_LAST = 0xA9U;
     out.push_back('"');
     const char *run = s.data(); // Start of the bytes not yet copied.
     const char *const end = s.data() + s.size();
@@ -359,12 +357,13 @@ void append_json_quoted(Buffer &out, std::string_view s)
                 const auto *const up = reinterpret_cast<const unsigned char *>(p);
                 const utf8_step step = next_utf8(up, reinterpret_cast<const unsigned char *>(end));
                 const bool separator = JSPDLOG_ESCAPE_LINE_SEPARATORS != 0 && step.valid &&
-                                       step.size == SEPARATOR_SIZE && up[0] == 0xE2U && up[1] == 0x80U &&
-                                       (up[2] == 0xA8U || up[2] == 0xA9U);
+                                       step.size == SEPARATOR_SIZE && up[0] == SEPARATOR_LEAD &&
+                                       up[1] == SEPARATOR_SECOND &&
+                                       (up[2] == LINE_SEPARATOR_LAST || up[2] == PARAGRAPH_SEPARATOR_LAST);
                 if (separator)
                 {
                     out.append(run, p);
-                    put(up[2] == 0xA8U ? std::string_view{"\\u2028"} : std::string_view{"\\u2029"});
+                    put(up[2] == LINE_SEPARATOR_LAST ? std::string_view{"\\u2028"} : std::string_view{"\\u2029"});
                     run = p + step.size;
                 }
                 else if (!step.valid && JSPDLOG_UTF8_POLICY != JSPDLOG_UTF8_PASS)
@@ -838,8 +837,12 @@ private:
     }
 
     /** @brief The number of levels, from trace to off. */
-    static constexpr std::size_t LEVEL_COUNT = 7;
-    static_assert(static_cast<std::size_t>(level::off) == LEVEL_COUNT - 1, "level::off must be the last of 7 levels");
+    static constexpr std::size_t LEVEL_COUNT = detail::LEVEL_COUNT;
+    /** @brief The digits of the fraction of a second in each RFC 3339 style. */
+    static constexpr int MILLI_DIGITS = 3;
+    static constexpr int MICRO_DIGITS = 6;
+    static constexpr int NANO_DIGITS = 9;
+    static_assert(static_cast<std::size_t>(level::off) == LEVEL_COUNT - 1, "level::off must be the last level");
 
     /** @brief The index of the level of a message in the level tables, which is the level's number. */
     static std::size_t level_index_(const spdlog::details::log_msg &msg) noexcept
@@ -871,7 +874,7 @@ private:
     static void append_digits_(Buffer &out, std::int64_t value, int digits)
     {
         static constexpr std::int64_t BASE = 10;
-        std::array<char, 9> text{}; // The fraction of a second has at most nine digits.
+        std::array<char, NANO_DIGITS> text{}; // The fraction of a second has at most nine digits.
         for (int i = digits; i > 0; --i)
         {
             text[static_cast<std::size_t>(i - 1)] = static_cast<char>('0' + (value % BASE));
@@ -942,14 +945,14 @@ private:
         switch (opts_.timestamp_style)
         {
         case timestamp_format::rfc3339_micros:
-            append_digits_(dest, nanos / NANOS_PER_MICRO, 6);
+            append_digits_(dest, nanos / NANOS_PER_MICRO, MICRO_DIGITS);
             break;
         case timestamp_format::rfc3339_nanos:
-            append_digits_(dest, nanos, 9);
+            append_digits_(dest, nanos, NANO_DIGITS);
             break;
         case timestamp_format::rfc3339_millis:
         case timestamp_format::epoch_millis: // Returned above.
-            append_digits_(dest, nanos / NANOS_PER_MILLI, 3);
+            append_digits_(dest, nanos / NANOS_PER_MILLI, MILLI_DIGITS);
             break;
         }
         detail::append(dest, zone_);
