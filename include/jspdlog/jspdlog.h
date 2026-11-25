@@ -2222,52 +2222,8 @@ public:
     /** @brief The key of a reference. */
     [[nodiscard]] std::string_view key(std::size_t i) const noexcept { return refs_[i].key; }
 
-    /** @brief The index of the last reference with this key, or size() when there is none. */
-    [[nodiscard]] std::size_t last_with_key(std::string_view k) const noexcept
-    {
-        for (std::size_t i = size_; i > 0; --i)
-        {
-            if (refs_[i - 1].key == k)
-            {
-                return i - 1;
-            }
-        }
-        return size_;
-    }
-
-    /** @brief Whether a reference before i has the same key as reference i. */
-    [[nodiscard]] bool repeats_earlier(std::size_t i) const noexcept
-    {
-        for (std::size_t j = 0; j < i; ++j)
-        {
-            if (refs_[j].key == refs_[i].key)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /**
-     * @brief Appends a reference as a field: a comma, the quoted key, a colon and the serialized value. This runs the
-     * serializer of the value, so it throws what the serializer throws.
-     */
-    void append_to(std::string &out, std::size_t i) const
-    {
-        const ref &r = refs_[i];
-        out.push_back(',');
-        append_json_quoted(out, r.key);
-        out.push_back(':');
-        json_writer w(out);
-        r.write(w, r.value);
-        JSPDLOG_ASSERT(
-            writer_access::complete(w), "jspdlog: a serializer left an object or array open, or wrote no value"
-        );
-    }
-
-private:
-    /**
-     * @brief One key and value of a braced list.
+     * @brief One key and value of a braced list, or the exception of an exception call.
      *
      * The members have no initializers, so refs_ stays uninitialized and a call writes only the entries it uses.
      */
@@ -2282,6 +2238,26 @@ private:
         void (*write)(json_writer &, const void *);
     };
 
+    /** @brief The reference at index i. */
+    [[nodiscard]] const ref &at(std::size_t i) const noexcept { return refs_[i]; }
+
+    /**
+     * @brief Appends a reference as a field: a comma, the quoted key, a colon and the serialized value. This runs the
+     * serializer of the value, so it throws what the serializer throws.
+     */
+    static void append_ref(std::string &out, const ref &r)
+    {
+        out.push_back(',');
+        append_json_quoted(out, r.key);
+        out.push_back(':');
+        json_writer w(out);
+        r.write(w, r.value);
+        JSPDLOG_ASSERT(
+            writer_access::complete(w), "jspdlog: a serializer left an object or array open, or wrote no value"
+        );
+    }
+
+private:
 #ifdef _MSC_VER
 // A lazy value that always throws makes the code after the call unreachable in this function, which C4702 reports.
 #pragma warning(push)
@@ -2719,71 +2695,102 @@ private:
         }
     }
 
-    /** @brief Appends the bound fields and the fields of a fields object, which are already serialized. */
-    void append_named_(spdlog::memory_buf_t &out, const fields &props) const
+    /**
+     * @brief Appends the bound fields and the per-call fields, serializing each per-call value that is written.
+     *
+     * The per-call items are, in order, an optional leading reference (the exception of an exception call) and then
+     * the entries of a fields object or the references of a braced list. A per-call item with the key of a bound field
+     * replaces its value at the bound field's position, and a key that appears twice among the items takes the last
+     * value at the first position. Only the last value of a repeated key is serialized, so an earlier one is never run.
+     * The cost is quadratic in the number of items, at most call_fields::CAPACITY plus one.
+     */
+    void append_props_(
+        spdlog::memory_buf_t &out, const detail::call_fields &props, const detail::call_fields::ref *leading
+    ) const
     {
         const context_data &ctx = *context_;
-        if (props.empty())
+        const fields *named = props.named();
+        if (leading == nullptr && (named != nullptr ? named->empty() : props.size() == 0))
         {
             detail::append(out, ctx.fragment);
             return;
         }
-        // Inside the deferred writer, so a handler that throws reaches spdlog's error handler.
-        JSPDLOG_ASSERT(
-            !ctx.reserved.clashes_with(props), "jspdlog: a field key equals a header, source or message key"
-        );
-        for (const auto &e : ctx.values.entries_)
-        {
-            const fields::entry *over = props.find_(e.key);
-            detail::append(out, over != nullptr ? over->text : e.text);
-        }
-        for (const auto &e : props.entries_)
-        {
-            if (!ctx.values.contains(e.key))
+        const std::size_t first = leading != nullptr ? 1 : 0;
+        const std::size_t count = first + (named != nullptr ? named->entries_.size() : props.size());
+        const auto key_of = [&](std::size_t i) -> std::string_view {
+            if (i < first)
             {
-                detail::append(out, e.text);
+                return leading->key;
             }
-        }
-    }
-
-    /**
-     * @brief Appends the bound fields and the fields of a braced list, serializing each value that is written.
-     *
-     * Only the last value of a repeated key is serialized, so an earlier one is never run. The cost is quadratic in the
-     * number of fields, at most call_fields::CAPACITY.
-     */
-    void append_refs_(spdlog::memory_buf_t &out, const detail::call_fields &props) const
-    {
-        const context_data &ctx = *context_;
-        for (std::size_t i = 0; i < props.size(); ++i)
+            return named != nullptr ? std::string_view{named->entries_[i - first].key} : props.key(i - first);
+        };
+        // Inside the deferred writer, so a handler that throws reaches spdlog's error handler.
+        for (std::size_t i = first; i < count; ++i)
         {
             JSPDLOG_ASSERT(
-                !ctx.reserved.is_reserved(props.key(i)), "jspdlog: a field key equals a header, source or message key"
+                !ctx.reserved.is_reserved(key_of(i)), "jspdlog: a field key equals a header, source or message key"
+            );
+            JSPDLOG_ASSERT(
+                leading == nullptr || key_of(i) != leading->key,
+                "jspdlog: a field key equals the error key of an exception call"
             );
         }
         std::string scratch; // one per line; json_writer writes to a std::string
-        const auto append_ref = [&](std::size_t i) {
-            scratch.clear();
-            props.append_to(scratch, i);
-            detail::append(out, scratch);
+        const auto append_item = [&](std::size_t i) {
+            if (i < first)
+            {
+                scratch.clear();
+                detail::call_fields::append_ref(scratch, *leading);
+                detail::append(out, scratch);
+            }
+            else if (named != nullptr)
+            {
+                detail::append(out, named->entries_[i - first].text);
+            }
+            else
+            {
+                scratch.clear();
+                detail::call_fields::append_ref(scratch, props.at(i - first));
+                detail::append(out, scratch);
+            }
+        };
+        const auto last_with_key = [&](std::string_view k) {
+            for (std::size_t i = count; i > 0; --i)
+            {
+                if (key_of(i - 1) == k)
+                {
+                    return i - 1;
+                }
+            }
+            return count;
+        };
+        const auto repeats_earlier = [&](std::size_t i) {
+            for (std::size_t j = 0; j < i; ++j)
+            {
+                if (key_of(j) == key_of(i))
+                {
+                    return true;
+                }
+            }
+            return false;
         };
         for (const auto &e : ctx.values.entries_)
         {
-            const std::size_t over = props.last_with_key(e.key);
-            if (over == props.size())
+            const std::size_t over = last_with_key(e.key);
+            if (over == count)
             {
                 detail::append(out, e.text);
             }
             else
             {
-                append_ref(over);
+                append_item(over);
             }
         }
-        for (std::size_t i = 0; i < props.size(); ++i)
+        for (std::size_t i = 0; i < count; ++i)
         {
-            if (!ctx.values.contains(props.key(i)) && !props.repeats_earlier(i))
+            if (!ctx.values.contains(key_of(i)) && !repeats_earlier(i))
             {
-                append_ref(props.last_with_key(props.key(i)));
+                append_item(last_with_key(key_of(i)));
             }
         }
     }
@@ -2810,18 +2817,7 @@ private:
             const std::size_t size_at = out.size();
             detail::append(out, std::string_view{"00000000", detail::SIZE_DIGITS});
             const std::size_t fields_at = out.size();
-            if (props.named() != nullptr)
-            {
-                append_named_(out, *props.named());
-            }
-            else if (props.size() == 0)
-            {
-                detail::append(out, ctx.fragment);
-            }
-            else
-            {
-                append_refs_(out, props);
-            }
+            append_props_(out, props, nullptr);
             detail::patch_hex_size(out, size_at, out.size() - fields_at);
             write_message(out);
         };
