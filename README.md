@@ -821,7 +821,7 @@ namespace literals { consteval key operator""_key(const char *s, std::size_t n);
 struct error_report_options {
     json_options format{};                        // keys and time format of the report line
     spdlog::sink_ptr sink;                        // where to write it (give it a json_formatter), or null for stream
-    std::FILE *stream = stderr;
+    std::FILE *stream = stderr;                   // used when sink is null; null too discards the reports
     std::chrono::milliseconds min_interval{1000};
 };
 spdlog::err_handler make_error_handler(std::string logger_name, error_report_options options = {});

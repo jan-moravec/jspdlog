@@ -58,6 +58,7 @@ std::FILE *open_temp_file()
     std::FILE *file = nullptr;
     return tmpfile_s(&file) == 0 ? file : nullptr;
 #else
+    // NOLINTNEXTLINE(bugprone-unsafe-functions): tmpfile_s is not in the standard library of Linux or macOS
     return std::tmpfile();
 #endif
 }
@@ -189,7 +190,7 @@ TEST_CASE("error handler: writes to a stream when there is no sink", "[error_han
         logger.spdlog_logger()->set_error_handler(jspdlog::make_error_handler(logger.name(), options));
         logger.info("x");
     }
-    std::rewind(file);
+    REQUIRE(std::fseek(file, 0, SEEK_SET) == 0);
     std::string text;
     std::array<char, 256> chunk{};
     std::size_t n = 0;
@@ -197,11 +198,24 @@ TEST_CASE("error handler: writes to a stream when there is no sink", "[error_han
     {
         text.append(chunk.data(), n);
     }
-    std::fclose(file);
+    static_cast<void>(std::fclose(file));
     REQUIRE(!text.empty());
     CHECK(text.back() == '\n');
     text.pop_back();
     CHECK(is_disk_full_report(text));
+}
+
+TEST_CASE("error handler: with neither a sink nor a stream, reports are discarded", "[error_handler]")
+{
+    jspdlog::error_report_options options;
+    options.format = deterministic_options();
+    options.stream = nullptr;
+    options.min_interval = std::chrono::milliseconds{0};
+    const auto failing = std::make_shared<failing_sink>();
+    const jspdlog::json_logger logger("app", failing, deterministic_options());
+    logger.spdlog_logger()->set_error_handler(jspdlog::make_error_handler(logger.name(), options));
+    CHECK_NOTHROW(logger.info("x"));
+    CHECK_NOTHROW(logger.info("y"));
 }
 
 TEST_CASE("error handler: a stream line ends in a newline even when eol is empty", "[error_handler]")
@@ -215,10 +229,10 @@ TEST_CASE("error handler: a stream line ends in a newline even when eol is empty
     options.min_interval = std::chrono::milliseconds{0};
     const auto handler = jspdlog::make_error_handler("app", options);
     handler("x");
-    std::rewind(file);
+    REQUIRE(std::fseek(file, 0, SEEK_SET) == 0);
     std::array<char, 256> chunk{};
     const std::size_t n = std::fread(chunk.data(), 1, chunk.size(), file);
-    std::fclose(file);
+    static_cast<void>(std::fclose(file));
     CHECK(std::string(chunk.data(), n) == "{\"logger\":\"app\",\"level\":\"error\",\"message\":\"x\"}\n");
 }
 

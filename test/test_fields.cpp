@@ -206,28 +206,28 @@ TEST_CASE("fields: merge with overlaps and escaped keys", "[fields]")
     }
 }
 
-namespace fields_test
+namespace
 {
 struct throws_halfway
 {
 };
 
 // Writes part of an object, then fails.
-inline void jspdlog_serialize(jspdlog::json_writer &w, const throws_halfway & /*unused*/)
+void jspdlog_serialize(jspdlog::json_writer &w, const throws_halfway & /*unused*/)
 {
     w.begin_object();
     w.member("x", 1);
     throw std::runtime_error("serializer failed");
 }
-} // namespace fields_test
+} // namespace
 
 TEST_CASE("fields: a serializer that throws leaves the set unchanged", "[fields]")
 {
     fields p{"a", 1, "b", 2};
-    CHECK_THROWS_AS(p.insert("c", fields_test::throws_halfway{}), std::runtime_error);
+    CHECK_THROWS_AS(p.insert("c", throws_halfway{}), std::runtime_error);
     CHECK(p.to_json() == R"({"a":1,"b":2})");
     CHECK_FALSE(p.contains("c"));
-    CHECK_THROWS_AS(p.insert("a", fields_test::throws_halfway{}), std::runtime_error);
+    CHECK_THROWS_AS(p.insert("a", throws_halfway{}), std::runtime_error);
     CHECK(p.to_json() == R"({"a":1,"b":2})");
     p.insert("c", 3);
     CHECK(p.to_json() == R"({"a":1,"b":2,"c":3})");
@@ -256,9 +256,9 @@ TEST_CASE("fields: checked keys", "[fields]")
     }
     SECTION("a key is usable in a constant expression")
     {
-        constexpr auto k = "user_id"_key;
-        static_assert(k.view() == "user_id");
-        CHECK(std::string{std::string_view{k}} == "user_id");
+        constexpr auto KEY = "user_id"_key;
+        static_assert(KEY.view() == "user_id");
+        CHECK(std::string{std::string_view{KEY}} == "user_id");
     }
     SECTION("an empty key is plain")
     {

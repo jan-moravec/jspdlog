@@ -31,6 +31,8 @@ Fewer allocations when fields are written, an error handler that reports as JSON
   allocations instead of up to two per field, and `with()` no longer joins the text again. `fields::insert` throws
   `std::length_error` when the fields would exceed 4 GiB, the limit of the payload protocol.
 - `json_logger` writes the values of a braced list straight into spdlog's buffer instead of through a scratch string.
+- A `fields` object passed to a logging call of a logger without bound fields is copied into the line in one piece,
+  which halves the cost of a prebuilt one on the benchmark.
 - `fmt::runtime` has no counterpart in std::format mode before C++26; the runtime-string call forms cover runtime
   messages there.
 
