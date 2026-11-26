@@ -80,8 +80,8 @@ ctest --preset release -R json_options    # one Catch2 test case by name
 - Documentation only: no build. Check that documented commands and preset names exist.
 - Any header or CMake change: the `release` workflow.
 - Code that differs between spdlog versions: also configure a second build with `-DJSPDLOG_SPDLOG_GIT_TAG=v1.12.0` (the
-  oldest supported release), for example `cmake --preset debug -DJSPDLOG_SPDLOG_GIT_TAG=v1.12.0`, then build and test
-  with the `debug` presets.
+  oldest supported release), for example `cmake --preset debug "-DJSPDLOG_SPDLOG_GIT_TAG=v1.12.0"`, then build and test
+  with the `debug` presets. Keep the quotes: PowerShell splits an unquoted -D argument at the dots.
 - Memory or undefined-behavior-sensitive changes: `clang-asan-ubsan` (Linux).
 - Threading or async changes: `clang-tsan` (Linux).
 - Escaping, formatter or `fields` changes: also `cmake --workflow --preset clang-fuzz` (Linux), then run each target in

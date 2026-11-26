@@ -110,8 +110,9 @@ jobs:
           tidy-checks: ""
           database: build/clang-coverage
           extensions: cpp,hpp,h,cc
-          # These files must not compile, so clang-tidy cannot analyze them.
-          ignore: ".github|test/compile_fail"
+          # compile_fail must not compile. The package consumers build against an installed package with their own
+          # definitions, which the compile database does not have.
+          ignore: ".github|test/compile_fail|test/install_smoke|packaging"
           files-changed-only: true
           lines-changed-only: true
           tidy-review: false
