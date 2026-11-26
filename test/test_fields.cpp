@@ -71,7 +71,18 @@ TEST_CASE("fields: keys and strings are escaped", "[fields]")
 {
     const std::string expected = R"({"k\"ey":"va\\l\n"})"; // outside CHECK(): MSVC raw-literal quirk
     CHECK(fields{"k\"ey", "va\\l\n"}.to_json() == expected);
+    const std::string backslash = R"({"a\\b":1})";
+    CHECK(fields{"a\\b", 1}.to_json() == backslash);
     CHECK(fields{std::string_view{"sv"}, 1}.to_json() == R"({"sv":1})");
+}
+
+TEST_CASE("fields: text beyond the 4 GiB of the payload protocol is rejected", "[fields]")
+{
+    // Checked on the size alone: building fields that large would need more memory than a test should use.
+    CHECK_NOTHROW(jspdlog::detail::check_fields_size(jspdlog::detail::MAX_FIELDS_SIZE));
+#if SIZE_MAX > 0xffffffff
+    CHECK_THROWS_AS(jspdlog::detail::check_fields_size(jspdlog::detail::MAX_FIELDS_SIZE + 1), std::length_error);
+#endif
 }
 
 TEST_CASE("fields: ordering, replacement and merge", "[fields]")

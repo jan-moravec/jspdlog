@@ -757,6 +757,15 @@ inline parsed_payload parse_payload(std::string_view p, const payload_token &tok
     return {true, fields, message};
 }
 
+/** @brief Throws std::length_error when serialized fields of this size do not fit the 4 GiB of the payload protocol. */
+inline void check_fields_size(std::size_t size)
+{
+    if (size > MAX_FIELDS_SIZE)
+    {
+        throw std::length_error("jspdlog: fields larger than 4 GiB");
+    }
+}
+
 /**
  * @brief Writes the size of the fields into the placeholder that precedes them in a payload.
  *
@@ -767,10 +776,7 @@ inline void patch_hex_size(spdlog::memory_buf_t &out, std::size_t at, std::size_
     static constexpr char HEX_DIGITS[] = "0123456789abcdef";
     static constexpr unsigned NIBBLE_BITS = 4U;
     static constexpr unsigned NIBBLE_MASK = 0xFU;
-    if (size > MAX_FIELDS_SIZE)
-    {
-        throw std::length_error("jspdlog: fields larger than 4 GiB");
-    }
+    check_fields_size(size);
     for (std::size_t i = 0; i < SIZE_DIGITS; ++i)
     {
         const unsigned shift = NIBBLE_BITS * static_cast<unsigned>(SIZE_DIGITS - 1 - i);
@@ -1952,10 +1958,7 @@ private:
     /** @brief Records the field that starts at begin and ends at the end of text_. */
     void add_entry_(std::size_t begin, std::string_view key, bool plain_key)
     {
-        if (text_.size() > detail::MAX_FIELDS_SIZE)
-        {
-            throw std::length_error("jspdlog: fields larger than 4 GiB");
-        }
+        detail::check_fields_size(text_.size());
         entry e{};
         e.begin = static_cast<std::uint32_t>(begin);
         e.size = static_cast<std::uint32_t>(text_.size() - begin);
@@ -1968,27 +1971,14 @@ private:
             entries_.push_back(e);
             return;
         }
+        // Make room for the entry first, so adding it cannot fail and leave its key behind in keys_.
+        if (entries_.size() == entries_.capacity())
+        {
+            entries_.reserve((entries_.capacity() * 2) + 1);
+        }
         e.key_begin = static_cast<std::uint32_t>(keys_.size());
         keys_.append(key.data(), key.size());
-        push_with_key_(e);
-    }
-
-    /** @brief Adds an entry whose key was just appended to keys_, taking the key back out when adding fails. */
-    void push_with_key_(const entry &e)
-    {
-#if JSPDLOG_HAS_EXCEPTIONS
-        try
-        {
-            entries_.push_back(e);
-        }
-        catch (...)
-        {
-            keys_.resize(e.key_begin);
-            throw;
-        }
-#else
         entries_.push_back(e);
-#endif
     }
 
     /** @brief Replaces the text of entry i, moving the later fields. */
@@ -1996,10 +1986,7 @@ private:
     {
         entry &e = entries_[i];
         const std::size_t old_size = e.size;
-        if (text_.size() - old_size + text.size() > detail::MAX_FIELDS_SIZE)
-        {
-            throw std::length_error("jspdlog: fields larger than 4 GiB");
-        }
+        detail::check_fields_size(text_.size() - old_size + text.size());
         text_.replace(e.begin, old_size, text.data(), text.size());
         e.size = static_cast<std::uint32_t>(text.size());
         const auto delta = static_cast<std::int64_t>(text.size()) - static_cast<std::int64_t>(old_size);
