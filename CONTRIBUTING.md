@@ -348,8 +348,8 @@ jspdlog is header-only; a release is a tag and a GitHub Release.
 ## Repository security (maintainers)
 
 - Protect `main`: require green CI and a CODEOWNERS review, dismiss stale reviews, disallow force-pushes.
-- Dependabot ([.github/dependabot.yml](.github/dependabot.yml)) opens one grouped weekly PR for GitHub Actions, waiting
-  7 days after an upstream release. Review it and squash-merge once CI is green.
+- Dependabot ([.github/dependabot.yml](.github/dependabot.yml)) opens one grouped weekly PR for GitHub Actions, and a PR
+  for the pinned Conan version, waiting 7 days after an upstream release. Review it and squash-merge once CI is green.
 - The weekly [Scorecard workflow](.github/workflows/scorecard.yml) reports supply-chain findings under Security, Code
   scanning.
 - Report vulnerabilities as described in [SECURITY.md](SECURITY.md), not in public issues.
