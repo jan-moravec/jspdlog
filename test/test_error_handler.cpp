@@ -37,6 +37,23 @@ protected:
     void flush_() override {}
 };
 
+// A capture sink that throws while fail is set, standing in for a report sink that recovers.
+class flaky_sink final : public capture_sink
+{
+public:
+    bool fail = false;
+
+protected:
+    void sink_it_(const spdlog::details::log_msg &msg) override
+    {
+        if (fail)
+        {
+            throw spdlog::spdlog_ex("report sink down");
+        }
+        capture_sink::sink_it_(msg);
+    }
+};
+
 // Whether a report line is {"logger":"app","level":"error",<extra>"message":"disk full"}. spdlog v1 appends the call
 // site, " [file(line)]", to the message of a call that has one, so there the message only has to start with the text.
 bool is_disk_full_report(const std::string &line, const std::string &extra = {})
@@ -162,6 +179,26 @@ TEST_CASE("error handler: a report sink that fails too does not recurse or hang"
 
     CHECK_NOTHROW(logger.info("x"));
     CHECK_NOTHROW(logger.info({"k", 1}, "y"));
+}
+
+TEST_CASE("error handler: a report that fails is counted as dropped in the next one", "[error_handler]")
+{
+    const auto report = std::make_shared<flaky_sink>();
+    jspdlog::install_json_formatter(*report, deterministic_options());
+    jspdlog::error_report_options options;
+    options.format = deterministic_options();
+    options.sink = report;
+    options.min_interval = std::chrono::milliseconds{0};
+    const auto handler = jspdlog::make_error_handler("app", options);
+    report->fail = true;
+    CHECK_NOTHROW(handler("a"));
+    CHECK_NOTHROW(handler("b"));
+    report->fail = false;
+    handler("c");
+    handler("d");
+    REQUIRE(report->lines.size() == 2);
+    CHECK(report->lines[0] == R"({"logger":"app","level":"error","dropped":2,"message":"c"})");
+    CHECK(report->lines[1] == R"({"logger":"app","level":"error","message":"d"})");
 }
 
 TEST_CASE("error handler: the handler itself never throws", "[error_handler]")

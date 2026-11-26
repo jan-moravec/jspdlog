@@ -254,6 +254,17 @@ possible, so numbers, booleans and nested data stay filterable as such
 - Published benchmarks, including multi-threaded and async.
 - Documentation site with a migration guide from 0.x.
 
+### Ideas to measure (unscheduled)
+
+Kept only if the benchmark shows a gain on GCC and MSVC, as in 0.5.0.
+
+- Copy bound and per-call fields in one piece when no per-call key appears
+  among the bound keys. A `fields` object per call on a logger without bound
+  fields already takes this path (0.5.0 halved its cost on MSVC); with bound
+  fields, each field is still written one by one after key scans. Measure
+  `with()` + a `fields` object and `with()` + a braced list, and check that
+  the cost of the overlap check does not eat the gain for short lists.
+
 ## 6. Fuzzing
 
 jspdlog's main promise is that every line is one valid JSON object, whatever

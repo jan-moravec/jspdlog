@@ -1354,6 +1354,13 @@ public:
         check_();
     }
 
+    /**
+     * @brief A writable char array is not a key: its contents can change after the check and its size counts every
+     * byte, not the text. Pass its text as a std::string_view key instead.
+     */
+    template <std::size_t N>
+    explicit key(char (&s)[N]) = delete;
+
     /** @brief The key text. */
     [[nodiscard]] constexpr std::string_view view() const noexcept { return text_; }
 
@@ -3847,16 +3854,17 @@ public:
         }
         reported_ = true;
         last_ = now;
+        // This report counts as dropped until it is written, so one that throws is carried by the next report.
+        const std::size_t earlier = dropped_++;
         spdlog::memory_buf_t payload;
         write_payload(payload, process_token(), KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
-            if (dropped_ > 0)
+            if (earlier > 0)
             {
                 append(out, std::string_view{",\"dropped\":"});
-                append_int(out, dropped_);
+                append_int(out, earlier);
             }
         });
         append_json_quoted(payload, what);
-        dropped_ = 0;
         const spdlog::details::log_msg msg(
             spdlog::string_view_t(name_.data(), name_.size()),
             level::err,
@@ -3865,10 +3873,12 @@ public:
         if (options_.sink)
         {
             options_.sink->log(msg);
+            dropped_ = 0;
             return;
         }
         if (options_.stream == nullptr)
         {
+            dropped_ = 0;
             return;
         }
         spdlog::memory_buf_t line;
@@ -3880,6 +3890,7 @@ public:
         // Nothing to do when the stream fails: there is nowhere left to report it.
         static_cast<void>(std::fwrite(line.data(), 1, line.size(), options_.stream));
         static_cast<void>(std::fflush(options_.stream));
+        dropped_ = 0;
     }
 
 private:
