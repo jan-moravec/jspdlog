@@ -40,7 +40,7 @@ These decide every feature below.
    may improve ergonomics but must not be required.
 1. **No JSON library dependency.** `raw_json` is the bridge to one.
 
-## 3. Where we are (0.4.0)
+## 3. Where we are (0.5.0)
 
 The header ([include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h))
 provides `json_logger` (five call shapes per level plus `log(level, ...)`),
@@ -71,6 +71,14 @@ level takes one as its first argument and writes it with its causes under
 `json_options::error_key`. The call site can be written as three fields of the
 line, and `jspdlog::presets` fills `json_options` for Elastic ECS, Google Cloud
 Logging, Datadog and the OpenTelemetry log data model.
+
+Since 0.5.0 a `fields` object keeps the text of its fields in one buffer, and
+`json_logger` writes per-call values straight into spdlog's buffer, so a line
+with fields costs fewer allocations and copies. A key written as `"name"_key`
+is checked at compile time and skips the escape scan.
+`jspdlog::make_error_handler` reports logging failures as a JSON line without
+calling back into spdlog, which cannot deadlock spdlog v2's error mutex.
+spdlog v1 built with `SPDLOG_USE_STD_FORMAT` works with C++20.
 
 ## 4. Architecture decision: custom `spdlog::formatter` (proposed for 0.2)
 
@@ -218,11 +226,15 @@ possible, so numbers, booleans and nested data stay filterable as such
 
 ### 0.5.0: ergonomics
 
-- Keys known at compile time are escaped at compile time.
-- Error-handler helper that reports sink failures as JSON without deadlocking
-  spdlog's non-recursive error mutex.
-- `SPDLOG_USE_STD_FORMAT` builds (needs a `std::formattable` fallback for the
-  value-form trait).
+- [x] Keys known at compile time: `"name"_key` is checked at compile time
+  (C++20) and copied into the line without an escape scan. Kept because the
+  benchmark shows at least 5 percent on a braced list of six fields over string
+  keys; MSVC does not fold the scan of a string literal.
+- [x] Error-handler helper (`make_error_handler`) that reports sink failures as
+  JSON without deadlocking spdlog's non-recursive error mutex.
+- [x] `SPDLOG_USE_STD_FORMAT` builds, for spdlog v1 with C++20. The value-form
+  trait needs no fallback: a disabled `std::formatter` is not default
+  constructible, so the same test works.
 
 ### 0.6.0: integration and packaging
 
@@ -241,6 +253,17 @@ possible, so numbers, booleans and nested data stay filterable as such
 - Long fuzzing runs on a schedule and, if accepted, OSS-Fuzz (section 6).
 - Published benchmarks, including multi-threaded and async.
 - Documentation site with a migration guide from 0.x.
+
+### Ideas to measure (unscheduled)
+
+Kept only if the benchmark shows a gain on GCC and MSVC, as in 0.5.0.
+
+- Copy bound and per-call fields in one piece when no per-call key appears
+  among the bound keys. A `fields` object per call on a logger without bound
+  fields already takes this path (0.5.0 halved its cost on MSVC); with bound
+  fields, each field is still written one by one after key scans. Measure
+  `with()` + a `fields` object and `with()` + a braced list, and check that
+  the cost of the overlap check does not eat the gain for short lists.
 
 ## 6. Fuzzing
 
@@ -297,18 +320,18 @@ line with nlohmann/json.
 
 ## 8. spdlog v1 / v2 compatibility notes
 
-| Area                  | v1.x (1.12 to 1.17)                                                  | v2.x (untagged branch)     | jspdlog handling                                              |
-| --------------------- | -------------------------------------------------------------------- | -------------------------- | ------------------------------------------------------------- |
-| Level type            | `spdlog::level::level_enum`                                          | `enum class spdlog::level` | `jspdlog::level` alias; `jspdlog::level::info` works for both |
-| Logger level getter   | `level()`                                                            | `log_level()`              | wrapped in `json_logger::log_level()`                         |
-| `log_msg` level field | `level`                                                              | `log_level`                | internal helper (formatter)                                   |
-| Level names           | `spdlog::level::to_string_view`                                      | `spdlog::to_string_view`   | internal helper (formatter)                                   |
-| {fmt} include         | bundled or external via `<spdlog/fmt/fmt.h>`; `std::format` optional | external `<fmt/format.h>`  | version switch; `std::format` mode rejected for now           |
-| Async                 | `async_logger` + thread pool                                         | `async_sink`               | user's choice; use `adopt()` for v1                           |
-| Global logger         | `set_default_logger`                                                 | `set_global_logger`        | not used by jspdlog                                           |
-| Registry              | `register_logger`, `get`, global `set_pattern` etc.                  | removed                    | not used; README lists the safe and breaking calls            |
-| Async worker errors   | the logger's error handler                                           | `async_sink`'s own handler | documented in README                                          |
-| Library form          | header-only or compiled                                              | compiled                   | transparent                                                   |
+| Area                  | v1.x (1.12 to 1.17)                                                  | v2.x (untagged branch)     | jspdlog handling                                               |
+| --------------------- | -------------------------------------------------------------------- | -------------------------- | -------------------------------------------------------------- |
+| Level type            | `spdlog::level::level_enum`                                          | `enum class spdlog::level` | `jspdlog::level` alias; `jspdlog::level::info` works for both  |
+| Logger level getter   | `level()`                                                            | `log_level()`              | wrapped in `json_logger::log_level()`                          |
+| `log_msg` level field | `level`                                                              | `log_level`                | internal helper (formatter)                                    |
+| Level names           | `spdlog::level::to_string_view`                                      | `spdlog::to_string_view`   | internal helper (formatter)                                    |
+| {fmt} include         | bundled or external via `<spdlog/fmt/fmt.h>`; `std::format` optional | external `<fmt/format.h>`  | version switch; `std::format` mode supported for v1 with C++20 |
+| Async                 | `async_logger` + thread pool                                         | `async_sink`               | user's choice; use `adopt()` for v1                            |
+| Global logger         | `set_default_logger`                                                 | `set_global_logger`        | not used by jspdlog                                            |
+| Registry              | `register_logger`, `get`, global `set_pattern` etc.                  | removed                    | not used; README lists the safe and breaking calls             |
+| Async worker errors   | the logger's error handler                                           | `async_sink`'s own handler | documented in README                                           |
+| Library form          | header-only or compiled                                              | compiled                   | transparent                                                    |
 
 The differences are small enough for **one header** with a few `#if`s;
 separate per-version headers aren't needed.

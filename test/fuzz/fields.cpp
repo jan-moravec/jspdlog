@@ -15,6 +15,28 @@ using fuzz::ojson;
 // problem), so a clash gets underscores appended.
 const std::vector<std::string> RESERVED_KEYS = {"logger", "level", "message"};
 
+// The four one-letter keys of the tiny alphabet as checked keys, which skip the escape scan.
+bool is_checked_letter(const std::string &k)
+{
+    return k.size() == 1 && k[0] >= 'a' && k[0] <= 'd';
+}
+
+jspdlog::key checked_key(char letter)
+{
+    using namespace jspdlog::literals;
+    switch (letter)
+    {
+    case 'a':
+        return "a"_key;
+    case 'b':
+        return "b"_key;
+    case 'c':
+        return "c"_key;
+    default:
+        return "d"_key;
+    }
+}
+
 // The reference: an insertion-ordered list of key and JSON value.
 struct model
 {
@@ -105,8 +127,16 @@ private:
         {
             const std::string k = key_(depth == 0);
             const std::string v = r_.string(16);
+            const bool checked = (r_.byte() & 1U) != 0; // a one-letter key may be inserted as a checked key
             all_utf8 = all_utf8 && fuzz::parseable(v);
-            out.f.insert(k, std::string_view{v});
+            if (checked && is_checked_letter(k))
+            {
+                out.f.insert(checked_key(k[0]), std::string_view{v});
+            }
+            else
+            {
+                out.f.insert(k, std::string_view{v});
+            }
             out.m.put(k, ojson(fuzz::written_text(v)));
             break;
         }
@@ -280,9 +310,28 @@ void check_braced_list(fuzz::reader &r, const jspdlog::json_logger &logger, std:
     {
         logger.info({k0, lazy_number, k1, lazy_text, k2, real, k3, maybe});
     }
-    FUZZ_CHECK(lines.size() == 3);
+    // And with checked keys, where the keys are letters of the tiny alphabet.
+    const bool letters =
+        is_checked_letter(k0) && is_checked_letter(k1) && is_checked_letter(k2) && is_checked_letter(k3);
+    if (letters)
+    {
+        const jspdlog::key c0 = checked_key(k0[0]);
+        const jspdlog::key c1 = checked_key(k1[0]);
+        const jspdlog::key c2 = checked_key(k2[0]);
+        const jspdlog::key c3 = checked_key(k3[0]);
+        if (with_message)
+        {
+            logger.info({c0, number, c1, text, c2, real, c3, maybe}, "m {}", 1);
+        }
+        else
+        {
+            logger.info({c0, number, c1, text, c2, real, c3, maybe});
+        }
+    }
+    FUZZ_CHECK(lines.size() == (letters ? 4U : 3U));
     FUZZ_CHECK(lines[0] == lines[1]);
     FUZZ_CHECK(lines[0] == lines[2]);
+    FUZZ_CHECK(!letters || lines[0] == lines[3]);
 }
 
 } // namespace

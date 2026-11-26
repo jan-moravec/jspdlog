@@ -203,6 +203,100 @@ int main(int argc, char **argv)
             [&] { logger.info({"user", user, "status", [] { return 200; }}, "request {} handled in {} ms", 42, 7); });
     }
 
+    // Where the allocations are: braced lists with short and long keys, and fields objects built per call and bound.
+    {
+        const jspdlog::json_logger logger("bench", make_sink(), options_with(true, false));
+        run("jspdlog, braced list (6 fields), 24-byte keys + message", [&] {
+            logger.info(
+                {"user_identifier_key_0001",
+                 user,
+                 "http_status_code_key_002",
+                 200,
+                 "request_path_key_0000003",
+                 "/v1/items",
+                 "response_bytes_key_00004",
+                 1234,
+                 "served_from_cache_key_05",
+                 false,
+                 "cache_hit_ratio_key_0006",
+                 0.25},
+                "request {} handled in {} ms",
+                42,
+                7
+            );
+        });
+        // Checked keys: constexpr, so the check runs at compile time in C++17 too.
+        using namespace jspdlog::literals;
+        constexpr auto KEY_USER = "user"_key;
+        constexpr auto KEY_STATUS = "status"_key;
+        constexpr auto KEY_PATH = "path"_key;
+        constexpr auto KEY_BYTES = "bytes"_key;
+        constexpr auto KEY_CACHED = "cached"_key;
+        constexpr auto KEY_RATIO = "ratio"_key;
+        run("jspdlog, braced list (6 fields), checked short keys + message", [&] {
+            logger.info(
+                {KEY_USER,
+                 user,
+                 KEY_STATUS,
+                 200,
+                 KEY_PATH,
+                 "/v1/items",
+                 KEY_BYTES,
+                 1234,
+                 KEY_CACHED,
+                 false,
+                 KEY_RATIO,
+                 0.25},
+                "request {} handled in {} ms",
+                42,
+                7
+            );
+        });
+        constexpr auto LONG_KEY_1 = "user_identifier_key_0001"_key;
+        constexpr auto LONG_KEY_2 = "http_status_code_key_002"_key;
+        constexpr auto LONG_KEY_3 = "request_path_key_0000003"_key;
+        constexpr auto LONG_KEY_4 = "response_bytes_key_00004"_key;
+        constexpr auto LONG_KEY_5 = "served_from_cache_key_05"_key;
+        constexpr auto LONG_KEY_6 = "cache_hit_ratio_key_0006"_key;
+        run("jspdlog, braced list (6 fields), checked 24-byte keys + message", [&] {
+            logger.info(
+                {LONG_KEY_1,
+                 user,
+                 LONG_KEY_2,
+                 200,
+                 LONG_KEY_3,
+                 "/v1/items",
+                 LONG_KEY_4,
+                 1234,
+                 LONG_KEY_5,
+                 false,
+                 LONG_KEY_6,
+                 0.25},
+                "request {} handled in {} ms",
+                42,
+                7
+            );
+        });
+        run("jspdlog, fields object (6 fields) built per call + message", [&] {
+            const jspdlog::fields f{
+                "user", user, "status", 200, "path", "/v1/items", "bytes", 1234, "cached", false, "ratio", 0.25
+            };
+            logger.info(f, "request {} handled in {} ms", 42, 7);
+        });
+        const jspdlog::fields prebuilt{
+            "user", user, "status", 200, "path", "/v1/items", "bytes", 1234, "cached", false, "ratio", 0.25
+        };
+        run("jspdlog, prebuilt fields object (6 fields) + message",
+            [&] { logger.info(prebuilt, "request {} handled in {} ms", 42, 7); });
+        run("jspdlog, with() of 6 fields", [&] {
+            const auto child = logger.with(prebuilt);
+            if (child.context().empty())
+            {
+                std::abort();
+            }
+        });
+    }
+
     // Third-party code logging straight on the spdlog logger: the whole payload is escaped into the message.
     {
         const jspdlog::json_logger logger("bench", make_sink(), options_with(true, false));

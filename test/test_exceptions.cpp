@@ -73,25 +73,7 @@ struct jspdlog::serializer<jspdlog_test::my_error>
     }
 };
 
-namespace
-{
-// A type whose {fmt} formatter throws, standing in for a user formatter with a bug.
-struct throws_when_formatted
-{
-};
-} // namespace
-
-template <>
-struct fmt::formatter<throws_when_formatted>
-{
-    static constexpr auto parse(fmt::format_parse_context &ctx) -> decltype(ctx.begin()) { return ctx.begin(); }
-
-    template <typename Context>
-    auto format(const throws_when_formatted & /*value*/, Context &ctx) const -> decltype(ctx.out())
-    {
-        throw std::runtime_error("formatter failed");
-    }
-};
+using test_support::throws_when_formatted;
 
 namespace
 {

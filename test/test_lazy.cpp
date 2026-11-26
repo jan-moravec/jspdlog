@@ -583,3 +583,33 @@ TEST_CASE("lazy: an async logger runs a lazy value in the calling thread", "[laz
     CHECK(capture->lines[0] == R"({"logger":"t","level":"info","v":"gone after this block","message":"x"})");
 }
 #endif
+
+TEST_CASE("lazy: checked keys in a braced list give the line of string keys", "[lazy]")
+{
+    using namespace jspdlog::literals;
+    const fixture f;
+    f.logger.info({"user_id", 7, "ok", true}, "m");
+    const std::string plain = f.last();
+    f.logger.info({"user_id"_key, 7, "ok"_key, true}, "m");
+    CHECK(f.last() == plain);
+    f.logger.info({"user_id"_key, 7, "ok", true}, "m"); // checked and string keys mix
+    CHECK(f.last() == plain);
+    const auto bound = f.logger.with({"service"_key, "api"});
+    bound.info({"service"_key, "other", "user_id"_key, 7}, "m");
+    CHECK(f.last() == R"({"logger":"t","level":"info","service":"other","user_id":7,"message":"m"})");
+}
+
+TEST_CASE("lazy: a fields object per call on a logger with and without bound fields", "[lazy]")
+{
+    const fixture f;
+    const jspdlog::fields per_call{"a", 1, "k\"ey", 2};
+    f.logger.info(per_call, "m");
+    const std::string unbound = R"({"logger":"t","level":"info","a":1,"k\"ey":2,"message":"m"})";
+    CHECK(f.last() == unbound);
+    const auto bound = f.logger.with({"k\"ey", 0, "b", 3});
+    bound.info(per_call, "m");
+    const std::string replaced = R"({"logger":"t","level":"info","k\"ey":2,"b":3,"a":1,"message":"m"})";
+    CHECK(f.last() == replaced);
+    f.logger.info(jspdlog::fields{}, "m");
+    CHECK(f.last() == R"({"logger":"t","level":"info","message":"m"})");
+}

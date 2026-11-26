@@ -68,6 +68,16 @@ target_link_libraries(jspdlog_assert_tests PRIVATE jspdlog::jspdlog Catch2::Catc
 jspdlog_set_warnings(jspdlog_assert_tests)
 catch_discover_tests(jspdlog_assert_tests)
 
+# The error handler tests run under a short timeout: a handler that deadlocks must show up as a failure, not a hang.
+add_executable(jspdlog_error_handler_tests test_error_handler.cpp)
+target_link_libraries(jspdlog_error_handler_tests PRIVATE jspdlog::jspdlog Catch2::Catch2WithMain)
+if(JSPDLOG_TEST_WITH_NLOHMANN)
+    target_link_libraries(jspdlog_error_handler_tests PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_definitions(jspdlog_error_handler_tests PRIVATE JSPDLOG_TEST_NLOHMANN=1)
+endif()
+jspdlog_set_warnings(jspdlog_error_handler_tests)
+catch_discover_tests(jspdlog_error_handler_tests PROPERTIES TIMEOUT 10)
+
 # The exception forms in a unit without RTTI. It has its own main, because Catch2 is built with RTTI. jspdlog::jspdlog
 # is linked for the include paths and spdlog.
 add_executable(jspdlog_nortti_tests test_exceptions_nortti.cpp)
@@ -113,8 +123,26 @@ jspdlog_add_utf8_variant(jspdlog_utf8_pass_separator_tests POLICY PASS SEPARATOR
 # A control target builds the same file with the offending line replaced by a valid one and must succeed, so a failure
 # for an unrelated reason (a broken include, a typo) cannot pass as the expected one. The tests build in the shared
 # build directory, so they hold a lock and never run in parallel.
+# A key that needs escaping is a compile error only where the header uses consteval, which it does when the compiler
+# defines __cpp_consteval. Ask the compiler with the flags of this build rather than assume it from the standard.
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_FLAGS "${CMAKE_CXX${CMAKE_CXX_STANDARD}_STANDARD_COMPILE_OPTION}")
+check_cxx_source_compiles(
+    "#ifndef __cpp_consteval
+#error no consteval
+#endif
+int main() { return 0; }"
+    JSPDLOG_TEST_HAS_CONSTEVAL
+)
+unset(CMAKE_REQUIRED_FLAGS)
+set(JSPDLOG_COMPILE_FAIL_EXTRA)
+if(JSPDLOG_TEST_HAS_CONSTEVAL)
+    list(APPEND JSPDLOG_COMPILE_FAIL_EXTRA key_escape)
+endif()
 foreach(
     case
+    ${JSPDLOG_COMPILE_FAIL_EXTRA}
+    key_buffer
     info_int
     info_vector
     odd_fields

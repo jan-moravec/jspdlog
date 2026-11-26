@@ -6,6 +6,36 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-26
+
+Fewer allocations when fields are written, an error handler that reports as JSON, and spdlog v1 builds with
+`SPDLOG_USE_STD_FORMAT`. Nothing breaks.
+
+### Added
+
+- `jspdlog::make_error_handler(logger_name, options)` returns an spdlog error handler that writes each logging failure
+  as one JSON line, to stderr, another `FILE` or a sink (`error_report_options`). It never calls back into spdlog, so a
+  sink that fails again cannot deadlock spdlog v2's error mutex (which is held while the handler runs) or recurse in
+  spdlog v1, it does not throw, and reports closer together than `min_interval` are counted and carried as `dropped`.
+- `jspdlog::key` and the `"name"_key` literal: a field key checked at compile time. A key that needs escaping does not
+  compile in C++20 (it throws `std::invalid_argument` when created in C++17), and a checked key is copied into the line
+  without a scan. They work in braced lists, `fields` constructors and `fields::insert`.
+- `SPDLOG_USE_STD_FORMAT` is supported with spdlog v1 and C++20, where the header used to stop with an error. The CI
+  matrix has two new legs for it. spdlog v2 has no such mode.
+- Benchmark cases for long keys, `fields` objects built per call, prebuilt ones and `with()`, and tests for splicing,
+  checked keys, the error handler (also under a CTest timeout) and std::format.
+
+### Changed
+
+- A `fields` object stores the text of all its fields in one string with an offset table, so building one costs two
+  allocations instead of up to two per field, and `with()` no longer joins the text again. `fields::insert` throws
+  `std::length_error` when the fields would exceed 4 GiB, the limit of the payload protocol.
+- `json_logger` writes the values of a braced list straight into spdlog's buffer instead of through a scratch string.
+- A `fields` object passed to a logging call of a logger without bound fields is copied into the line in one piece,
+  which halves the cost of a prebuilt one on the benchmark.
+- `fmt::runtime` has no counterpart in std::format mode before C++26; the runtime-string call forms cover runtime
+  messages there.
+
 ## [0.4.0] - 2026-11-25
 
 Exceptions are logged with their causes, the field names of common log schemas are one function call away, and strings
@@ -119,4 +149,5 @@ First release. jspdlog is a single-header library that writes one JSON object pe
 [0.2.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.2.0
 [0.3.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.3.0
 [0.4.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.4.0
-[unreleased]: https://github.com/jan-moravec/jspdlog/compare/v0.4.0...HEAD
+[0.5.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.5.0
+[unreleased]: https://github.com/jan-moravec/jspdlog/compare/v0.5.0...HEAD

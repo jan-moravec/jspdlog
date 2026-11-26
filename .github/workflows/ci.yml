@@ -211,9 +211,11 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
   build-and-test:
-    # Release preset (warnings as errors) across compilers, C++17/20 and spdlog v1/v2.
+    # Release preset (warnings as errors) across compilers, C++17/20, spdlog v1/v2 and spdlog's std::format mode.
     needs: pre-commit
-    name: ${{ matrix.os }} / ${{ matrix.cxx }} / C++${{ matrix.std }} / spdlog ${{ matrix.spdlog || 'v2.x' }}
+    name: >-
+      ${{ matrix.os }} / ${{ matrix.cxx }} / C++${{ matrix.std }} /
+      spdlog ${{ matrix.spdlog || 'v2.x' }}${{ matrix.std_format && ' + std::format' || '' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -235,12 +237,16 @@ jobs:
           - {os: ubuntu-22.04, cc: gcc-11, cxx: g++-11, std: 17, spdlog: v1.12.0}
           - {os: ubuntu-24.04, cc: clang-18, cxx: clang++-18, std: 20, spdlog: v1.17.0}
           - {os: windows-latest, cc: msvc, cxx: msvc, std: 17, spdlog: v1.17.0}
+          # spdlog v1 with std::format instead of {fmt}, which needs C++20. spdlog v2 has no such mode.
+          - {os: ubuntu-24.04, cc: gcc-13, cxx: g++-13, std: 20, spdlog: v1.17.0, std_format: true}
+          - {os: windows-latest, cc: msvc, cxx: msvc, std: 20, spdlog: v1.17.0, std_format: true}
     defaults:
       run:
         shell: bash
     env:
       CXX_STD: ${{ matrix.std }}
       SPDLOG_TAG: ${{ matrix.spdlog }}
+      STD_FORMAT: ${{ matrix.std_format && 'ON' || '' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -267,7 +273,9 @@ jobs:
         env:
           CC: ${{ runner.os != 'Windows' && matrix.cc || 'cl' }}
           CXX: ${{ runner.os != 'Windows' && matrix.cxx || 'cl' }}
-        run: cmake --preset release -DCMAKE_CXX_STANDARD="$CXX_STD" ${SPDLOG_TAG:+-DJSPDLOG_SPDLOG_GIT_TAG=$SPDLOG_TAG}
+        run: >-
+          cmake --preset release -DCMAKE_CXX_STANDARD="$CXX_STD" ${SPDLOG_TAG:+-DJSPDLOG_SPDLOG_GIT_TAG=$SPDLOG_TAG}
+          ${STD_FORMAT:+-DSPDLOG_USE_STD_FORMAT=ON}
 
       - name: Build
         run: cmake --build --preset release

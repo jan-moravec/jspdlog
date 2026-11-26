@@ -159,7 +159,8 @@ logger.info({"user_id", 42, "admin", false, "ratio", 0.25, "name", "ada"}, "logi
 - Lines read: header, fields of outer loggers, fields of inner loggers, fields of the call, message. A key that appears
   again keeps its first position, so `with({"step", "a"})` followed by `info({"step", "b"})` writes `step` once, where
   the logger's field was.
-- Fields are meant to be small (a handful of keys); lookups scan the keys.
+- Fields are meant to be small (a handful of keys); lookups scan the keys. A `fields` object keeps the text of all its
+  fields in one buffer, so building one costs two allocations however many fields it has.
 - Wide characters and pointers other than `const char*` don't compile. More types are covered under
   [Value types](#value-types).
 - A key equal to a header key (`timestamp`, `level`, ...), to the source key or to `message` produces a duplicate key.
@@ -168,6 +169,24 @@ logger.info({"user_id", 42, "admin", false, "ratio", 0.25, "name", "ada"}, "logi
 - A braced list passed to a logging call is serialized only when the line is written. A `fields` object is
   serialized when it is built. A braced list holds at most 16 pairs; build a `fields` object for more.
 - A key that appears twice in one braced list takes the last value at the first position, as in a `fields` object.
+
+#### Checked keys
+
+A key written as `"name"_key` is checked when the program is compiled and then copied into the line without a scan for
+characters that need escaping. A key that needs escaping (a control character, a quote, a backslash or a byte of 0x80 or
+more) does not compile in C++20. In C++17 the check runs when the key is created and throws `std::invalid_argument`;
+declare the key `constexpr` to check it at compile time there too. It works wherever a key does:
+
+```cpp
+using namespace jspdlog::literals;
+logger.info({"user_id"_key, 42, "ok"_key, true}, "login");
+constexpr auto user = "user_id"_key;  // checked at compile time in C++17 as well
+fields f{user, 42};
+```
+
+String-literal keys without the suffix work as before and are escaped when the line is written. On the benchmark in
+[CONTRIBUTING](CONTRIBUTING.md#benchmarks), checked keys make a braced list of six fields several percent faster, more
+with long keys.
 
 #### Expensive values
 
@@ -565,7 +584,7 @@ jspdlog::install_json_formatter(*extra_sink, options);
 
 - sinks that write the raw message instead of the formatted line
 - sinks added after the json_logger was created, and sinks shared with a plain spdlog logger
-- the default error handler, which writes plain text to stderr
+- the default error handler, which writes plain text to stderr; `make_error_handler` writes JSON
 - the lifetime of the spdlog v1 async thread pool
 - `SPDLOG_LEVEL_NAMES`, which changes the `level` values
 
@@ -623,14 +642,21 @@ that contract: **logging calls do not throw.** If formatting a message fails, fo
 throws, the error goes to the same handler and the line is dropped.
 
 The default handler prints a plain-text line such as `[*** LOG ERROR ***] ...` to stderr, at most once per second. If
-stderr is collected together with your JSON logs, install a handler that writes JSON:
+stderr is collected together with your JSON logs, install the handler that jspdlog makes:
 
 ```cpp
-logger.spdlog_logger()->set_error_handler([](const std::string &msg) {
-    const jspdlog::fields line{"level", "error", "logger", "spdlog", "message", msg};
-    std::fputs((line.to_json() + "\n").c_str(), stderr);
-});
+logger.spdlog_logger()->set_error_handler(jspdlog::make_error_handler(logger.name()));
+// {"timestamp":"...","logger":"app","level":"error","dropped":3,"message":"Failed writing to file ..."}
 ```
+
+`make_error_handler` writes each error as one JSON line to stderr, or to another stream or sink through
+`jspdlog::error_report_options`. It never logs through spdlog, so a sink that fails again cannot recurse or deadlock:
+spdlog v2 calls a handler with its error mutex held, and a handler that logs through the failing logger would wait on
+that mutex forever, while in v1 it would recurse until the stack ends. The handler does not throw; if the report itself
+fails it prints one plain-text line to stderr. Reports closer together than `min_interval` (one second by default) are
+counted, and the next one carries the number as `dropped`. Its state lives in the handler, which shares it between
+copies, and a mutex of its own serializes the worker threads of an async logger. With a report sink, give it a
+`json_formatter` (`install_json_formatter(*sink)`); the report sink must not be one of the failing logger's sinks.
 
 - The handler belongs to the `spdlog::logger`, so it applies to every copy and child of the json_logger.
 - **spdlog v2 async:** errors on the worker thread go to the `async_sink`'s own handler, set through
@@ -673,8 +699,15 @@ json_logger, the options of the last call apply to that sink.
 | `JSPDLOG_ACTIVE_LEVEL`  | jspdlog's own: removes the `JSPDLOG_*` macros below a level. Default: trace.       |
 | `SPDLOG_NO_THREAD_ID`   | `thread` is always 0.                                                              |
 | `SPDLOG_EOL`            | Used when `json_options::eol` is not set.                                          |
-| `SPDLOG_USE_STD_FORMAT` | Not supported; the header stops with an error.                                     |
+| `SPDLOG_USE_STD_FORMAT` | Supported with spdlog v1 and C++20 (spdlog v2 has no such mode). See below.        |
 | `SPDLOG_NO_EXCEPTIONS`  | Not supported; jspdlog's constructors throw on a null sink or logger.              |
+
+With `SPDLOG_USE_STD_FORMAT`, which needs spdlog v1 built with `-DSPDLOG_USE_STD_FORMAT=ON` and C++20, jspdlog uses
+`std::format` where it otherwise uses {fmt}: a format string is checked at compile time where the standard library has
+`std::format_string` (`__cpp_lib_format` 202207L), and at run time before that. A format string that is not a literal
+cannot be passed with `fmt::runtime`, which has no `std::format` counterpart before C++26; pass the runtime string as the
+message, or build the text yourself. To write an enum as its name, specialize `std::formatter` for it instead of
+`fmt::formatter`.
 
 spdlog's MDC (the `%&` flag, spdlog 1.13+) is thread-local global state and is not included in jspdlog's lines. Use
 `with()` instead.
@@ -774,6 +807,24 @@ public:
 };
 
 struct raw_json { std::string value; };
+
+// A field key checked at compile time (C++20; when created in C++17): no escape scan when it is written.
+class key {
+public:
+    template <std::size_t N> explicit consteval key(const char (&s)[N]);
+    constexpr std::string_view view() const noexcept;
+};
+namespace literals { consteval key operator""_key(const char *s, std::size_t n); }  // "user_id"_key
+
+// Reports a logging failure as one JSON line, without calling back into spdlog. Install it with set_error_handler
+// (or in the config of a v2 async_sink). Rate limited; the next report carries the number dropped.
+struct error_report_options {
+    json_options format{};                        // keys and time format of the report line
+    spdlog::sink_ptr sink;                        // where to write it (give it a json_formatter), or null for stream
+    std::FILE *stream = stderr;                   // used when sink is null; null too discards the reports
+    std::chrono::milliseconds min_interval{1000};
+};
+spdlog::err_handler make_error_handler(std::string logger_name, error_report_options options = {});
 
 // Optional macros: JSPDLOG_TRACE, _DEBUG, _INFO, _WARN, _ERROR, _CRITICAL (logger, ...) and
 // JSPDLOG_LOG(logger, level, ...). Nothing in the call is evaluated when the level is off; JSPDLOG_ACTIVE_LEVEL

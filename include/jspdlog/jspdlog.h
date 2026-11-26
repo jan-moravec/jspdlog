@@ -35,7 +35,7 @@
 /** @brief Major version of jspdlog. */
 #define JSPDLOG_VERSION_MAJOR 0
 /** @brief Minor version of jspdlog. */
-#define JSPDLOG_VERSION_MINOR 4
+#define JSPDLOG_VERSION_MINOR 5
 /** @brief Patch version of jspdlog. */
 #define JSPDLOG_VERSION_PATCH 0
 /** @brief The version as one number, major * 10000 + minor * 100 + patch, for #if comparisons. */
@@ -44,6 +44,7 @@
 #include <spdlog/version.h>
 
 #if SPDLOG_VER_MAJOR >= 2
+#define JSPDLOG_STD_FORMAT 0
 #include <fmt/format.h>
 /** @brief 1 when building against spdlog v2.x, 0 for v1.x. */
 #define JSPDLOG_SPDLOG_V2 1
@@ -52,7 +53,13 @@
 #error "jspdlog requires spdlog >= 1.12 (or v2.x)"
 #endif
 #ifdef SPDLOG_USE_STD_FORMAT
-#error "jspdlog does not support SPDLOG_USE_STD_FORMAT yet; build spdlog with {fmt}"
+// spdlog v1 formats with std::format, which needs C++20. spdlog v2 has no such mode.
+#if __cplusplus < 202002L && !(defined(_MSVC_LANG) && _MSVC_LANG >= 202002L)
+#error "jspdlog with SPDLOG_USE_STD_FORMAT needs C++20 for <format>"
+#endif
+#define JSPDLOG_STD_FORMAT 1
+#else
+#define JSPDLOG_STD_FORMAT 0
 #endif
 #include <spdlog/fmt/fmt.h>
 #define JSPDLOG_SPDLOG_V2 0
@@ -64,13 +71,19 @@
 #include <spdlog/logger.h>
 #include <spdlog/sinks/sink.h>
 
+#if JSPDLOG_STD_FORMAT && !defined(__cpp_lib_format)
+#error "jspdlog with SPDLOG_USE_STD_FORMAT needs a standard library with <format>"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -78,6 +91,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <ratio>
@@ -124,6 +138,21 @@
 #define JSPDLOG_HAS_RTTI 1
 #else
 #define JSPDLOG_HAS_RTTI 0
+#endif
+
+#ifdef __cpp_consteval
+/** @brief consteval where the compiler has it, else constexpr: a compile-time check in C++20, a run-time one in C++17.
+ */
+#define JSPDLOG_CONSTEVAL consteval
+#else
+#define JSPDLOG_CONSTEVAL constexpr
+#endif
+
+#if JSPDLOG_STD_FORMAT
+/** @brief What a format-string constructor is declared with: {fmt}'s own switch, or consteval for std::format. */
+#define JSPDLOG_FORMAT_CONSTEVAL JSPDLOG_CONSTEVAL
+#else
+#define JSPDLOG_FORMAT_CONSTEVAL FMT_CONSTEVAL
 #endif
 
 // The policy values are not 0: the preprocessor reads an unknown name such as escape as 0, and the check below must
@@ -478,6 +507,33 @@ void append_json_quoted(Buffer &out, std::string_view s)
     out.push_back('"');
 }
 
+/**
+ * @brief Whether a string needs more than quotes around it to become a JSON string: a control character, a quote, a
+ * backslash or a byte of 0x80 or more. It can run in a constant expression, which the key type relies on.
+ */
+constexpr bool needs_escape(std::string_view s) noexcept
+{
+    constexpr unsigned FIRST_PRINTABLE = 0x20U; // Bytes below this are control characters.
+    constexpr unsigned FIRST_NON_ASCII = 0x80U;
+    // A loop, because std::any_of is not constexpr before C++20.
+    for (const char ch : s) // NOLINT(readability-use-anyofallof)
+    {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c < FIRST_PRINTABLE || c == '"' || c == '\\' || c >= FIRST_NON_ASCII)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** @brief Whether a key needs no escaping, so it can be copied between quotes. Scans the key once. */
+template <typename K>
+constexpr bool is_plain_key(const K &key) noexcept
+{
+    return !needs_escape(std::string_view(key));
+}
+
 /** @brief Appends text to a buffer unchanged. The buffer can be a std::string or an spdlog memory buffer. */
 template <typename Buffer>
 void append(Buffer &out, std::string_view s)
@@ -490,6 +546,21 @@ template <typename Buffer, typename T>
 void append_int(Buffer &out, T value)
 {
     static_assert(std::is_integral_v<T>, "append_int: expected an integer");
+#if JSPDLOG_STD_FORMAT
+    std::array<char, 24> digits{}; // enough for the 20 digits and the sign of any 64-bit integer
+    const auto written = [&](auto number) {
+        const auto result = std::to_chars(digits.data(), digits.data() + digits.size(), number);
+        out.append(digits.data(), result.ptr);
+    };
+    if constexpr (std::is_signed_v<T>)
+    {
+        written(static_cast<long long>(value));
+    }
+    else
+    {
+        written(static_cast<unsigned long long>(value));
+    }
+#else
     if constexpr (std::is_signed_v<T>)
     {
         const spdlog::fmt_lib::format_int text(static_cast<long long>(value));
@@ -500,6 +571,7 @@ void append_int(Buffer &out, T value)
         const spdlog::fmt_lib::format_int text(static_cast<unsigned long long>(value));
         out.append(text.data(), text.data() + text.size());
     }
+#endif
 }
 
 /** @brief Views spdlog's string view type as a std::string_view. */
@@ -685,6 +757,15 @@ inline parsed_payload parse_payload(std::string_view p, const payload_token &tok
     return {true, fields, message};
 }
 
+/** @brief Throws std::length_error when serialized fields of this size do not fit the 4 GiB of the payload protocol. */
+inline void check_fields_size(std::size_t size)
+{
+    if (size > MAX_FIELDS_SIZE)
+    {
+        throw std::length_error("jspdlog: fields larger than 4 GiB");
+    }
+}
+
 /**
  * @brief Writes the size of the fields into the placeholder that precedes them in a payload.
  *
@@ -695,15 +776,29 @@ inline void patch_hex_size(spdlog::memory_buf_t &out, std::size_t at, std::size_
     static constexpr char HEX_DIGITS[] = "0123456789abcdef";
     static constexpr unsigned NIBBLE_BITS = 4U;
     static constexpr unsigned NIBBLE_MASK = 0xFU;
-    if (size > MAX_FIELDS_SIZE)
-    {
-        throw std::length_error("jspdlog: fields larger than 4 GiB");
-    }
+    check_fields_size(size);
     for (std::size_t i = 0; i < SIZE_DIGITS; ++i)
     {
         const unsigned shift = NIBBLE_BITS * static_cast<unsigned>(SIZE_DIGITS - 1 - i);
         out.data()[at + i] = HEX_DIGITS[(size >> shift) & NIBBLE_MASK];
     }
+}
+
+/**
+ * @brief Appends the start of a payload: the token, the kind, the size of the fields and the fields that write_fields
+ * appends. The caller then appends the message. Used by json_logger and by the error handler, so both write the same
+ * protocol.
+ */
+template <typename WriteFields>
+void write_payload(spdlog::memory_buf_t &out, const payload_token &token, char kind, const WriteFields &write_fields)
+{
+    append(out, std::string_view{token.data(), token.size()});
+    out.push_back(kind);
+    const std::size_t size_at = out.size();
+    append(out, std::string_view{"00000000", SIZE_DIGITS});
+    const std::size_t fields_at = out.size();
+    write_fields(out);
+    patch_hex_size(out, size_at, out.size() - fields_at);
 }
 
 /**
@@ -723,12 +818,21 @@ struct deferred_payload
 } // namespace detail
 } // namespace jspdlog
 
+#if JSPDLOG_STD_FORMAT
+/** @brief Formats a jspdlog::detail::deferred_payload by running its write function. */
+template <typename Write>
+struct std::formatter<jspdlog::detail::deferred_payload<Write>, char>
+{
+    /** @brief Accepts only an empty format specification. */
+    constexpr auto parse(std::format_parse_context &ctx) -> decltype(ctx.begin()) { return ctx.begin(); }
+#else
 /** @brief Formats a jspdlog::detail::deferred_payload by running its write function. */
 template <typename Write>
 struct fmt::formatter<jspdlog::detail::deferred_payload<Write>>
 {
     /** @brief Accepts only an empty format specification. */
     constexpr auto parse(fmt::format_parse_context &ctx) -> decltype(ctx.begin()) { return ctx.begin(); }
+#endif
 
     /** @brief Runs the write function and copies its output. */
     template <typename Context>
@@ -1214,7 +1318,166 @@ class fields;
 namespace detail
 {
 struct writer_access;
+
+/**
+ * @brief Called by a key that needs escaping. It is not a constant expression, so in C++20 the key does not compile;
+ * in C++17 the key is checked when it is created and this throws std::invalid_argument.
+ */
+[[noreturn]] inline void key_needs_escape()
+{
+#if JSPDLOG_HAS_EXCEPTIONS
+    throw std::invalid_argument(
+        "jspdlog: a key needs escaping: it holds a control character, a quote, a backslash or "
+        "a byte of 0x80 or more"
+    );
+#else
+    std::abort();
+#endif
 }
+
+struct key_access;
+} // namespace detail
+
+/**
+ * @brief A field key checked when the program is compiled, so inserting it copies the key between quotes without a
+ * scan. A key with a control character, a quote, a backslash or a byte of 0x80 or more does not compile in C++20; in
+ * C++17 the check runs when the key is created and throws std::invalid_argument. Build one with the _key literal or
+ * with key{"name"}.
+ *
+ * @code
+ * using namespace jspdlog::literals;
+ * logger.info({"user_id"_key, 42}, "logged in");
+ * @endcode
+ */
+class key
+{
+public:
+    /** @brief Checks a string literal. Explicit, so that a plain literal stays a std::string_view. */
+    template <std::size_t N>
+    explicit JSPDLOG_CONSTEVAL key(const char (&s)[N])
+        : text_(s, N - 1)
+    {
+        check_();
+    }
+
+    /**
+     * @brief A writable char array is not a key: its contents can change after the check and its size counts every
+     * byte, not the text. Pass its text as a std::string_view key instead.
+     */
+    template <std::size_t N>
+    explicit key(char (&s)[N]) = delete;
+
+    /** @brief The key text. */
+    [[nodiscard]] constexpr std::string_view view() const noexcept { return text_; }
+
+    /** @brief Lets a key go wherever a string key is taken. */
+    // Implicit on purpose: a key is a string key that is known to need no escaping.
+    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
+    constexpr operator std::string_view() const noexcept { return text_; }
+
+private:
+    friend struct detail::key_access;
+
+    /** @brief Checks the text of a literal operator. */
+    JSPDLOG_CONSTEVAL key(const char *s, std::size_t n)
+        : text_(s, n)
+    {
+        check_();
+    }
+
+    /** @brief Fails to compile, or throws, when the key needs escaping. */
+    constexpr void check_() const
+    {
+        if (detail::needs_escape(text_))
+        {
+            detail::key_needs_escape();
+        }
+    }
+
+    /** @brief The key text. */
+    std::string_view text_;
+};
+
+namespace detail
+{
+/** @brief Gives the literal operator the private constructor of key. */
+struct key_access
+{
+    /** @brief Creates a key from the characters of a user-defined literal. */
+    static JSPDLOG_CONSTEVAL key make(const char *s, std::size_t n) { return {s, n}; }
+};
+
+/** @brief A key type is known to need no escaping. */
+constexpr bool is_plain_key(const key & /*key*/) noexcept
+{
+    return true;
+}
+} // namespace detail
+
+namespace literals
+{
+/** @brief "user_id"_key is a key checked when the program is compiled. */
+JSPDLOG_CONSTEVAL key operator""_key(const char *s, std::size_t n)
+{
+    return detail::key_access::make(s, n);
+}
+} // namespace literals
+
+namespace detail
+{
+/**
+ * @brief Where a json_writer appends: a std::string, or spdlog's own memory buffer when json_logger writes a line.
+ *
+ * json_logger writes per-call values straight into spdlog's buffer, with no intermediate string and one copy fewer per
+ * value. Each append branches on which target is set; both are written the same way, so the output is identical.
+ */
+class output_ref
+{
+public:
+    /** @brief Appends to a string. */
+    explicit output_ref(std::string &s) noexcept
+        : string_(&s)
+    {
+    }
+    /** @brief Appends to a buffer. */
+    explicit output_ref(
+        spdlog::memory_buf_t &b, int /*tag: tells the buffer from the string when they are one type*/
+    ) noexcept
+        : buffer_(&b)
+    {
+    }
+    /** @brief Appends one character. */
+    void push_back(char c)
+    {
+        if (buffer_ != nullptr)
+        {
+            buffer_->push_back(c);
+        }
+        else
+        {
+            string_->push_back(c);
+        }
+    }
+    /** @brief Appends the characters in [first, last). */
+    void append(const char *first, const char *last)
+    {
+        if (buffer_ != nullptr)
+        {
+            buffer_->append(first, last);
+        }
+        else
+        {
+            string_->append(first, last);
+        }
+    }
+
+private:
+    /** @brief The string, or null when writing to a buffer. */
+    std::string *string_ = nullptr;
+    /** @brief The buffer, or null when writing to a string. */
+    spdlog::memory_buf_t *buffer_ = nullptr;
+};
+} // namespace detail
 
 /**
  * @brief Specialize to give a type you do not own a JSON form. The primary template has no write member.
@@ -1285,7 +1548,7 @@ class json_writer
 public:
     /** @brief Creates a writer that appends to out. The buffer must outlive the writer. */
     explicit json_writer(std::string &out) noexcept
-        : out_(&out)
+        : out_(out)
     {
     }
 
@@ -1303,8 +1566,8 @@ public:
     {
         JSPDLOG_ASSERT(depth_ > 0 && !after_key_, "jspdlog: key outside a container, or two keys in a row");
         separate_();
-        detail::append_json_quoted(*out_, k);
-        out_->push_back(':');
+        detail::append_json_quoted(out_, k);
+        out_.push_back(':');
         after_key_ = true;
     }
     /** @brief Closes the innermost object. */
@@ -1326,13 +1589,19 @@ private:
     friend struct detail::writer_access;
     friend class fields;
 
+    /** @brief Creates a writer that appends to spdlog's buffer. Used by json_logger through writer_access. */
+    json_writer(spdlog::memory_buf_t &out, int tag) noexcept
+        : out_(out, tag)
+    {
+    }
+
     /** @brief Writes a comma when a value precedes this one in the same container. */
     void separate_()
     {
         JSPDLOG_ASSERT(!need_comma_ || depth_ > 0, "jspdlog: a serializer wrote more than one value");
         if (need_comma_)
         {
-            out_->push_back(',');
+            out_.push_back(',');
         }
         need_comma_ = false;
     }
@@ -1348,7 +1617,7 @@ private:
     void scalar_(std::string_view text)
     {
         separate_();
-        detail::append(*out_, text);
+        detail::append(out_, text);
         done_();
     }
 
@@ -1356,7 +1625,7 @@ private:
     void string_(std::string_view text)
     {
         separate_();
-        detail::append_json_quoted(*out_, text);
+        detail::append_json_quoted(out_, text);
         done_();
     }
 
@@ -1365,7 +1634,7 @@ private:
     void integer_(T number)
     {
         separate_();
-        detail::append_int(*out_, number);
+        detail::append_int(out_, number);
         done_();
     }
 
@@ -1393,7 +1662,7 @@ private:
     void open_(char bracket)
     {
         separate_();
-        out_->push_back(bracket);
+        out_.push_back(bracket);
         ++depth_;
         need_comma_ = false;
         after_key_ = false;
@@ -1404,15 +1673,15 @@ private:
     {
         JSPDLOG_ASSERT(depth_ > 0 && !after_key_, "jspdlog: closing without an open container, or after a key");
         --depth_;
-        out_->push_back(bracket);
+        out_.push_back(bracket);
         done_();
     }
 
     /** @brief Whether exactly one value was written and nothing is left open. */
     [[nodiscard]] bool complete_() const noexcept { return depth_ == 0 && !after_key_ && need_comma_; }
 
-    /** @brief The buffer written to. */
-    std::string *out_;
+    /** @brief The string or buffer written to. */
+    detail::output_ref out_;
     /** @brief Whether the next value or key needs a comma before it. */
     bool need_comma_ = false;
     /** @brief The number of open objects and arrays. Stored in every build, so the layout does not depend on NDEBUG. */
@@ -1430,7 +1699,9 @@ private:
  * and when two sets are merged the right-hand side wins.
  *
  * Fields are meant to be small: a lookup scans the keys, which beats a map for the handful of keys a log line carries.
- * A braced list passed to a logging call is not a fields object: it is serialized only when the line is written.
+ * The serialized text of all fields lives in one string, so building a set costs two allocations however many fields
+ * it has. A braced list passed to a logging call is not a fields object: it is serialized only when the line is
+ * written.
  *
  * A key equal to one of the logger's header keys, to its source key or to its message key produces a duplicate key in
  * the line. Avoiding that is up to the caller; debug builds check it through JSPDLOG_ASSERT.
@@ -1448,6 +1719,8 @@ public:
     fields(K &&key, V &&value, Rest &&...rest)
     {
         static_assert(sizeof...(Rest) % 2 == 0, "fields: expected key/value pairs");
+        entries_.reserve((sizeof...(Rest) / 2) + 1);
+        text_.reserve(estimate_size_(key, value, rest...));
         insert_pairs_(std::forward<K>(key), std::forward<V>(value), std::forward<Rest>(rest)...);
     }
 
@@ -1456,21 +1729,20 @@ public:
      * be a temporary; a key that exists gets the new value at its old position.
      *
      * A type without a JSON form, a wide character and a pointer other than a C string are rejected at compile time.
-     * Give your own types a form with jspdlog_serialize or a specialization of serializer.
+     * Give your own types a form with jspdlog_serialize or a specialization of serializer. Throws std::length_error
+     * when the fields would exceed 4 GiB.
      */
     template <typename T>
     void insert(std::string_view key, const T &value)
     {
-        static constexpr std::size_t PUNCTUATION_AND_SHORT_VALUE = 8; // comma, quotes, colon and a few characters
-        std::string text;
-        text.reserve(key.size() + PUNCTUATION_AND_SHORT_VALUE);
-        text.push_back(',');
-        detail::append_json_quoted(text, key);
-        text.push_back(':');
-        json_writer w(text);
-        w.value(value);
-        JSPDLOG_ASSERT(w.complete_(), "jspdlog: a serializer left an object or array open, or wrote no value");
-        put_(key, std::move(text));
+        put_value_(key, !detail::needs_escape(key), value);
+    }
+
+    /** @brief Inserts a value under a key that was checked when the program was compiled, so the key is not scanned. */
+    template <typename T>
+    void insert(const jspdlog::key &k, const T &value)
+    {
+        put_value_(k.view(), true, value);
     }
 
     /**
@@ -1483,9 +1755,10 @@ public:
         {
             return;
         }
-        for (const auto &e : other.entries_)
+        for (const entry &e : other.entries_)
         {
-            put_(e.key, std::string{e.text});
+            const std::string_view text{other.text_.data() + e.begin, e.size};
+            put_text_(other.key_of_(e), e.key_in_text, text);
         }
     }
 
@@ -1501,18 +1774,23 @@ public:
     /** @brief The number of distinct keys. */
     [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
     /** @brief Whether a key is present. */
-    [[nodiscard]] bool contains(std::string_view key) const noexcept { return find_(key) != nullptr; }
+    [[nodiscard]] bool contains(std::string_view key) const noexcept { return index_of_(key) != entries_.size(); }
     /** @brief Removes every field. */
-    void clear() noexcept { entries_.clear(); }
+    void clear() noexcept
+    {
+        text_.clear();
+        entries_.clear();
+        keys_.clear();
+    }
 
     /** @brief Returns the fields as a JSON object in insertion order. An empty set gives {}. */
     [[nodiscard]] std::string to_json() const
     {
-        std::string out = fragment_();
-        if (out.empty())
+        if (text_.empty())
         {
             return "{}";
         }
+        std::string out = text_;
         out.front() = '{';
         out.push_back('}');
         return out;
@@ -1521,14 +1799,65 @@ public:
 private:
     friend class json_logger;
 
-    /** @brief One field: the raw key for lookups and the serialized text ready to append. */
+    /** @brief Where one field lies in text_. */
     struct entry
     {
-        /** @brief The key as given, for lookups and merges. */
-        std::string key;
-        /** @brief A comma, the quoted key, a colon and the value. */
-        std::string text;
+        /** @brief Offset of the comma that starts the field. */
+        std::uint32_t begin;
+        /** @brief Size of the whole field, from the comma to the end of the value. */
+        std::uint32_t size;
+        /** @brief Offset of the raw key: in text_ when the key needed no escaping, else in keys_. */
+        std::uint32_t key_begin;
+        /** @brief Size of the raw key. */
+        std::uint32_t key_size;
+        /** @brief Whether the raw key is the quoted key inside text_, as opposed to a copy in keys_. */
+        bool key_in_text;
     };
+
+    /** @brief Cuts text_ back to the size it had, unless released, so a field that fails half-written leaves no trace.
+     */
+    class truncate_guard
+    {
+    public:
+        /** @brief Remembers the current size of s. */
+        explicit truncate_guard(std::string &s) noexcept
+            : s_(&s), size_(s.size())
+        {
+        }
+        truncate_guard(const truncate_guard &) = delete;
+        truncate_guard &operator=(const truncate_guard &) = delete;
+        /** @brief Cuts the string back unless release was called. */
+        ~truncate_guard()
+        {
+            if (s_ != nullptr)
+            {
+                s_->resize(size_);
+            }
+        }
+        /** @brief Keeps what was appended. */
+        void release() noexcept { s_ = nullptr; }
+
+    private:
+        std::string *s_;
+        std::size_t size_;
+    };
+
+    /** @brief A rough size of the text of the pairs of the variadic constructor, so one allocation usually suffices. */
+    template <typename K, typename V, typename... Rest>
+    static std::size_t estimate_size_(const K &key, const V & /*value*/, const Rest &...rest) noexcept
+    {
+        static constexpr std::size_t PUNCTUATION_AND_VALUE = 16; // comma, quotes, colon and a short value
+        std::size_t size = PUNCTUATION_AND_VALUE;
+        if constexpr (std::is_convertible_v<const K &, std::string_view>)
+        {
+            size += std::string_view(key).size();
+        }
+        if constexpr (sizeof...(Rest) > 0)
+        {
+            size += estimate_size_(rest...);
+        }
+        return size;
+    }
 
     template <typename K, typename V, typename... Rest>
     void insert_pairs_(K &&key, V &&value, Rest &&...rest)
@@ -1537,53 +1866,147 @@ private:
             std::is_convertible_v<std::decay_t<K>, std::string_view>,
             "fields: key must be convertible to std::string_view"
         );
-        insert(std::string_view(key), std::forward<V>(value));
+        put_value_(std::string_view(key), detail::is_plain_key(key), std::forward<V>(value));
         if constexpr (sizeof...(Rest) > 0)
         {
             insert_pairs_(std::forward<Rest>(rest)...);
         }
     }
 
-    /** @brief The entry with this key, or null. */
-    [[nodiscard]] const entry *find_(std::string_view key) const noexcept
+    /** @brief The raw key of an entry. */
+    [[nodiscard]] std::string_view key_of_(const entry &e) const noexcept
     {
-        for (const auto &e : entries_)
+        const char *base = e.key_in_text ? text_.data() : keys_.data();
+        return {base + e.key_begin, e.key_size};
+    }
+
+    /** @brief The text of an entry: a comma, the quoted key, a colon and the value. */
+    [[nodiscard]] std::string_view text_of_(std::size_t i) const noexcept
+    {
+        return {text_.data() + entries_[i].begin, entries_[i].size};
+    }
+
+    /** @brief The index of the entry with this raw key, or the number of entries when there is none. */
+    [[nodiscard]] std::size_t index_of_(std::string_view key) const noexcept
+    {
+        for (std::size_t i = 0; i < entries_.size(); ++i)
         {
-            if (e.key == key)
+            if (key_of_(entries_[i]) == key)
             {
-                return &e;
+                return i;
             }
         }
-        return nullptr;
+        return entries_.size();
+    }
+
+    /** @brief Writes a comma, the quoted key, a colon and the value to a string. A plain key is copied unscanned. */
+    template <typename T>
+    static void write_field_(std::string &out, std::string_view key, bool plain_key, const T &value)
+    {
+        out.push_back(',');
+        if (plain_key)
+        {
+            out.push_back('"');
+            out.append(key.data(), key.size());
+            out.push_back('"');
+        }
+        else
+        {
+            detail::append_json_quoted(out, key);
+        }
+        out.push_back(':');
+        json_writer w(out);
+        w.value(value);
+        JSPDLOG_ASSERT(w.complete_(), "jspdlog: a serializer left an object or array open, or wrote no value");
+    }
+
+    /** @brief Stores a field from a value. A key that exists keeps its position. */
+    template <typename T>
+    void put_value_(std::string_view key, bool plain_key, const T &value)
+    {
+        const std::size_t i = index_of_(key);
+        if (i != entries_.size())
+        {
+            std::string text;
+            write_field_(text, key, plain_key, value);
+            replace_(i, text);
+            return;
+        }
+        truncate_guard guard(text_);
+        const std::size_t begin = text_.size();
+        write_field_(text_, key, plain_key, value);
+        add_entry_(begin, key, plain_key);
+        guard.release();
     }
 
     /** @brief Stores a field whose text is ready. A key that exists keeps its position. */
-    void put_(std::string_view key, std::string text)
+    void put_text_(std::string_view key, bool plain_key, std::string_view text)
     {
-        for (auto &e : entries_)
+        const std::size_t i = index_of_(key);
+        if (i != entries_.size())
         {
-            if (e.key == key)
+            replace_(i, text);
+            return;
+        }
+        truncate_guard guard(text_);
+        const std::size_t begin = text_.size();
+        text_.append(text.data(), text.size());
+        add_entry_(begin, key, plain_key);
+        guard.release();
+    }
+
+    /** @brief Records the field that starts at begin and ends at the end of text_. */
+    void add_entry_(std::size_t begin, std::string_view key, bool plain_key)
+    {
+        detail::check_fields_size(text_.size());
+        entry e{};
+        e.begin = static_cast<std::uint32_t>(begin);
+        e.size = static_cast<std::uint32_t>(text_.size() - begin);
+        e.key_size = static_cast<std::uint32_t>(key.size());
+        e.key_in_text = plain_key;
+        if (plain_key)
+        {
+            // The quoted key follows the comma and the opening quote, so the raw key is a view into text_.
+            e.key_begin = e.begin + 2;
+            entries_.push_back(e);
+            return;
+        }
+        // Make room for the entry first, so adding it cannot fail and leave its key behind in keys_.
+        if (entries_.size() == entries_.capacity())
+        {
+            entries_.reserve((entries_.capacity() * 2) + 1);
+        }
+        e.key_begin = static_cast<std::uint32_t>(keys_.size());
+        keys_.append(key.data(), key.size());
+        entries_.push_back(e);
+    }
+
+    /** @brief Replaces the text of entry i, moving the later fields. */
+    void replace_(std::size_t i, std::string_view text)
+    {
+        entry &e = entries_[i];
+        const std::size_t old_size = e.size;
+        detail::check_fields_size(text_.size() - old_size + text.size());
+        text_.replace(e.begin, old_size, text.data(), text.size());
+        e.size = static_cast<std::uint32_t>(text.size());
+        const auto delta = static_cast<std::int64_t>(text.size()) - static_cast<std::int64_t>(old_size);
+        for (std::size_t j = i + 1; j < entries_.size(); ++j)
+        {
+            entries_[j].begin = static_cast<std::uint32_t>(static_cast<std::int64_t>(entries_[j].begin) + delta);
+            if (entries_[j].key_in_text)
             {
-                e.text = std::move(text);
-                return;
+                entries_[j].key_begin =
+                    static_cast<std::uint32_t>(static_cast<std::int64_t>(entries_[j].key_begin) + delta);
             }
         }
-        entries_.push_back(entry{std::string{key}, std::move(text)});
     }
 
-    /** @brief Every entry text joined, so each field starts with a comma. */
-    [[nodiscard]] std::string fragment_() const
-    {
-        std::string out;
-        for (const auto &e : entries_)
-        {
-            out += e.text;
-        }
-        return out;
-    }
-
-    /** @brief The fields in insertion order. */
+    /** @brief Every field, each starting with a comma, in insertion order. This is also the serialized form. */
+    std::string text_;
+    /** @brief Where each field lies in text_, in the same order. */
     std::vector<entry> entries_;
+    /** @brief Raw keys that needed escaping, so lookups compare raw keys. Usually empty. */
+    std::string keys_;
 };
 
 namespace detail
@@ -1736,6 +2159,8 @@ struct writer_access
     static void object(json_writer &w, const fields &f) { w.scalar_(f.to_json()); }
     /** @brief Whether exactly one value was written and nothing is left open. */
     static bool complete(const json_writer &w) noexcept { return w.complete_(); }
+    /** @brief Creates a writer that appends to spdlog's buffer. */
+    static json_writer to_buffer(spdlog::memory_buf_t &out) noexcept { return {out, 0}; }
 };
 
 /** @brief Multiplies by a positive factor, stopping at the limits of the type instead of overflowing. */
@@ -2477,8 +2902,40 @@ struct type_identity
     using type = T;
 };
 
+#if JSPDLOG_STD_FORMAT
+#if defined(__cpp_lib_format) && __cpp_lib_format >= 202311L
+#define JSPDLOG_HAS_RUNTIME_FORMAT 1
+/** @brief The type of std::runtime_format(...). */
+using runtime_format_string = decltype(std::runtime_format(std::string_view{}));
+#else
+#define JSPDLOG_HAS_RUNTIME_FORMAT 0
+/** @brief std::format has no runtime format strings before C++26, so no argument has this type. */
+struct runtime_format_string
+{
+    runtime_format_string() = delete;
+};
+#endif
+#else
+#define JSPDLOG_HAS_RUNTIME_FORMAT 1
 /** @brief The type of fmt::runtime(...) in the {fmt} version in use. */
 using runtime_format_string = decltype(spdlog::fmt_lib::runtime(""));
+#endif
+
+#if JSPDLOG_STD_FORMAT
+/** @brief The text of a format string: std::format_string, or a plain std::string_view in older standard libraries. */
+template <typename F>
+std::string_view format_text(const F &f) noexcept
+{
+    if constexpr (std::is_convertible_v<const F &, std::string_view>)
+    {
+        return f;
+    }
+    else
+    {
+        return f.get();
+    }
+}
+#endif
 
 /**
  * @brief Whether a type is a writable char array, such as a buffer filled at run time. String literals are const
@@ -2609,8 +3066,8 @@ public:
         std::string_view key;
         /** @brief The value, which the braced list owns. */
         const void *value;
-        /** @brief Serializes the value, with its type restored. */
-        void (*write)(json_writer &, const void *);
+        /** @brief Writes the whole field, with the type of the value restored: see write_item. */
+        void (*write)(spdlog::memory_buf_t &, const ref &);
     };
 
     /** @brief The reference at index i. */
@@ -2620,13 +3077,30 @@ public:
      * @brief Appends a reference as a field: a comma, the quoted key, a colon and the serialized value. This runs the
      * serializer of the value, so it throws what the serializer throws.
      */
-    static void append_ref(std::string &out, const ref &r)
+    static void append_ref(spdlog::memory_buf_t &out, const ref &r) { r.write(out, r); }
+
+    /**
+     * @brief The function a reference stores to write its field. Value writes the value from its pointer; Plain says
+     * that the key needs no escaping, so it is copied between quotes without a scan. Whether the key is plain is part
+     * of the function, so a reference needs no flag, which keeps a braced list small and cheap to build.
+     */
+    template <void (*Value)(json_writer &, const void *), bool Plain>
+    static void write_item(spdlog::memory_buf_t &out, const ref &r)
     {
         out.push_back(',');
-        append_json_quoted(out, r.key);
+        if constexpr (Plain)
+        {
+            out.push_back('"');
+            out.append(r.key.data(), r.key.data() + r.key.size());
+            out.push_back('"');
+        }
+        else
+        {
+            append_json_quoted(out, r.key);
+        }
         out.push_back(':');
-        json_writer w(out);
-        r.write(w, r.value);
+        json_writer w = writer_access::to_buffer(out);
+        Value(w, r.value);
         JSPDLOG_ASSERT(
             writer_access::complete(w), "jspdlog: a serializer left an object or array open, or wrote no value"
         );
@@ -2672,7 +3146,11 @@ private:
         static_assert(
             std::is_convertible_v<const K &, std::string_view>, "fields: key must be convertible to std::string_view"
         );
-        refs_[size_++] = ref{std::string_view(key), static_cast<const void *>(std::addressof(value)), &write_ref_<V>};
+        refs_[size_++] = ref{
+            std::string_view(key),
+            static_cast<const void *>(std::addressof(value)),
+            &write_item<&write_ref_<V>, std::is_same_v<K, ::jspdlog::key>>,
+        };
         if constexpr (sizeof...(Rest) > 0)
         {
             add_(rest...);
@@ -2704,11 +3182,12 @@ public:
     template <typename S, std::enable_if_t<std::is_convertible_v<const S &, spdlog::fmt_lib::string_view>, int> = 0>
     // Implicit on purpose: a string literal or fmt::runtime must convert at the call.
     // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
-    FMT_CONSTEVAL basic_format_here(const S &s, detail::site w = detail::site())
+    JSPDLOG_FORMAT_CONSTEVAL basic_format_here(const S &s, detail::site w = detail::site())
         : fmt_(s), where_(w)
     {
     }
 
+#if JSPDLOG_HAS_RUNTIME_FORMAT
     /** @brief Converts fmt::runtime(...), capturing the call site of the logging function. */
     // Implicit on purpose: a string literal or fmt::runtime must convert at the call.
     // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
@@ -2716,6 +3195,7 @@ public:
         : fmt_(r), where_(w)
     {
     }
+#endif
 
     /** @brief The format string. */
     [[nodiscard]] spdlog::format_string_t<Args...> format() const noexcept { return fmt_; }
@@ -2857,7 +3337,6 @@ public:
         );
         auto ctx = std::make_shared<context_data>(*context_);
         ctx->values.merge(f);
-        ctx->fragment = ctx->values.fragment_();
         json_logger child = *this;
         child.context_ = std::move(ctx);
         return child;
@@ -3047,8 +3526,6 @@ private:
     {
         /** @brief The bound fields. */
         fields values;
-        /** @brief The values serialized once, each field starting with a comma. */
-        std::string fragment;
         /** @brief The token that starts every payload, the same as in the formatter this logger installed. */
         detail::payload_token token{};
         /** @brief The keys the logger writes itself, for the debug check. */
@@ -3145,7 +3622,13 @@ private:
         {
             emit_(lvl, ex, f, fmt.where(), detail::KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
                 spdlog::memory_buf_t msg;
+#if JSPDLOG_STD_FORMAT
+                std::vformat_to(
+                    std::back_inserter(msg), detail::format_text(fmt.format()), std::make_format_args(args...)
+                );
+#else
                 spdlog::fmt_lib::format_to(std::back_inserter(msg), fmt.format(), std::forward<Args>(args)...);
+#endif
                 append_message_(out, msg);
             });
         }
@@ -3181,7 +3664,7 @@ private:
         const fields *named = props.named();
         if (leading == nullptr && (named != nullptr ? named->empty() : props.size() == 0))
         {
-            detail::append(out, ctx.fragment);
+            detail::append(out, ctx.values.text_);
             return;
         }
         const std::size_t first = leading != nullptr ? 1 : 0;
@@ -3191,7 +3674,7 @@ private:
             {
                 return leading->key;
             }
-            return named != nullptr ? std::string_view{named->entries_[i - first].key} : props.key(i - first);
+            return named != nullptr ? named->key_of_(named->entries_[i - first]) : props.key(i - first);
         };
         // Inside the deferred writer, so a handler that throws reaches spdlog's error handler.
         for (std::size_t i = 0; i < count; ++i)
@@ -3204,23 +3687,24 @@ private:
                 "jspdlog: a field key equals the error key of an exception call"
             );
         }
-        std::string scratch; // one per line; json_writer writes to a std::string
+        if (leading == nullptr && named != nullptr && ctx.values.empty())
+        {
+            // A fields object has distinct keys, so with nothing bound its text is the whole list.
+            detail::append(out, named->text_);
+            return;
+        }
         const auto append_item = [&](std::size_t i) {
             if (i < first)
             {
-                scratch.clear();
-                detail::call_fields::append_ref(scratch, *leading);
-                detail::append(out, scratch);
+                detail::call_fields::append_ref(out, *leading);
             }
             else if (named != nullptr)
             {
-                detail::append(out, named->entries_[i - first].text);
+                detail::append(out, named->text_of_(i - first));
             }
             else
             {
-                scratch.clear();
-                detail::call_fields::append_ref(scratch, props.at(i - first));
-                detail::append(out, scratch);
+                detail::call_fields::append_ref(out, props.at(i - first));
             }
         };
         const auto last_with_key = [&](std::string_view k) {
@@ -3243,12 +3727,12 @@ private:
             }
             return false;
         };
-        for (const auto &e : ctx.values.entries_)
+        for (std::size_t b = 0; b < ctx.values.entries_.size(); ++b)
         {
-            const std::size_t over = last_with_key(e.key);
+            const std::size_t over = last_with_key(ctx.values.key_of_(ctx.values.entries_[b]));
             if (over == count)
             {
-                detail::append(out, e.text);
+                detail::append(out, ctx.values.text_of_(b));
             }
             else
             {
@@ -3287,17 +3771,17 @@ private:
     {
         const context_data &ctx = *context_;
         const auto write = [&](spdlog::memory_buf_t &out) {
-            detail::append(out, std::string_view{ctx.token.data(), ctx.token.size()});
-            out.push_back(kind);
-            const std::size_t size_at = out.size();
-            detail::append(out, std::string_view{"00000000", detail::SIZE_DIGITS});
-            const std::size_t fields_at = out.size();
-            // The exception is held by reference and written here, when the line is, so a disabled level computes
-            // nothing and an exception from writing it reaches the error handler.
-            const detail::exception_arg arg{ex, {ctx.errors.type, ctx.errors.message}};
-            const detail::call_fields::ref leading{ctx.errors.key, &arg, &detail::write_exception_arg};
-            append_props_(out, props, ex != nullptr ? &leading : nullptr);
-            detail::patch_hex_size(out, size_at, out.size() - fields_at);
+            detail::write_payload(out, ctx.token, kind, [&](spdlog::memory_buf_t &fields_out) {
+                // The exception is held by reference and written here, when the line is, so a disabled level computes
+                // nothing and an exception from writing it reaches the error handler.
+                const detail::exception_arg arg{ex, {ctx.errors.type, ctx.errors.message}};
+                const detail::call_fields::ref leading{
+                    ctx.errors.key,
+                    &arg,
+                    &detail::call_fields::write_item<&detail::write_exception_arg, false>,
+                };
+                append_props_(fields_out, props, ex != nullptr ? &leading : nullptr);
+            });
             write_message(out);
         };
         // The line type is int in spdlog v1 and unsigned in v2.
@@ -3315,6 +3799,139 @@ private:
     /** @brief The bound fields and what is derived from them, shared by every copy and never null. */
     std::shared_ptr<const context_data> context_;
 };
+
+/** @brief Where and how the error handler made by make_error_handler reports. */
+struct error_report_options
+{
+    /** @brief Keys and time format of the report line. Its process and thread keys apply too. */
+    json_options format{};
+    /**
+     * @brief A sink to write the report to. It must not be a sink of the logger that fails. Null writes to stream. The
+     * sink writes the line with its own formatter, so install a json_formatter on it with install_json_formatter.
+     */
+    spdlog::sink_ptr sink;
+    /** @brief Where the line goes when sink is null. When both are null, reports are discarded. */
+    std::FILE *stream = stderr;
+    /** @brief Reports closer together than this are counted and dropped, as spdlog's default handler does. */
+    std::chrono::milliseconds min_interval = std::chrono::seconds{1};
+};
+
+/** @brief Implementation details. Not part of the public API. */
+namespace detail
+{
+/** @brief What an error handler keeps and does, shared by every copy of the handler and guarded by its own mutex. */
+class error_reporter
+{
+public:
+    /** @brief Creates the state for one handler. */
+    error_reporter(std::string logger_name, error_report_options options)
+        : formatter_(options.format), name_(std::move(logger_name)), options_(std::move(options))
+    {
+    }
+
+    /** @brief Writes one report, or counts it as dropped when the last one was too recent. */
+    void report(const std::string &what)
+    {
+        const std::scoped_lock lock(mutex_);
+        const auto now = std::chrono::steady_clock::now();
+        if (reported_ && now - last_ < options_.min_interval)
+        {
+            ++dropped_;
+            return;
+        }
+        reported_ = true;
+        last_ = now;
+        // This report counts as dropped until it is written, so one that throws is carried by the next report.
+        const std::size_t earlier = dropped_++;
+        spdlog::memory_buf_t payload;
+        write_payload(payload, process_token(), KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
+            if (earlier > 0)
+            {
+                append(out, std::string_view{",\"dropped\":"});
+                append_int(out, earlier);
+            }
+        });
+        append_json_quoted(payload, what);
+        const spdlog::details::log_msg msg(
+            spdlog::string_view_t(name_.data(), name_.size()),
+            level::err,
+            spdlog::string_view_t(payload.data(), payload.size())
+        );
+        if (options_.sink)
+        {
+            options_.sink->log(msg);
+            dropped_ = 0;
+            return;
+        }
+        if (options_.stream == nullptr)
+        {
+            dropped_ = 0;
+            return;
+        }
+        spdlog::memory_buf_t line;
+        formatter_.format(msg, line);
+        if (line.size() == 0 || line.data()[line.size() - 1] != '\n')
+        {
+            line.push_back('\n');
+        }
+        // Nothing to do when the stream fails: there is nowhere left to report it.
+        static_cast<void>(std::fwrite(line.data(), 1, line.size(), options_.stream));
+        static_cast<void>(std::fflush(options_.stream));
+        dropped_ = 0;
+    }
+
+private:
+    /** @brief Serializes reports from several threads. It is not an spdlog mutex, so a report never waits on spdlog. */
+    std::mutex mutex_;
+    /** @brief Writes the line to a stream. */
+    json_formatter formatter_;
+    /** @brief The logger name of the report. */
+    std::string name_;
+    /** @brief The options the handler was made with. */
+    error_report_options options_;
+    /** @brief When the last report was written. */
+    std::chrono::steady_clock::time_point last_;
+    /** @brief Whether a report was written, so the first one is never dropped. */
+    bool reported_ = false;
+    /** @brief The reports dropped since the last one that was written. */
+    std::size_t dropped_ = 0;
+};
+} // namespace detail
+
+/**
+ * @brief Returns an spdlog error handler that writes each error as one JSON line, never through a logger, so it cannot
+ * recurse or deadlock when the failing sink fails again. It does not throw: if the report itself fails, it writes a
+ * short plain-text line to stderr. Install it with spdlog::logger::set_error_handler, or in the config of an spdlog v2
+ * async_sink.
+ *
+ * Reports closer together than min_interval are not written; the next one carries their number as dropped. The state
+ * lives in the returned handler and its copies, which share it, so there is no global state. A thread-pool worker or
+ * async_sink thread may call the handler, and a mutex of its own serializes them.
+ *
+ * @code
+ * logger.spdlog_logger()->set_error_handler(jspdlog::make_error_handler(logger.name()));
+ * // {"timestamp":"...","logger":"app","level":"error","dropped":3,"message":"Failed writing to file ..."}
+ * @endcode
+ */
+inline spdlog::err_handler make_error_handler(std::string logger_name, error_report_options options = {})
+{
+    const auto state = std::make_shared<detail::error_reporter>(std::move(logger_name), std::move(options));
+    return [state](const std::string &what) noexcept {
+#if JSPDLOG_HAS_EXCEPTIONS
+        try
+        {
+            state->report(what);
+        }
+        catch (...)
+        {
+            // Last resort: a failure while reporting must not leave the logging call, nor log again.
+            static_cast<void>(std::fputs("jspdlog: the error handler failed\n", stderr));
+        }
+#else
+        state->report(what);
+#endif
+    };
+}
 
 } // namespace jspdlog
 
