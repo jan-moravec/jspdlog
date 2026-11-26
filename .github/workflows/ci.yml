@@ -337,3 +337,108 @@ jobs:
             -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/jspdlog-prefix"
           cmake --build build-smoke
           ./build-smoke/jspdlog_install_smoke
+
+  vcpkg:
+    # The overlay port, changed to build this checkout instead of downloading a tag, and install_smoke against it.
+    needs: pre-commit
+    name: vcpkg port / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, binary-cache: ~/.cache/vcpkg/archives}
+          - {os: windows-latest, binary-cache: ~\AppData\Local\vcpkg\archives}
+    defaults:
+      run:
+        shell: bash
+    env:
+      VCPKG_DISABLE_METRICS: "1"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@16e8153a8b4918849d92aad131befe67a3705daa # v4.5.0
+
+      - name: Set up MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Set up vcpkg
+        # The Windows images ship vcpkg; elsewhere it is cloned.
+        id: vcpkg
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Windows ]; then
+            root="${VCPKG_INSTALLATION_ROOT//\\//}"
+          else
+            root="$RUNNER_TEMP/vcpkg"
+            git clone --depth 1 https://github.com/microsoft/vcpkg "$root"
+            "$root/bootstrap-vcpkg.sh" -disableMetrics
+          fi
+          {
+            echo "root=$root"
+            echo "commit=$(git -C "$root" rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Cache vcpkg binary packages
+        # The binaries are only tested, never published, so a poisoned cache can't affect a release.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning]
+        with:
+          path: ${{ matrix.binary-cache }}
+          key: vcpkg-${{ matrix.os }}-${{ steps.vcpkg.outputs.commit }}
+          restore-keys: |
+            vcpkg-${{ matrix.os }}-
+
+      - name: Install the port from the checkout
+        # --enforce-port-checks turns the warnings of vcpkg's post-build checks into errors, as its registry does.
+        env:
+          VCPKG_ROOT: ${{ steps.vcpkg.outputs.root }}
+        run: |
+          set -euo pipefail
+          scripts/ci/vcpkg-local-port.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/overlay"
+          "$VCPKG_ROOT/vcpkg" install jspdlog --overlay-ports="$RUNNER_TEMP/overlay" --enforce-port-checks
+
+      - name: Build and run the install_smoke consumer
+        env:
+          VCPKG_ROOT: ${{ steps.vcpkg.outputs.root }}
+        run: |
+          set -euo pipefail
+          cmake -S test/install_smoke -B build-smoke -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build-smoke
+          ./build-smoke/jspdlog_install_smoke
+
+  conan:
+    # The recipe packages this checkout, and its test package builds and runs a consumer of it.
+    needs: pre-commit
+    name: conan recipe / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Conan
+        run: pip install -r packaging/conan/requirements.txt
+
+      - name: Create and test the package
+        # The detected MSVC profile defaults to C++14, below what the recipe accepts.
+        run: |-
+          conan profile detect
+          conan create . --test-folder packaging/conan/test_package --build=missing -s compiler.cppstd=17

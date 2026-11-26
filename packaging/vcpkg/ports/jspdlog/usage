@@ -1,0 +1,4 @@
+jspdlog provides CMake targets:
+
+    find_package(jspdlog CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE jspdlog::jspdlog)
