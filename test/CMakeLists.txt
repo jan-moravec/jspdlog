@@ -20,7 +20,7 @@ endif()
 include(Catch)
 
 if(JSPDLOG_TEST_WITH_NLOHMANN)
-    find_package(nlohmann_json 3 CONFIG QUIET)
+    find_package(nlohmann_json 3.10 CONFIG QUIET)
     if(NOT nlohmann_json_FOUND)
         FetchContent_Declare(
             nlohmann_json
@@ -47,6 +47,8 @@ add_executable(
     test_utf8.cpp
     test_source_location.cpp
     test_spdlog_interop.cpp
+    test_factories.cpp
+    test_trace.cpp
 )
 target_link_libraries(jspdlog_tests PRIVATE jspdlog::jspdlog Catch2::Catch2WithMain)
 # One unit with another active level in the same executable, which checks that only the macros read the setting.
@@ -177,7 +179,8 @@ foreach(
 endforeach()
 
 if(JSPDLOG_TEST_WITH_NLOHMANN)
-    add_executable(jspdlog_nlohmann_interop_test test_nlohmann_interop.cpp)
+    # nlohmann.cpp only includes jspdlog/nlohmann.h, so the header is also compiled on its own.
+    add_executable(jspdlog_nlohmann_interop_test test_nlohmann_interop.cpp nlohmann.cpp)
     target_link_libraries(
         jspdlog_nlohmann_interop_test
         PRIVATE jspdlog::jspdlog Catch2::Catch2WithMain nlohmann_json::nlohmann_json

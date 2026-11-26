@@ -84,7 +84,7 @@ project, so an embedding project gets a quiet build.
 | -------------------------------- | ----------------------------------------------------------------------------------------- |
 | `JSPDLOG_BUILD_TESTS`            | Build the Catch2 tests.                                                                   |
 | `JSPDLOG_BUILD_EXAMPLES`         | Build the programs under `example/`.                                                      |
-| `JSPDLOG_INSTALL`                | Generate install rules for the header and the CMake package.                              |
+| `JSPDLOG_INSTALL`                | Generate install rules for the headers and the CMake package.                             |
 | `JSPDLOG_TEST_WITH_NLOHMANN`     | Build the tests that need nlohmann/json: interop and fuzz replay. Default `ON`.           |
 | `JSPDLOG_BUILD_FUZZERS`          | Build the libFuzzer targets (Clang only). Default `OFF`; the `clang-fuzz` preset sets it. |
 | `JSPDLOG_BUILD_BENCH`            | Build the benchmark program. Default `OFF`; the `bench` preset sets it.                   |
@@ -131,8 +131,8 @@ cmake --workflow --preset clang-coverage
 scripts/ci/export-coverage.sh   # merges the profiles into coverage.lcov and prints a summary
 ```
 
-The sanitizer test presets stop at the first finding, so CTest reports it as a failure. Coverage counts the header only;
-dependencies, tests and examples are filtered out.
+The sanitizer test presets stop at the first finding, so CTest reports it as a failure. Coverage counts the headers
+only; dependencies, tests and examples are filtered out.
 
 ## Fuzzing
 
@@ -143,7 +143,7 @@ jspdlog promises that every line is one valid JSON object, whatever the input. T
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `escape`          | The escaped string decodes to the input with each maximal invalid UTF-8 subpart replaced, for every input.                                      |
 | `fields`          | Operations on `fields`, `with()` and per-call fields against a short reference model; a braced list gives the line of the same `fields` object. |
-| `logger_line`     | Fuzzed logger name, header keys, time type, line terminator and message: one object per line.                                                   |
+| `logger_line`     | Fuzzed logger name, header keys, time type, line terminator and message: one object per line. The message is also parsed as a `traceparent`.    |
 | `foreign_payload` | Payloads logged straight on the `spdlog::logger`, with prefixes of the payload token: no injection.                                             |
 | `numbers`         | Every integer width, `float`, `double` and `long double` round-trip; NaN and infinity are `null`.                                               |
 | `value_types`     | Nested optionals, variants, ranges, maps, durations and time points against an independent model.                                               |
@@ -215,8 +215,9 @@ on numbers, because CI machines are too noisy for thresholds: compare cases with
   `#pragma once`, `/** */` on every public declaration, no backticks, no history. `scripts/check-docs.py` checks this.
 - **One JSON object per line.** The spdlog pattern is built by `jspdlog::detail::make_json_pattern` and there is no
   public API to override it.
-- **No new runtime dependencies.** spdlog, and {fmt} through it, is the only one. nlohmann/json is fetched only for the
-  interop test and example.
+- **No new runtime dependencies.** spdlog, and {fmt} through it, is the only one of the core header. What needs more
+  goes into an optional header next to it: `jspdlog/nlohmann.h` includes nlohmann/json, which the build fetches only
+  for the tests and examples.
 
 Run every hook locally before pushing:
 

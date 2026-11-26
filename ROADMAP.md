@@ -37,7 +37,8 @@ These decide every feature below.
 1. **Nothing happens when a level is off.** Level checks come before any
    formatting or serialization.
 1. **Single header, spdlog v1.x (>= 1.12) and v2.x, C++17 baseline.** C++20
-   may improve ergonomics but must not be required.
+   may improve ergonomics but must not be required. What needs more spdlog
+   headers or another library goes into an optional header next to the core.
 1. **No JSON library dependency.** `raw_json` is the bridge to one.
 
 ## 3. Where we are (0.5.0)
@@ -79,6 +80,13 @@ is checked at compile time and skips the escape scan.
 `jspdlog::make_error_handler` reports logging failures as a JSON line without
 calling back into spdlog, which cannot deadlock spdlog v2's error mutex.
 spdlog v1 built with `SPDLOG_USE_STD_FORMAT` works with C++20.
+
+On `main`, toward 0.6.0: the optional header `jspdlog/factories.h` makes
+stdout, stderr, rotating file and asynchronous loggers without globals, the
+asynchronous one owning its worker. The core header parses a W3C
+`traceparent` and binds the trace context under the names of OpenTelemetry,
+ECS, Google Cloud Logging and Datadog. `jspdlog/nlohmann.h` makes
+`nlohmann::json` a value type.
 
 ## 4. Architecture decision: custom `spdlog::formatter` (proposed for 0.2)
 
@@ -238,14 +246,15 @@ possible, so numbers, booleans and nested data stay filterable as such
 
 ### 0.6.0: integration and packaging
 
-- Factory helpers that use no globals: stdout JSON lines, rotating file,
-  async with an owned thread pool (v1) or `async_sink` (v2).
-- Trace context: helpers to bind `trace_id` / `span_id` (OpenTelemetry) as
-  child-logger properties.
-- Optional integration headers, never required by the core:
-  `jspdlog/nlohmann.h` (`nlohmann::json` as a value type), maybe
-  `jspdlog/glaze.h`.
-- vcpkg and Conan ports; track spdlog v2's first tagged release.
+- [x] Factory helpers that use no globals: stdout and stderr JSON lines,
+  rotating file, async with an owned thread pool (v1) or `async_sink` (v2).
+- [x] Trace context: a `traceparent` parser and helpers to bind `trace_id` /
+  `span_id` / `trace_flags` (OpenTelemetry), or the names of each preset, as
+  child-logger fields.
+- [x] Optional integration headers, never required by the core:
+  `jspdlog/nlohmann.h` (`nlohmann::json` as a value type); glaze: README
+  recipe.
+- [ ] vcpkg and Conan ports; track spdlog v2's first tagged release.
 
 ### 1.0.0: stable
 
@@ -287,7 +296,7 @@ line with nlohmann/json.
 | --- | ------------------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | `escape`                  | Raw bytes                                                                                                    | The escaped string decodes to what the UTF-8 policy makes of the input, for every input: an independent decoder gives the replaced text. |
 | 2   | `fields`                  | A byte-coded sequence of operations: insert typed values under fuzzed keys, merge, `with()`, per-call fields | The line parses; keys, values, insertion order and override rules match a simple reference model.                                        |
-| 3   | `logger_line`             | Fuzzed logger name, header keys, time type, eol and message                                                  | Every line is one object; header fields are present with the configured keys; the message round-trips.                                   |
+| 3   | `logger_line`             | Fuzzed logger name, header keys, time type, eol and message                                                  | Every line is one object; header fields are present with the configured keys; the message round-trips, also as a `traceparent`.          |
 | 4   | `foreign_payload` (0.2)   | Raw payloads logged directly on the underlying `spdlog::logger`, including prefixes of the payload token     | The line is valid JSON and the payload appears only inside the message; no injected fields.                                              |
 | 5   | `value_types` (0.3, done) | `FuzzedDataProvider`-built nested optionals, variants, ranges and maps                                       | The parsed value equals the serialized structure.                                                                                        |
 | 6   | `numbers`                 | Bit patterns for every integer width, `float`, `double`, `long double`                                       | Integers round-trip exactly; floats round-trip; NaN and infinity become `null`.                                                          |
@@ -327,16 +336,18 @@ line with nlohmann/json.
 | `log_msg` level field | `level`                                                              | `log_level`                | internal helper (formatter)                                    |
 | Level names           | `spdlog::level::to_string_view`                                      | `spdlog::to_string_view`   | internal helper (formatter)                                    |
 | {fmt} include         | bundled or external via `<spdlog/fmt/fmt.h>`; `std::format` optional | external `<fmt/format.h>`  | version switch; `std::format` mode supported for v1 with C++20 |
-| Async                 | `async_logger` + thread pool                                         | `async_sink`               | user's choice; use `adopt()` for v1                            |
+| Async                 | `async_logger` + thread pool                                         | `async_sink`               | `make_async_logger`, or your own with `adopt()` for v1         |
+| Async `discard_new`   | not in 1.12                                                          | yes                        | `make_async_logger` throws where it is missing                 |
+| Rotating file path    | `std::string`, or `std::wstring` by setting                          | `std::filesystem::path`    | factories take `spdlog::filename_t`                            |
 | Global logger         | `set_default_logger`                                                 | `set_global_logger`        | not used by jspdlog                                            |
 | Registry              | `register_logger`, `get`, global `set_pattern` etc.                  | removed                    | not used; README lists the safe and breaking calls             |
-| Async worker errors   | the logger's error handler                                           | `async_sink`'s own handler | documented in README                                           |
+| Async worker errors   | the logger's error handler                                           | `async_sink`'s own handler | documented in README; `make_async_logger` installs both        |
 | Library form          | header-only or compiled                                              | compiled                   | transparent                                                    |
 
 The differences are small enough for **one header** with a few `#if`s;
 separate per-version headers aren't needed.
 
-## 9. Decisions (2026-11-21 to 2026-11-24)
+## 9. Decisions (2026-11-21 to 2026-11-26)
 
 | #   | Question                             | Decision                                                                                                                                                                                                                                                                                                            |
 | --- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -360,6 +371,9 @@ separate per-version headers aren't needed.
 | 18  | Level macros (2026-11-24)            | Optional `JSPDLOG_*` statement macros skip every argument of a call whose level is off. `JSPDLOG_ACTIVE_LEVEL` is read only inside macros, so translation units with different values link together. A removed call is `if (false)`, not `(void)0`, so it stays type-checked and its variables stay used.           |
 | 19  | UTF-8 policy (2026-11-24)            | A compile-time setting, `JSPDLOG_UTF8_POLICY` (also a CMake cache variable), not a per-logger option: a `fields` object and bound context are serialized before any logger sees them, so one rule must cover every string, and a braced list and a `fields` object must give the same line. Replace is the default. |
 | 20  | Escaped invalid bytes (2026-11-24)   | The escape policy writes `\u00XX` for each invalid byte. Lone surrogate escapes are not offered, because strict parsers, nlohmann/json included, reject them.                                                                                                                                                       |
+| 21  | Optional headers (2026-11-26)        | The core stays one header, `jspdlog/jspdlog.h`. Factories and `jspdlog/nlohmann.h` are optional headers next to it, because they need more spdlog headers or another library.                                                                                                                                       |
+| 22  | Glaze and OTel C++ (2026-11-26)      | README recipes, no headers: a few lines each, while a header would need its own CI leg and version tracking.                                                                                                                                                                                                        |
+| 23  | Trace id formats (2026-11-26)        | Each vendor's current documentation decides: Google Cloud gets the bare trace id unless a project is given, and Datadog the full 128-bit id in hex under `trace_id`.                                                                                                                                                |
 
 ## 10. Quality gates (every milestone)
 

@@ -6,6 +6,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `jspdlog/factories.h`, an optional header: `make_stdout_logger`, `make_stderr_logger` and
+  `make_rotating_file_logger` make a `json_logger` without an spdlog sink header, a registry or a global.
+- `make_async_logger` makes a logger with a worker thread of its own, an spdlog thread pool that it owns with v1 and an
+  `async_sink` with v2. The last copy of the logger writes the queued lines and stops the thread. `async_options` sets
+  the queue size, the overflow policy (`discard_new` is not in spdlog 1.12, where it throws) and whether errors from
+  both the worker and the calling thread are reported as JSON lines on stderr.
+- Trace context in the core header: `trace_context`, `parse_traceparent` for W3C `traceparent` headers of version 00,
+  and `trace_fields` with the OpenTelemetry names, which `trace_keys` renames.
+- `presets::ecs_trace_fields`, `presets::gcp_trace_fields` (the bare trace id, or the `projects/<project>/traces/<id>`
+  form when given a project) and `presets::datadog_trace_fields` (the full ids in hex).
+- `jspdlog/nlohmann.h`, an optional header that makes `nlohmann::json`, `ordered_json` and other `basic_json` values
+  field values, for nlohmann/json 3.10 or newer. Invalid UTF-8 in them is always replaced.
+- README recipes for OpenTelemetry C++ and glaze, and the examples `12_factories.cpp` and `13_trace_context.cpp`.
+
 ## [0.5.0] - 2026-11-26
 
 Fewer allocations when fields are written, an error handler that reports as JSON, and spdlog v1 builds with
