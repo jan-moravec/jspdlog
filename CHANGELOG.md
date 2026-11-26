@@ -6,7 +6,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-11-25
+## [0.5.0] - 2026-11-26
 
 Fewer allocations when fields are written, an error handler that reports as JSON, and spdlog v1 builds with
 `SPDLOG_USE_STD_FORMAT`. Nothing breaks.
