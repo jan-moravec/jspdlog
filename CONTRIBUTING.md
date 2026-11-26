@@ -15,6 +15,7 @@ also read [AGENTS.md](AGENTS.md), the short binding summary of the build and com
 - [Sanitizers and coverage](#sanitizers-and-coverage)
 - [Fuzzing](#fuzzing)
 - [Benchmarks](#benchmarks)
+- [Packaging](#packaging)
 - [Code style and pre-commit](#code-style-and-pre-commit)
 - [Pull requests](#pull-requests)
 - [Release process](#release-process)
@@ -206,6 +207,93 @@ The program prints a Markdown table with the cost of one log call per case, sing
 and discards. The `bench` job of the CI workflow prints it in the job summary for GCC 13 and Clang 23. It never fails
 on numbers, because CI machines are too noisy for thresholds: compare cases within one run, not across runs.
 
+## Packaging
+
+The repository holds a vcpkg port ([packaging/vcpkg/ports/jspdlog](packaging/vcpkg/ports/jspdlog)) and a Conan recipe
+([conanfile.py](conanfile.py), with its test package in
+[packaging/conan/test_package](packaging/conan/test_package)). The `vcpkg` and `conan` jobs of the CI workflow test
+both against the checkout on Linux and Windows. Both packages carry the default text policy, and neither defines
+`JSPDLOG_ACTIVE_LEVEL`, which belongs to the consumer.
+
+The version is also stated in the port's `vcpkg.json` and in `conanfile.py`; pre-commit checks that they match
+`project(VERSION)` ([scripts/ci/check-version.py](scripts/ci/check-version.py)). A new optional header needs no change
+here, because the CMake install rules and the recipe copy every header under `include/`.
+
+### vcpkg port
+
+The port downloads the tag `v<version>`, which does not exist before the release.
+[scripts/ci/vcpkg-local-port.sh](scripts/ci/vcpkg-local-port.sh) writes a copy that builds a checkout instead. With a
+[vcpkg](https://github.com/microsoft/vcpkg) clone in `$VCPKG_ROOT`:
+
+```sh
+scripts/ci/vcpkg-local-port.sh "$PWD" "$PWD/build/overlay"
+"$VCPKG_ROOT/vcpkg" install jspdlog --overlay-ports="$PWD/build/overlay" --enforce-port-checks
+cmake -S test/install_smoke -B build/vcpkg-smoke -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+cmake --build build/vcpkg-smoke
+./build/vcpkg-smoke/jspdlog_install_smoke
+```
+
+On Windows, run these in Git Bash started from a developer prompt, so Ninja finds the MSVC compiler. vcpkg reuses an
+installed package: run `vcpkg remove jspdlog` before installing a changed checkout. Format `vcpkg.json` with
+`vcpkg format-manifest`.
+
+### Conan recipe
+
+With Python 3.10+, in a virtual environment:
+
+```sh
+pip install -r packaging/conan/requirements.txt
+conan profile detect
+conan create . --test-folder packaging/conan/test_package --build=missing -s compiler.cppstd=17
+```
+
+`compiler.cppstd` is given because the profile that Conan detects for MSVC says C++14.
+[packaging/conan/requirements.txt](packaging/conan/requirements.txt) pins the Conan version, which Dependabot updates.
+
+### spdlog v2
+
+spdlog v2 has no tagged release, so `JSPDLOG_SPDLOG_GIT_TAG` defaults to a commit of its `v2.x` branch. The weekly
+[spdlog-v2-head workflow](.github/workflows/spdlog-v2-head.yml) builds and tests against the head of that branch and, on
+failure, opens an issue with the `spdlog-v2` label or comments on the open one. When spdlog tags v2.0.0, move the
+default in [CMakeLists.txt](CMakeLists.txt) and its comment to the tag, and update the README, this file and the
+ROADMAP.
+
+### Submitting the packages upstream
+
+After a release is tagged, each registry takes the package through a pull request in its own repository.
+
+**vcpkg** ([microsoft/vcpkg](https://github.com/microsoft/vcpkg)). New ports have to meet the
+[maintainer guide](https://learn.microsoft.com/vcpkg/contributing/maintainer-guide), which among other things asks for
+six months of public development or a release that old.
+
+1. Copy `packaging/vcpkg/ports/jspdlog` to `ports/jspdlog` of a vcpkg fork.
+1. Run `vcpkg install jspdlog --overlay-ports=ports/jspdlog`. It fails and prints the SHA512 of the release archive;
+   replace `SHA512 0` with it, also in this repository, and install again.
+1. Run `vcpkg format-manifest ports/jspdlog/vcpkg.json` and commit. Then run `vcpkg x-add-version jspdlog` and commit
+   the version files it writes.
+1. Open the pull request, as a draft until its checks pass.
+
+**ConanCenter** ([conan-io/conan-center-index](https://github.com/conan-io/conan-center-index)). A new library goes
+directly into a pull request; check the
+[inclusion criteria](https://github.com/conan-io/conan-center-index/blob/master/docs/adding_packages/inclusion_criteria_for_new_recipes.md)
+first and sign the contributor license agreement the pull request asks for.
+
+1. Start from the
+   [header-only template](https://github.com/conan-io/conan-center-index/tree/master/docs/package_templates/header_only)
+   in `recipes/jspdlog/`: `config.yml` naming the version and the folder `all`, and in `all/` the files `conanfile.py`,
+   `conandata.yml` and `test_package/`.
+1. `conandata.yml` gives the URL `https://github.com/jan-moravec/jspdlog/archive/refs/tags/v<version>.tar.gz` and its
+   sha256.
+1. The upstream recipe differs from the one here: no `version` attribute, `url` is conan-center-index, a
+   `source()` with `get(self, **self.conan_data["sources"][self.version], strip_root=True)` instead of
+   `exports_sources`, `basic_layout(self, src_folder="src")`, and a fixed spdlog version such as `spdlog/1.17.0`,
+   because ConanCenter allows version ranges only for a few libraries.
+1. Copy [packaging/conan/test_package](packaging/conan/test_package) and test with
+   `conan create recipes/jspdlog/all --version=<version> --build=missing`.
+
+Once a registry has merged the package, add its install instructions to the README.
+
 ## Code style and pre-commit
 
 - **Naming follows spdlog.** Types, functions, members and locals are `snake_case`; template parameters are `CamelCase`;
@@ -235,7 +323,7 @@ versions.
 
 - Open the PR against `main`. Squash-merge is the default, so write the PR title as a commit subject.
 - Every job of the [CI workflow](.github/workflows/ci.yml) must pass: `pre-commit`, the `clang-ci` matrix (ASan + UBSan,
-  TSan, coverage), `fuzz`, the `build-and-test` matrix, `install-smoke` and `bench`.
+  TSan, coverage), `fuzz`, the `build-and-test` matrix, `install-smoke`, `vcpkg`, `conan` and `bench`.
 - Keep changes focused. A reformat, a dependency bump and a behavior change are three PRs.
 - If the change affects users, add a [CHANGELOG.md](CHANGELOG.md) entry under `## [Unreleased]`.
 
@@ -245,13 +333,17 @@ jspdlog is header-only; a release is a tag and a GitHub Release.
 
 1. Land the changes on `main` with CI green.
 1. Pick the version following [SemVer](https://semver.org/). While the version is 0.x, a minor version may break the API.
-1. Update the version in [CMakeLists.txt](CMakeLists.txt) (`project(jspdlog VERSION X.Y.Z)`) and the
-   `JSPDLOG_VERSION_MAJOR/MINOR/PATCH` macros in [include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h).
+1. Update the version in [CMakeLists.txt](CMakeLists.txt) (`project(jspdlog VERSION X.Y.Z)`), the
+   `JSPDLOG_VERSION_MAJOR/MINOR/PATCH` macros in [include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h),
+   `version-semver` in the port's [vcpkg.json](packaging/vcpkg/ports/jspdlog/vcpkg.json) and `version` in
+   [conanfile.py](conanfile.py). Set the `GIT_TAG` of the README's FetchContent example to `vX.Y.Z`.
 1. Rename `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) to `## [X.Y.Z] - YYYY-MM-DD`, add a new empty
    `## [Unreleased]` above it, and update the comparison links at the bottom.
 1. Merge a "Release vX.Y.Z" PR.
-1. Tag the merge commit: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
-1. On GitHub, draft a release from the tag with the CHANGELOG section as the notes.
+1. Tag the merge commit: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`. The
+   [release workflow](.github/workflows/release.yml) checks that the tag names the version and drafts a GitHub Release
+   with the CHANGELOG section as its notes.
+1. Publish the draft release the workflow created.
 
 ## Repository security (maintainers)
 

@@ -21,6 +21,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `jspdlog/nlohmann.h`, an optional header that makes `nlohmann::json`, `ordered_json` and other `basic_json` values
   field values, for nlohmann/json 3.10 or newer. Invalid UTF-8 in them is always replaced.
 - README recipes for OpenTelemetry C++ and glaze, and the examples `12_factories.cpp` and `13_trace_context.cpp`.
+- A vcpkg port, in `packaging/vcpkg`, and a Conan 2 recipe, `conanfile.py`, both tested in CI on Linux and Windows.
+  They are not in the vcpkg registry or ConanCenter yet; the README shows how to use them from a checkout.
+- A weekly build against the head of spdlog's `v2.x` branch, which has no tagged release yet.
+- A release workflow that checks a pushed version tag and drafts the GitHub Release from this file.
 
 ## [0.5.0] - 2026-11-26
 
