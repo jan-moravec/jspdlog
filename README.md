@@ -118,8 +118,15 @@ find_package(jspdlog CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE jspdlog::jspdlog)
 ```
 
-**vcpkg:** the [port](packaging/vcpkg/ports/jspdlog) is written for the registry, where it downloads a release. A script
-turns it into an overlay port that builds your checkout instead. Run it from the checkout, with Git Bash on Windows:
+**vcpkg:** the [port](packaging/vcpkg/ports/jspdlog) is written for the registry and downloads the release that its
+`vcpkg.json` names. From a checkout, install that release with:
+
+```sh
+vcpkg install jspdlog --overlay-ports=packaging/vcpkg/ports
+```
+
+To build your checkout instead, a script turns the port into an overlay port that uses it. Run it from the checkout,
+with Git Bash on Windows:
 
 ```sh
 scripts/ci/vcpkg-local-port.sh . build/overlay

@@ -4,7 +4,7 @@ vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO jan-moravec/jspdlog
     REF "v${VERSION}"
-    SHA512 0
+    SHA512 dce3c83f6763be01b2e442f71c427bd8be52056abeb98cac3e22fce5ebec73be21bdeaa780a12779ea849ac4b81ec7bfe074583ea4bfe6b6033353f5d776bbe7
     HEAD_REF main
 )
 

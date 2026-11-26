@@ -269,8 +269,8 @@ After a release is tagged, each registry takes the package through a pull reques
 six months of public development or a release that old.
 
 1. Copy `packaging/vcpkg/ports/jspdlog` to `ports/jspdlog` of a vcpkg fork.
-1. Run `vcpkg install jspdlog --overlay-ports=ports/jspdlog`. It fails and prints the SHA512 of the release archive;
-   replace `SHA512 0` with it, also in this repository, and install again.
+1. Check that the port's `SHA512` is the one of the release (see the last step of the
+   [release process](#release-process)), then run `vcpkg install jspdlog --enforce-port-checks`.
 1. Run `vcpkg format-manifest ports/jspdlog/vcpkg.json` and commit. Then run `vcpkg x-add-version jspdlog` and commit
    the version files it writes.
 1. Open the pull request, as a draft until its checks pass.
@@ -345,6 +345,10 @@ jspdlog is header-only; a release is a tag and a GitHub Release.
    [release workflow](.github/workflows/release.yml) checks that the tag names the version and drafts a GitHub Release
    with the CHANGELOG section as its notes.
 1. Publish the draft release the workflow created.
+1. In a follow-up PR, set `SHA512` in the port's [portfile.cmake](packaging/vcpkg/ports/jspdlog/portfile.cmake) to the
+   hash of the release archive, which exists only once the tag does:
+   `curl -sSL https://github.com/jan-moravec/jspdlog/archive/vX.Y.Z.tar.gz | sha512sum`. Check it with
+   `vcpkg install jspdlog --overlay-ports=packaging/vcpkg/ports --enforce-port-checks`.
 
 ## Repository security (maintainers)
 
