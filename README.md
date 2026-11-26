@@ -73,9 +73,6 @@ optional headers next to it include it and add to it:
 | [`jspdlog/factories.h`](include/jspdlog/factories.h) | [Factories](#factories) for common loggers | spdlog's stdout, rotating file and async parts |
 | [`jspdlog/nlohmann.h`](include/jspdlog/nlohmann.h)   | `nlohmann::json` values as field values    | nlohmann/json 3.10 or newer, which you provide |
 
-The optional headers and the [trace context](#trace-context) are newer than the latest tagged release. Until 0.6.0 is
-tagged, take them from `main`.
-
 Pick one:
 
 - **Copy the directory** [include/jspdlog](include/jspdlog) into your project.
@@ -84,7 +81,7 @@ Pick one:
 
   ```cmake
   include(FetchContent)
-  FetchContent_Declare(jspdlog GIT_REPOSITORY https://github.com/jan-moravec/jspdlog.git GIT_TAG v0.4.0)
+  FetchContent_Declare(jspdlog GIT_REPOSITORY https://github.com/jan-moravec/jspdlog.git GIT_TAG v0.6.0)
   FetchContent_MakeAvailable(jspdlog)
   target_link_libraries(my_app PRIVATE jspdlog::jspdlog)
   ```

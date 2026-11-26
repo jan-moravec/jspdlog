@@ -6,6 +6,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-26
+
+Factories for the usual loggers, trace context, nlohmann/json values, and a vcpkg port and Conan recipe. Nothing
+breaks.
+
 ### Added
 
 - `jspdlog/factories.h`, an optional header: `make_stdout_logger`, `make_stderr_logger` and
@@ -170,4 +175,5 @@ First release. jspdlog is a single-header library that writes one JSON object pe
 [0.3.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.3.0
 [0.4.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.4.0
 [0.5.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.5.0
-[unreleased]: https://github.com/jan-moravec/jspdlog/compare/v0.5.0...HEAD
+[0.6.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.6.0
+[unreleased]: https://github.com/jan-moravec/jspdlog/compare/v0.6.0...HEAD
