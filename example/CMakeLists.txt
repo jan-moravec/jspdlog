@@ -20,7 +20,7 @@ jspdlog_set_warnings(example_05_async)
 
 # nlohmann/json is only used by this single example, fetched lazily.
 include(FetchContent)
-find_package(nlohmann_json 3 CONFIG QUIET)
+find_package(nlohmann_json 3.10 CONFIG QUIET)
 if(NOT nlohmann_json_FOUND)
     FetchContent_Declare(
         nlohmann_json
@@ -55,3 +55,11 @@ jspdlog_set_warnings(example_10_lazy_values)
 add_executable(example_11_presets 11_presets.cpp)
 target_link_libraries(example_11_presets PRIVATE jspdlog::jspdlog)
 jspdlog_set_warnings(example_11_presets)
+
+add_executable(example_12_factories 12_factories.cpp)
+target_link_libraries(example_12_factories PRIVATE jspdlog::jspdlog)
+jspdlog_set_warnings(example_12_factories)
+
+add_executable(example_13_trace_context 13_trace_context.cpp)
+target_link_libraries(example_13_trace_context PRIVATE jspdlog::jspdlog)
+jspdlog_set_warnings(example_13_trace_context)

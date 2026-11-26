@@ -6,7 +6,8 @@
 ![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS-blue)
 [![License: MIT](https://img.shields.io/github/license/jan-moravec/jspdlog.svg)](LICENSE)
 
-JSON-lines logging on top of [spdlog](https://github.com/gabime/spdlog), in a single C++17 header.
+JSON-lines logging on top of [spdlog](https://github.com/gabime/spdlog), in a single C++17 header, with small optional
+headers for [factories](#factories) and [nlohmann/json](#arrays-and-objects-from-a-json-library).
 
 jspdlog wraps an `spdlog::logger` so that every call made through it writes one JSON object per line, with typed
 fields that you add per call or bind to a child logger. You keep spdlog's sinks, levels and async support. It works
@@ -23,6 +24,8 @@ with spdlog **v1.x (1.12 or newer)** and **v2.x**.
 - **Context for inner code.** `with()` gives a child logger that adds fields to every line it writes.
 - **Exceptions and schema presets.** `logger.error(ex, "...")` writes the exception with its causes, and one function
   call gives the field names of Elastic ECS, OpenTelemetry, Google Cloud Logging or Datadog.
+- **Trace context.** Parse a W3C `traceparent` header and bind the trace and span id to a child logger, under the names
+  those backends read. No tracing library needed.
 - **Always valid JSON, and valid UTF-8 by default** for lines written through jspdlog: messages, keys, values and
   logger names are escaped, and invalid UTF-8 is replaced.
 
@@ -39,12 +42,11 @@ with spdlog **v1.x (1.12 or newer)** and **v2.x**.
 ## Quick start
 
 ```cpp
-#include <jspdlog/jspdlog.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
+#include <jspdlog/factories.h>
 
 int main()
 {
-    jspdlog::json_logger logger("app", std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
+    const auto logger = jspdlog::make_stdout_logger("app");
 
     logger.info("hello {}", "world");
     logger.warn({"queue_depth", 42, "ok", true}, "slow path hit");
@@ -63,9 +65,20 @@ int main()
 
 ## Install
 
-jspdlog is one header, [include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h), and depends only on spdlog. Pick one:
+The library is one header, [include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h), and depends only on spdlog. Two
+optional headers next to it include it and add to it:
 
-- **Copy the header** into your project.
+| Header                                               | Adds                                       | Needs besides the core header                  |
+| ---------------------------------------------------- | ------------------------------------------ | ---------------------------------------------- |
+| [`jspdlog/factories.h`](include/jspdlog/factories.h) | [Factories](#factories) for common loggers | spdlog's stdout, rotating file and async parts |
+| [`jspdlog/nlohmann.h`](include/jspdlog/nlohmann.h)   | `nlohmann::json` values as field values    | nlohmann/json 3.10 or newer, which you provide |
+
+The optional headers and the [trace context](#trace-context) are newer than the latest tagged release. Until 0.6.0 is
+tagged, take them from `main`.
+
+Pick one:
+
+- **Copy the directory** [include/jspdlog](include/jspdlog) into your project.
 
 - **CMake FetchContent:**
 
@@ -88,7 +101,7 @@ spdlog is fetched at `JSPDLOG_SPDLOG_GIT_TAG` (default: a pinned v2.x commit; se
 | `JSPDLOG_SPDLOG_GIT_TAG`         | pinned v2.x commit | spdlog tag or commit to fetch when none is installed.                                                |
 | `JSPDLOG_BUILD_TESTS`            | top-level only     | Build the Catch2 tests.                                                                              |
 | `JSPDLOG_BUILD_EXAMPLES`         | top-level only     | Build the programs in [example/](example).                                                           |
-| `JSPDLOG_INSTALL`                | top-level only     | Generate install rules for the header and the CMake package.                                         |
+| `JSPDLOG_INSTALL`                | top-level only     | Generate install rules for the headers and the CMake package.                                        |
 | `JSPDLOG_TEST_WITH_NLOHMANN`     | `ON`               | Build the tests that need nlohmann/json: interop and fuzz replay.                                    |
 | `JSPDLOG_BUILD_FUZZERS`          | `OFF`              | Build the libFuzzer targets (Clang only).                                                            |
 | `JSPDLOG_BUILD_BENCH`            | `OFF`              | Build the benchmark program.                                                                         |
@@ -133,6 +146,47 @@ can differ between compilers. No macro is needed: [08_source_location.cpp](examp
 
 Example: [01_console.cpp](example/01_console.cpp).
 
+### Factories
+
+[`jspdlog/factories.h`](include/jspdlog/factories.h) makes the usual loggers without any spdlog sink header:
+
+```cpp
+#include <jspdlog/factories.h>
+
+const auto console = jspdlog::make_stdout_logger("app");
+const auto errors = jspdlog::make_stderr_logger("app");
+const auto file = jspdlog::make_rotating_file_logger("app", "app.log", 10 * 1024 * 1024, 5);  // size, old files kept
+```
+
+Each takes `json_options` as its last argument and returns an ordinary `json_logger`. The sinks are spdlog's
+thread-safe `stdout_sink_mt`, `stderr_sink_mt` and `rotating_file_sink_mt`, without colors, which a JSON line has no
+use for. Nothing is registered with spdlog.
+
+`make_async_logger` takes the sinks and gives the logger a worker thread of its own: an spdlog thread pool of one
+thread with v1, an `async_sink` with v2. There is no global thread pool, and `spdlog::shutdown()` does not affect it.
+
+```cpp
+auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("app.log", 10 * 1024 * 1024, 5);
+jspdlog::async_options async;
+async.queue_size = 16384;
+async.overflow = jspdlog::overflow_policy::overrun_oldest;
+const auto logger = jspdlog::make_async_logger("app", {sink}, async);  // json_options go last
+```
+
+| `async_options` | Default | Meaning                                                                                                                                                     |
+| --------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `queue_size`    | 8192    | Lines the queue holds, at least 1. spdlog v2 accepts at most 250000.                                                                                        |
+| `overflow`      | `block` | What a call does when the queue is full: `block`, `overrun_oldest` or `discard_new`.                                                                        |
+| `json_errors`   | `true`  | Report the logger's errors as JSON lines on stderr, with [`make_error_handler`](#errors-and-the-error-handler) and the keys of the logger's `json_options`. |
+
+- The worker and its queue live as long as the last copy of the logger, counting children and the pointers returned by
+  `spdlog_logger()`. When the last one goes away, the queued lines are written to the sinks and the thread is joined,
+  so let that happen before `main` returns. With spdlog v1, `spdlog::logger::clone()` does not keep the worker alive.
+- spdlog 1.12 has no `discard_new` policy, and `make_async_logger` throws `std::invalid_argument` for it there. It
+  throws the same for a null sink and for a queue size of 0.
+
+Example: [12_factories.cpp](example/12_factories.cpp).
+
 ### Fields
 
 Fields are keys and values, usually written as a braced list. A `jspdlog::fields` object holds the same, serialized
@@ -153,6 +207,7 @@ logger.info({"user_id", 42, "admin", false, "ratio", 0.25, "name", "ada"}, "logi
 | `std::nullptr_t`                                 | `null`                                           |
 | `jspdlog::fields`                                | nested object                                    |
 | `jspdlog::raw_json{"..."}`                       | inserted as is (an empty string is `null`)       |
+| `nlohmann::json`, with `jspdlog/nlohmann.h`      | the JSON value                                   |
 
 - Keys are written in the order they were first inserted. Inserting a key that exists replaces its value and keeps its
   position. When sets are merged, the right-hand side wins.
@@ -368,14 +423,56 @@ Example: [03_fields.cpp](example/03_fields.cpp).
 
 ### Arrays and objects from a JSON library
 
-jspdlog has no JSON library dependency. Serialize with yours and pass the text as `raw_json`:
+The core header has no JSON library dependency. Serialize with yours and pass the text as `raw_json`:
 
 ```cpp
 nlohmann::json items = {"alpha", "beta"};
 logger.info({"items", jspdlog::raw_json{items.dump()}}, "loaded {} items", items.size());
 ```
 
-The text is not validated, neither as JSON nor as UTF-8; it must be valid JSON. Example: [06_nlohmann_raw_json.cpp](example/06_nlohmann_raw_json.cpp).
+The text is not validated, neither as JSON nor as UTF-8; it must be valid JSON.
+
+#### nlohmann/json
+
+With [`jspdlog/nlohmann.h`](include/jspdlog/nlohmann.h), `nlohmann::json`, `nlohmann::ordered_json` and every other
+`nlohmann::basic_json` are values like any other, also inside containers, fields objects and bound context:
+
+```cpp
+#include <jspdlog/nlohmann.h>
+
+logger.info({"items", items}, "loaded {} items", items.size());
+// ...,"items":["alpha","beta"],"message":"loaded 2 items"}
+```
+
+- The value is dumped to compact text and not escaped again. An `ordered_json` keeps its order.
+- Invalid UTF-8 in its strings is replaced by U+FFFD **whatever `JSPDLOG_UTF8_POLICY` is**, because nlohmann/json
+  cannot escape such bytes or pass them through. `JSPDLOG_ESCAPE_LINE_SEPARATORS` does not apply either.
+- A discarded value (a failed `parse` without exceptions) is `null`. A discarded value nested inside another one is not
+  looked for and makes the line invalid.
+- Include the header in every translation unit that logs such values: without it jspdlog has no JSON form for them,
+  and the call does not compile.
+
+Example: [06_nlohmann_raw_json.cpp](example/06_nlohmann_raw_json.cpp).
+
+#### Glaze
+
+[Glaze](https://github.com/stephenberry/glaze) needs no header of jspdlog's, only a serializer. This one writes every
+type that glaze can reflect or has `glz::meta` for. It is written against glaze 9.1, which needs C++23:
+
+```cpp
+#include <jspdlog/jspdlog.h>
+
+#include <glaze/glaze.hpp>
+
+template <typename T>
+struct jspdlog::serializer<T, std::enable_if_t<glz::reflectable<T> || glz::glaze_t<T>>>
+{
+    static void write(jspdlog::json_writer &w, const T &v) { w.raw(glz::write_json(v).value_or("null")); }
+};
+```
+
+A serializer wins over `jspdlog_serialize`, so narrow the condition if some of those types have one. As with
+`raw_json`, the text is not checked, UTF-8 included.
 
 ### Configuring the line
 
@@ -450,7 +547,8 @@ Things to know about each:
   `WARNING`, and `off` is written `DEFAULT`. The documentation types `sourceLocation.line` as an int64 in string form, and jspdlog
   writes a number, which the protobuf JSON mapping accepts for int64; this was not tried against a live agent. The
   structured logging page does not say which format `time` takes; the `LogEntry` reference defines timestamps as RFC 3339
-  with up to nanoseconds, which is what the preset writes. Trace correlation uses `logging.googleapis.com/trace`.
+  with up to nanoseconds, which is what the preset writes. For trace correlation see
+  [Trace context](#trace-context).
 - **Datadog.** The reserved `status` is remapped by its first letters, so `trace` becomes debug, `warn` warning and
   `critical` critical. `timestamp` as epoch milliseconds is a format its date remapper recognizes. `logger.thread_name` is a
   string attribute, and jspdlog has the numeric thread id only, so it writes the number; remove the key with
@@ -463,6 +561,69 @@ Things to know about each:
   writes the base name of the file. `code.function.name` is meant to be fully qualified, and jspdlog writes the name
   the compiler gives the function, which GCC and Clang leave unqualified. `thread.id` is defined as a managed thread id
   and jspdlog writes the operating system's; it and `process.pid` are not stable in the semantic conventions yet.
+
+### Trace context
+
+Bind the trace and span id of a request to a child logger, and every line of the request can be found from its trace.
+jspdlog reads the W3C [`traceparent`](https://www.w3.org/TR/trace-context/#traceparent-header) header itself and needs
+no tracing library:
+
+```cpp
+void handle(const jspdlog::json_logger &logger, const request &req)
+{
+    // Without a valid header the context is empty, and trace_fields binds nothing.
+    const auto ctx = jspdlog::parse_traceparent(req.header("traceparent")).value_or(jspdlog::trace_context{});
+    const auto log = logger.with(jspdlog::trace_fields(ctx));
+    log.info("handling request");
+    // {...,"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7","trace_flags":"01",...}
+}
+```
+
+`parse_traceparent` accepts version `00` only: exactly `00-<32 hex>-<16 hex>-<2 hex>`, lowercase, with ids that are not
+all zeros and no surrounding whitespace. W3C Trace Context suggests that a receiver also tries to read a header of a
+later version; jspdlog gives an empty optional for one. A `trace_context` is a plain struct (`trace_id`, `span_id` and
+`trace_flags` as bytes), so you can fill it from any tracing library.
+
+The names and the value formats depend on the backend, so each preset schema has its own function. All ids are
+lowercase hex: 32 digits for the trace id, 16 for the span id. A context that is not `valid()` gives no fields.
+
+| Function                                  | Fields                                                                                                                                                                       | Documentation checked on 2026-11-26                                                                                                                               |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `trace_fields(ctx, keys)` (OpenTelemetry) | `trace_id`, `span_id`, `trace_flags` (two hex digits)                                                                                                                        | [Trace context in non-OTLP log formats](https://opentelemetry.io/docs/specs/otel/compatibility/logging_trace_context/)                                            |
+| `presets::ecs_trace_fields(ctx)`          | `trace.id`, `span.id`                                                                                                                                                        | [ECS tracing fields](https://www.elastic.co/docs/reference/ecs/ecs-tracing)                                                                                       |
+| `presets::gcp_trace_fields(ctx, project)` | `logging.googleapis.com/trace` (the trace id, or `projects/<project>/traces/<id>`), `logging.googleapis.com/spanId`, `logging.googleapis.com/trace_sampled` (`true`/`false`) | [Link logs and traces](https://cloud.google.com/trace/docs/trace-log-integration), [structured logging](https://cloud.google.com/logging/docs/structured-logging) |
+| `presets::datadog_trace_fields(ctx)`      | `trace_id`, `span_id`                                                                                                                                                        | [Correlating OpenTelemetry traces and logs](https://docs.datadoghq.com/tracing/other_telemetry/connect_logs_and_traces/opentelemetry/)                            |
+
+- **OpenTelemetry.** `trace_keys` renames the three fields, and an empty `trace_flags` key leaves the flags out.
+- **ECS** has no field for the flags. Its pages show lowercase hex examples and state no format.
+- **Google Cloud.** `project` is optional. Google prefers the bare trace id, which is what you get without it, and
+  calls the `projects/<project>/traces/<id>` form legacy. Pass a project to name the one the trace belongs to.
+  `trace_sampled` is bit 0 of the flags.
+- **Datadog** is given the whole 128-bit trace id in hex under the OpenTelemetry names, the format its documentation
+  states for logs of such a context. Datadog's own SDKs log `dd.trace_id` and `dd.span_id`; use `trace_fields` with
+  your own `trace_keys` if your pipeline expects other names.
+
+With the OpenTelemetry C++ SDK, convert its span context. No header of jspdlog's is needed for it:
+
+```cpp
+#include <jspdlog/jspdlog.h>
+
+#include <opentelemetry/trace/span_context.h>
+
+jspdlog::trace_context from_otel(const opentelemetry::trace::SpanContext &sc)
+{
+    jspdlog::trace_context ctx;
+    sc.trace_id().CopyBytesTo(ctx.trace_id);
+    sc.span_id().CopyBytesTo(ctx.span_id);
+    ctx.trace_flags = sc.trace_flags().flags();
+    return ctx;
+}
+
+// With an active span:
+const auto log = logger.with(jspdlog::trace_fields(from_otel(span->GetContext())));
+```
+
+Example: [13_trace_context.cpp](example/13_trace_context.cpp).
 
 ### Text encoding
 
@@ -488,7 +649,8 @@ U+2028 and U+2029 are valid in JSON but end a line in JavaScript source before E
 `JSPDLOG_ESCAPE_LINE_SEPARATORS` (`ON` in CMake, or define it to 1) to write them as the JSON escapes `\u2028` and
 `\u2029`.
 
-`raw_json` is not checked: it is your JSON by contract, UTF-8 included. The payload protocol is ASCII.
+`raw_json` is not checked: it is your JSON by contract, UTF-8 included. Values written through `jspdlog/nlohmann.h`
+always get replacement (see [nlohmann/json](#nlohmannjson)). The payload protocol is ASCII.
 
 ### Sinks
 
@@ -506,7 +668,8 @@ A few sinks need care; see [Sinks](#sinks-1) under Working with spdlog. Examples
 
 ### Async logging
 
-spdlog v2 makes async a sink; spdlog v1 makes it a logger type, which you wrap with `adopt()`:
+[`make_async_logger`](#factories) works with both spdlog versions and owns its worker. To build the async part
+yourself: spdlog v2 makes async a sink; spdlog v1 makes it a logger type, which you wrap with `adopt()`:
 
 ```cpp
 // spdlog v2
@@ -663,7 +826,8 @@ copies, and a mutex of its own serializes the worker threads of an async logger.
   `async_sink::config::custom_err_handler`, not to the logger's.
 - **spdlog v1 async:** an async logger holds only a weak reference to its thread pool. After `spdlog::shutdown()`, or
   after `spdlog::init_thread_pool()` replaces the pool, every call fails with "thread pool doesn't exist anymore".
-  Keep the pool alive until you stop logging.
+  Keep the pool alive until you stop logging. A logger made by [`make_async_logger`](#factories) owns its pool, and
+  has this handler already, for both spdlog versions, unless `json_errors` is off.
 - On spdlog v2, an empty `std::function` restores the default handler. To silence errors, install a lambda that does
   nothing.
 
@@ -791,7 +955,27 @@ json_options ecs();      // Elastic Common Schema
 json_options gcp();      // Google Cloud Logging
 json_options datadog();  // Datadog
 json_options otel();     // OpenTelemetry log data model
+
+// The trace context under the names of a schema; OpenTelemetry's are those of trace_fields.
+fields ecs_trace_fields(const trace_context &ctx);
+fields gcp_trace_fields(const trace_context &ctx, std::string_view project_id = {});
+fields datadog_trace_fields(const trace_context &ctx);
 }  // namespace presets
+
+// W3C Trace Context.
+struct trace_context {
+    std::array<std::uint8_t, 16> trace_id{};
+    std::array<std::uint8_t, 8> span_id{};
+    std::uint8_t trace_flags = 0;
+    bool valid() const noexcept;  // both ids non-zero
+};
+std::optional<trace_context> parse_traceparent(std::string_view header) noexcept;  // version 00
+struct trace_keys {
+    std::string trace_id = "trace_id";
+    std::string span_id = "span_id";
+    std::optional<std::string> trace_flags = "trace_flags";  // nullopt leaves them out
+};
+fields trace_fields(const trace_context &ctx, const trace_keys &keys = {});  // empty when not valid
 
 class fields {
 public:
@@ -859,7 +1043,24 @@ public:
 void install_json_formatter(spdlog::logger &logger, const json_options &options = {});
 void install_json_formatter(spdlog::sinks::sink &sink, const json_options &options = {});
 
+// <jspdlog/factories.h>
+json_logger make_stdout_logger(std::string name, const json_options &options = {});
+json_logger make_stderr_logger(std::string name, const json_options &options = {});
+json_logger make_rotating_file_logger(std::string name, const spdlog::filename_t &path, std::size_t max_size,
+                                      std::size_t max_files, const json_options &options = {});
+enum class overflow_policy { block, overrun_oldest, discard_new };
+struct async_options {
+    std::size_t queue_size = 8192;
+    overflow_policy overflow = overflow_policy::block;
+    bool json_errors = true;
+};
+// Owns its worker thread. Throws on a null sink, a queue size of 0 or a policy that spdlog does not have.
+json_logger make_async_logger(std::string name, std::vector<spdlog::sink_ptr> sinks, const async_options &async = {},
+                              const json_options &options = {});
+
 }  // namespace jspdlog
+
+// <jspdlog/nlohmann.h> specializes jspdlog::serializer for every nlohmann::basic_json.
 ```
 
 ## Guarantees and limits
@@ -875,6 +1076,7 @@ surprising output:
   never checked (see [Text encoding](#text-encoding));
 - two different invalid keys of one object that are replaced by the same text, which then appear twice;
 - a serializer that writes more or less than one value, or leaves an object or array open: release builds do not check;
+- a discarded nlohmann/json value nested inside another one, logged through `jspdlog/nlohmann.h`;
 - time points outside the years 0000 to 9999, which are `null`, and maps, which are written in iteration order;
 - a `long double` beyond the range of `double`: it is a valid JSON number, but many parsers cannot read it;
 - a `json_logger` and a formatter installed from another module on one sink, where each module has its own copy of

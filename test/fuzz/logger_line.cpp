@@ -1,7 +1,8 @@
 // Target 3: logger_line. Fuzzes everything a user configures: the logger name, every header key, the message key, the
 // time type, the line terminator and the message, on top of the defaults or of one of the schema presets, which add
 // their level names, timestamp style and flat call site. Keys and names containing percent signs, quotes and control
-// bytes must never change the shape of the line.
+// bytes must never change the shape of the line. The message is also read as a traceparent header: one that parses
+// must be written back by trace_fields with the same hex. The logger name is too short to hold one.
 #include "fuzz_support.h"
 
 #include <set>
@@ -25,6 +26,22 @@ std::string_view eol_for(std::uint8_t choice)
         return "";
     }
     return choice == 1 ? "\n" : "\r\n";
+}
+
+// A text that parses as a traceparent is exactly one, and trace_fields gives its parts back unchanged.
+void check_traceparent(std::string_view text)
+{
+    const std::optional<jspdlog::trace_context> ctx = jspdlog::parse_traceparent(text);
+    if (!ctx)
+    {
+        return;
+    }
+    FUZZ_CHECK(ctx->valid());
+    FUZZ_CHECK(text.size() == 55 && text.substr(0, 3) == "00-" && text[35] == '-' && text[52] == '-');
+    const std::string expected = R"({"trace_id":")" + std::string{text.substr(3, 32)} + R"(","span_id":")" +
+                                 std::string{text.substr(36, 16)} + R"(","trace_flags":")" +
+                                 std::string{text.substr(53, 2)} + R"("})";
+    FUZZ_CHECK(jspdlog::trace_fields(*ctx).to_json() == expected);
 }
 
 // The options to start from: the defaults, or one of the presets.
@@ -87,6 +104,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     const bool utc = (flags & 0x40U) != 0;
     const std::string_view eol = eol_for(eol_choice);
     const std::string message{r.rest()};
+    check_traceparent(message);
 
     const auto optional_key = [](const header_key &k) {
         return k.enabled ? std::optional<std::string>{k.key} : std::nullopt;

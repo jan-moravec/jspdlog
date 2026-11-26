@@ -1,6 +1,7 @@
 // Smallest possible consumer of the installed jspdlog package. The test is "this file builds and runs", plus one check
 // that the compile definitions of the package reach the consumer: the default package replaces invalid UTF-8.
 
+#include <jspdlog/factories.h>
 #include <jspdlog/jspdlog.h>
 
 #include <spdlog/sinks/ostream_sink.h>
@@ -29,6 +30,8 @@ int main()
             (void)std::fputs("invalid UTF-8 was not replaced\n", stderr);
             return 1;
         }
+        // The optional factory header is installed next to the core and links against the installed spdlog.
+        jspdlog::make_stdout_logger("install_smoke").info("installed");
         return 0;
     }
     catch (const std::exception &e)

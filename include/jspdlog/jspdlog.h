@@ -15,7 +15,11 @@
  *
  * Field values keep their JSON type: numbers, booleans, strings and null, but also std::optional, enums, durations and
  * time points, ranges, maps, tuples and variants, nested to any depth. Your own types join in through a
- * jspdlog_serialize function next to the type, or a specialization of jspdlog::serializer.
+ * jspdlog_serialize function next to the type, or a specialization of jspdlog::serializer. A W3C trace context, parsed
+ * with parse_traceparent, is bound to a child logger with trace_fields.
+ *
+ * This header needs nothing but spdlog. Two optional headers build on it: jspdlog/factories.h makes loggers with a
+ * ready-made sink, and jspdlog/nlohmann.h makes nlohmann::json a field value.
  *
  * A json_formatter renders the whole line from the spdlog message: the header fields, the call site when asked for, the
  * fields and the message. A json_logger hands it the fields and the message in a payload that starts with a random,
@@ -1207,7 +1211,8 @@ inline void install_json_formatter(spdlog::sinks::sink &sink, const json_options
  * A preset is a function that returns a filled json_options, so change any member afterwards. Each one leaves the call
  * site off: set source_key to any text, or to the key the schema names, to turn it on. Exceptions logged through the
  * exception call forms go under the key the schema uses for them. Bind schema fields that are not per call, such as
- * ecs.version, with json_logger::with.
+ * ecs.version, with json_logger::with. The trace context has a form per schema too: ecs_trace_fields, gcp_trace_fields
+ * and datadog_trace_fields, while the keys of trace_fields are already OpenTelemetry's.
  *
  * @code
  * auto options = jspdlog::presets::ecs();
@@ -3799,6 +3804,222 @@ private:
     /** @brief The bound fields and what is derived from them, shared by every copy and never null. */
     std::shared_ptr<const context_data> context_;
 };
+
+/**
+ * @brief A W3C Trace Context: a 16-byte trace id, an 8-byte span id and the trace flags.
+ *
+ * Get one from a request header with parse_traceparent, or fill it from your tracing library, whose ids are the same
+ * bytes. Bind it to a child logger with trace_fields, or with the preset form that your log backend reads.
+ */
+struct trace_context
+{
+    /** @brief The trace id, most significant byte first. */
+    std::array<std::uint8_t, 16> trace_id{};
+    /** @brief The span id, which traceparent calls parent-id, most significant byte first. */
+    std::array<std::uint8_t, 8> span_id{};
+    /** @brief The trace flags. Bit 0 is set when the caller sampled the trace. */
+    std::uint8_t trace_flags = 0;
+
+    /** @brief Whether both ids are non-zero, as W3C requires of a valid context. */
+    [[nodiscard]] bool valid() const noexcept;
+};
+
+/** @brief Implementation details. Not part of the public API. */
+namespace detail
+{
+
+/** @brief Whether every byte is zero. */
+template <std::size_t N>
+bool all_zero(const std::array<std::uint8_t, N> &bytes) noexcept
+{
+    return std::all_of(bytes.begin(), bytes.end(), [](std::uint8_t b) { return b == 0; });
+}
+
+/** @brief The bytes as lowercase hex digits, two per byte, without a terminating null. */
+template <std::size_t N>
+std::array<char, 2 * N> lower_hex(const std::array<std::uint8_t, N> &bytes) noexcept
+{
+    static constexpr std::string_view DIGITS = "0123456789abcdef";
+    std::array<char, 2 * N> out{};
+    for (std::size_t i = 0; i < N; ++i)
+    {
+        const unsigned byte = bytes[i];
+        out[2 * i] = DIGITS[byte >> 4U];
+        out[(2 * i) + 1] = DIGITS[byte & 0x0FU];
+    }
+    return out;
+}
+
+/** @brief Fills out from the first 2 * N characters of text. False when one of them is not a lowercase hex digit. */
+template <std::size_t N>
+bool read_lower_hex(std::string_view text, std::array<std::uint8_t, N> &out) noexcept
+{
+    static constexpr std::string_view DIGITS = "0123456789abcdef";
+    for (std::size_t i = 0; i < N; ++i)
+    {
+        const std::size_t high = DIGITS.find(text[2 * i]);
+        const std::size_t low = DIGITS.find(text[(2 * i) + 1]);
+        if (high == std::string_view::npos || low == std::string_view::npos)
+        {
+            return false;
+        }
+        out[i] = static_cast<std::uint8_t>((high << 4U) | low);
+    }
+    return true;
+}
+
+/** @brief Inserts bytes as a string of lowercase hex digits. */
+template <std::size_t N>
+void insert_hex(fields &f, std::string_view key, const std::array<std::uint8_t, N> &bytes)
+{
+    const auto text = lower_hex(bytes);
+    f.insert(key, std::string_view{text.data(), text.size()});
+}
+
+} // namespace detail
+
+inline bool trace_context::valid() const noexcept
+{
+    return !detail::all_zero(trace_id) && !detail::all_zero(span_id);
+}
+
+/**
+ * @brief Parses a W3C traceparent header of version 00: "00-<32 hex>-<16 hex>-<2 hex>", the trace id, the span id and
+ * the flags.
+ *
+ * The header must be exactly these 55 characters, with lowercase hex digits and ids that are not all zeros; pass the
+ * value without surrounding whitespace. Anything else gives an empty optional. That includes headers of a later
+ * version, although W3C Trace Context suggests that a receiver tries to read the version 00 parts of one.
+ *
+ * See https://www.w3.org/TR/trace-context/#traceparent-header
+ */
+[[nodiscard]] inline std::optional<trace_context> parse_traceparent(std::string_view header) noexcept
+{
+    // The offsets of the parts in "00-<trace id>-<span id>-<flags>".
+    constexpr std::string_view VERSION = "00-";
+    constexpr std::size_t TRACE_ID_AT = VERSION.size();
+    constexpr std::size_t SPAN_ID_AT = TRACE_ID_AT + 32 + 1;
+    constexpr std::size_t FLAGS_AT = SPAN_ID_AT + 16 + 1;
+    constexpr std::size_t LENGTH = FLAGS_AT + 2;
+
+    if (header.size() != LENGTH || header.compare(0, VERSION.size(), VERSION) != 0 || header[SPAN_ID_AT - 1] != '-' ||
+        header[FLAGS_AT - 1] != '-')
+    {
+        return std::nullopt;
+    }
+    trace_context ctx;
+    std::array<std::uint8_t, 1> flags{};
+    if (!detail::read_lower_hex({header.data() + TRACE_ID_AT, 32}, ctx.trace_id) ||
+        !detail::read_lower_hex({header.data() + SPAN_ID_AT, 16}, ctx.span_id) ||
+        !detail::read_lower_hex({header.data() + FLAGS_AT, 2}, flags) || !ctx.valid())
+    {
+        return std::nullopt;
+    }
+    ctx.trace_flags = flags[0];
+    return ctx;
+}
+
+/** @brief Key names for trace_fields. The defaults are the ones OpenTelemetry gives for log formats other than OTLP. */
+struct trace_keys
+{
+    /** @brief Key of the trace id. */
+    std::string trace_id = "trace_id";
+    /** @brief Key of the span id. */
+    std::string span_id = "span_id";
+    /** @brief Key of the trace flags. An empty optional leaves them out. */
+    std::optional<std::string> trace_flags = std::string{"trace_flags"};
+};
+
+/**
+ * @brief The trace context as fields, to bind with json_logger::with: the ids in lowercase hex and the flags as two hex
+ * digits, in this order.
+ *
+ * A context that is not valid, such as the one a tracing library returns when no span is active, gives no fields.
+ *
+ * @code
+ * if (const auto ctx = jspdlog::parse_traceparent(request.header("traceparent")))
+ * {
+ *     const auto log = logger.with(jspdlog::trace_fields(*ctx));
+ *     log.info("handling request");
+ *     // {...,"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7","trace_flags":"01",...}
+ * }
+ * @endcode
+ *
+ * See https://opentelemetry.io/docs/specs/otel/compatibility/logging_trace_context/
+ */
+[[nodiscard]] inline fields trace_fields(const trace_context &ctx, const trace_keys &keys = {})
+{
+    fields f;
+    if (ctx.valid())
+    {
+        detail::insert_hex(f, keys.trace_id, ctx.trace_id);
+        detail::insert_hex(f, keys.span_id, ctx.span_id);
+        if (keys.trace_flags)
+        {
+            detail::insert_hex(f, *keys.trace_flags, std::array<std::uint8_t, 1>{{ctx.trace_flags}});
+        }
+    }
+    return f;
+}
+
+namespace presets
+{
+
+/**
+ * @brief The trace context under the names of the Elastic Common Schema, trace.id and span.id, in lowercase hex. ECS
+ * has no field for the flags. A context that is not valid gives no fields.
+ *
+ * See https://www.elastic.co/docs/reference/ecs/ecs-tracing
+ */
+[[nodiscard]] inline fields ecs_trace_fields(const trace_context &ctx)
+{
+    return jspdlog::trace_fields(ctx, {"trace.id", "span.id", std::nullopt});
+}
+
+/**
+ * @brief The trace context as Google Cloud Logging reads it from a structured log: logging.googleapis.com/trace,
+ * logging.googleapis.com/spanId and logging.googleapis.com/trace_sampled, which is bit 0 of the flags as a boolean. A
+ * context that is not valid gives no fields.
+ *
+ * Without a project_id the trace is the bare trace id, which Google prefers. With one it is the resource name
+ * "projects/<project_id>/traces/<trace id>", which Google calls the legacy format and which names the project the trace
+ * belongs to.
+ *
+ * See https://cloud.google.com/trace/docs/trace-log-integration and
+ * https://cloud.google.com/logging/docs/structured-logging
+ */
+[[nodiscard]] inline fields gcp_trace_fields(const trace_context &ctx, std::string_view project_id = {})
+{
+    fields f;
+    if (ctx.valid())
+    {
+        std::string trace;
+        if (!project_id.empty())
+        {
+            trace.append("projects/").append(project_id).append("/traces/");
+        }
+        const auto id = jspdlog::detail::lower_hex(ctx.trace_id);
+        trace.append(id.data(), id.size());
+        f.insert("logging.googleapis.com/trace", trace);
+        jspdlog::detail::insert_hex(f, "logging.googleapis.com/spanId", ctx.span_id);
+        f.insert("logging.googleapis.com/trace_sampled", (ctx.trace_flags & 0x01U) != 0);
+    }
+    return f;
+}
+
+/**
+ * @brief The trace context as Datadog reads it from the logs of an OpenTelemetry or W3C context: trace_id, the whole
+ * 128-bit id as 32 lowercase hex digits, and span_id as 16. Datadog needs no flags. A context that is not valid gives
+ * no fields.
+ *
+ * See https://docs.datadoghq.com/tracing/other_telemetry/connect_logs_and_traces/opentelemetry/
+ */
+[[nodiscard]] inline fields datadog_trace_fields(const trace_context &ctx)
+{
+    return jspdlog::trace_fields(ctx, {"trace_id", "span_id", std::nullopt});
+}
+
+} // namespace presets
 
 /** @brief Where and how the error handler made by make_error_handler reports. */
 struct error_report_options

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Merges the clang-coverage test profiles into coverage.lcov and prints a summary.
-# Only the library header is counted: _deps/, build/, test/ and example/ are excluded.
+# Only the library headers are counted: _deps/, build/, test/ and example/ are excluded.
 set -euo pipefail
 
 BUILD_DIR=build/clang-coverage
