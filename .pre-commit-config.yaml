@@ -94,3 +94,11 @@ repos:
         entry: python scripts/check-docs.py
         pass_filenames: false
         files: ^(include/.*\.h|scripts/check-docs\.py)$
+      - id: check-version
+        name: Check version numbers
+        language: python
+        entry: python scripts/ci/check-version.py
+        pass_filenames: false
+        files: >-
+          (?x)^(CMakeLists\.txt|include/jspdlog/jspdlog\.h|packaging/vcpkg/ports/jspdlog/vcpkg\.json|conanfile\.py|
+          scripts/ci/check-version\.py)$
