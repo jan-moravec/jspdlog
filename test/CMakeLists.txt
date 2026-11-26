@@ -179,7 +179,8 @@ foreach(
 endforeach()
 
 if(JSPDLOG_TEST_WITH_NLOHMANN)
-    add_executable(jspdlog_nlohmann_interop_test test_nlohmann_interop.cpp)
+    # nlohmann.cpp only includes jspdlog/nlohmann.h, so the header is also compiled on its own.
+    add_executable(jspdlog_nlohmann_interop_test test_nlohmann_interop.cpp nlohmann.cpp)
     target_link_libraries(
         jspdlog_nlohmann_interop_test
         PRIVATE jspdlog::jspdlog Catch2::Catch2WithMain nlohmann_json::nlohmann_json

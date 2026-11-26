@@ -147,7 +147,9 @@ TEST_CASE("serializer: invalid UTF-8 in a nlohmann string is replaced", "[intero
     nlohmann::json j;
     j[bad] = bad;
     const jspdlog::fields f{"j", j};
-    CHECK(f.to_json() == "{\"j\":{\"" + replaced + "\":\"" + replaced + "\"}}");
+    std::string expected = R"({"j":{")";
+    expected.append(replaced).append(R"(":")").append(replaced).append(R"("}})");
+    CHECK(f.to_json() == expected);
 }
 
 TEST_CASE("serializer: a discarded nlohmann value is null", "[interop]")

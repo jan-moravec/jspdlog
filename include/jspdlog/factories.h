@@ -87,11 +87,18 @@ enum class overflow_policy
     discard_new,
 };
 
+/** @brief Implementation details. Not part of the public API. */
+namespace detail
+{
+/** @brief The queue size of async_options, the same as spdlog's own default. */
+inline constexpr std::size_t DEFAULT_QUEUE_SIZE = 8192;
+} // namespace detail
+
 /** @brief Settings of the logger made by make_async_logger. */
 struct async_options
 {
     /** @brief The number of lines the queue holds, at least 1. With spdlog v2 at most 250000, its limit. */
-    std::size_t queue_size = 8192;
+    std::size_t queue_size = detail::DEFAULT_QUEUE_SIZE;
     /** @brief What a call does when the queue is full. */
     overflow_policy overflow = overflow_policy::block;
     /**

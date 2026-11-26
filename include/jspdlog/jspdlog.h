@@ -3808,28 +3808,14 @@ private:
     std::shared_ptr<const context_data> context_;
 };
 
-/**
- * @brief A W3C Trace Context: a 16-byte trace id, an 8-byte span id and the trace flags.
- *
- * Get one from a request header with parse_traceparent, or fill it from your tracing library, whose ids are the same
- * bytes. Bind it to a child logger with trace_fields, or with the preset form that your log backend reads.
- */
-struct trace_context
-{
-    /** @brief The trace id, most significant byte first. */
-    std::array<std::uint8_t, 16> trace_id{};
-    /** @brief The span id, which traceparent calls parent-id, most significant byte first. */
-    std::array<std::uint8_t, 8> span_id{};
-    /** @brief The trace flags. Bit 0 is set when the caller sampled the trace. */
-    std::uint8_t trace_flags = 0;
-
-    /** @brief Whether both ids are non-zero, as W3C requires of a valid context. */
-    [[nodiscard]] bool valid() const noexcept;
-};
-
 /** @brief Implementation details. Not part of the public API. */
 namespace detail
 {
+
+/** @brief The number of bytes of a W3C trace id. */
+inline constexpr std::size_t TRACE_ID_SIZE = 16;
+/** @brief The number of bytes of a W3C span id, which traceparent calls parent-id. */
+inline constexpr std::size_t SPAN_ID_SIZE = 8;
 
 /** @brief Whether every byte is zero. */
 template <std::size_t N>
@@ -3843,12 +3829,13 @@ template <std::size_t N>
 std::array<char, 2 * N> lower_hex(const std::array<std::uint8_t, N> &bytes) noexcept
 {
     static constexpr std::string_view DIGITS = "0123456789abcdef";
+    static constexpr unsigned LOW_DIGIT_MASK = 0x0FU;
     std::array<char, 2 * N> out{};
     for (std::size_t i = 0; i < N; ++i)
     {
         const unsigned byte = bytes[i];
         out[2 * i] = DIGITS[byte >> 4U];
-        out[(2 * i) + 1] = DIGITS[byte & 0x0FU];
+        out[(2 * i) + 1] = DIGITS[byte & LOW_DIGIT_MASK];
     }
     return out;
 }
@@ -3881,6 +3868,27 @@ void insert_hex(fields &f, std::string_view key, const std::array<std::uint8_t, 
 
 } // namespace detail
 
+/**
+ * @brief A W3C Trace Context: a 16-byte trace id, an 8-byte span id and the trace flags.
+ *
+ * Get one from a request header with parse_traceparent, or fill it from your tracing library, whose ids are the same
+ * bytes. Bind it to a child logger with trace_fields, or with the preset form that your log backend reads.
+ */
+// NOLINTBEGIN(misc-non-private-member-variables-in-classes): plain data that a tracing library's ids are copied into
+struct trace_context
+{
+    /** @brief The trace id, most significant byte first. */
+    std::array<std::uint8_t, detail::TRACE_ID_SIZE> trace_id{};
+    /** @brief The span id, which traceparent calls parent-id, most significant byte first. */
+    std::array<std::uint8_t, detail::SPAN_ID_SIZE> span_id{};
+    /** @brief The trace flags. Bit 0 is set when the caller sampled the trace. */
+    std::uint8_t trace_flags = 0;
+
+    /** @brief Whether both ids are non-zero, as W3C requires of a valid context. */
+    [[nodiscard]] bool valid() const noexcept;
+};
+// NOLINTEND(misc-non-private-member-variables-in-classes)
+
 inline bool trace_context::valid() const noexcept
 {
     return !detail::all_zero(trace_id) && !detail::all_zero(span_id);
@@ -3900,10 +3908,13 @@ inline bool trace_context::valid() const noexcept
 {
     // The offsets of the parts in "00-<trace id>-<span id>-<flags>".
     constexpr std::string_view VERSION = "00-";
+    constexpr std::size_t TRACE_ID_DIGITS = 2 * detail::TRACE_ID_SIZE;
+    constexpr std::size_t SPAN_ID_DIGITS = 2 * detail::SPAN_ID_SIZE;
+    constexpr std::size_t FLAGS_DIGITS = 2;
     constexpr std::size_t TRACE_ID_AT = VERSION.size();
-    constexpr std::size_t SPAN_ID_AT = TRACE_ID_AT + 32 + 1;
-    constexpr std::size_t FLAGS_AT = SPAN_ID_AT + 16 + 1;
-    constexpr std::size_t LENGTH = FLAGS_AT + 2;
+    constexpr std::size_t SPAN_ID_AT = TRACE_ID_AT + TRACE_ID_DIGITS + 1;
+    constexpr std::size_t FLAGS_AT = SPAN_ID_AT + SPAN_ID_DIGITS + 1;
+    constexpr std::size_t LENGTH = FLAGS_AT + FLAGS_DIGITS;
 
     if (header.size() != LENGTH || header.compare(0, VERSION.size(), VERSION) != 0 || header[SPAN_ID_AT - 1] != '-' ||
         header[FLAGS_AT - 1] != '-')
@@ -3912,9 +3923,9 @@ inline bool trace_context::valid() const noexcept
     }
     trace_context ctx;
     std::array<std::uint8_t, 1> flags{};
-    if (!detail::read_lower_hex({header.data() + TRACE_ID_AT, 32}, ctx.trace_id) ||
-        !detail::read_lower_hex({header.data() + SPAN_ID_AT, 16}, ctx.span_id) ||
-        !detail::read_lower_hex({header.data() + FLAGS_AT, 2}, flags) || !ctx.valid())
+    if (!detail::read_lower_hex({header.data() + TRACE_ID_AT, TRACE_ID_DIGITS}, ctx.trace_id) ||
+        !detail::read_lower_hex({header.data() + SPAN_ID_AT, SPAN_ID_DIGITS}, ctx.span_id) ||
+        !detail::read_lower_hex({header.data() + FLAGS_AT, FLAGS_DIGITS}, flags) || !ctx.valid())
     {
         return std::nullopt;
     }
