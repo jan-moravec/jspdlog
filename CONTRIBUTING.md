@@ -255,7 +255,8 @@ conan create . --test-folder packaging/conan/test_package --build=missing -s com
 
 spdlog v2 has no tagged release, so `JSPDLOG_SPDLOG_GIT_TAG` defaults to a commit of its `v2.x` branch. The weekly
 [spdlog-v2-head workflow](.github/workflows/spdlog-v2-head.yml) builds and tests against the head of that branch and, on
-failure, opens an issue with the `spdlog-v2` label or comments on the open one. When spdlog tags v2.0.0, move the
+failure, opens an issue with the `spdlog-v2` label or comments on the open one. The next passing run on `main` closes
+that issue; runs on other branches only open or comment on it. When spdlog tags v2.0.0, move the
 default in [CMakeLists.txt](CMakeLists.txt) and its comment to the tag, and update the README, this file and the
 ROADMAP.
 

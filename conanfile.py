@@ -44,4 +44,4 @@ class JspdlogConan(ConanFile):
         self.cpp_info.set_property("cmake_file_name", "jspdlog")
         self.cpp_info.set_property("cmake_target_name", "jspdlog::jspdlog")
         # The header reads the text policy in every translation unit, so the package fixes it for all its consumers.
-        self.cpp_info.defines = ["JSPDLOG_UTF8_POLICY=JSPDLOG_UTF8_REPLACE"]
+        self.cpp_info.defines = ["JSPDLOG_UTF8_POLICY=JSPDLOG_UTF8_REPLACE", "JSPDLOG_ESCAPE_LINE_SEPARATORS=0"]

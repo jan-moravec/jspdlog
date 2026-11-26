@@ -64,3 +64,26 @@ jobs:
           else
             gh issue create --title "Build fails against spdlog v2.x head" --body "$body" --label spdlog-v2
           fi
+
+  resolve:
+    # A passing run on main, scheduled or started by hand, closes the open issue. Runs on other branches never close
+    # it, so testing a branch does not hide a failure of main.
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Close the open issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |-
+          set -euo pipefail
+          body="The build and the tests pass again against the head of spdlog's v2.x branch: $RUN_URL"
+          for issue in $(gh issue list --label spdlog-v2 --state open --json number --jq '.[].number'); do
+            gh issue close "$issue" --comment "$body"
+          done
