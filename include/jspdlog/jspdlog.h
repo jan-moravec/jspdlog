@@ -3511,7 +3511,10 @@ public:
      * @brief Whether a call at this level would be written. Use it to skip building expensive fields or arguments.
      */
     [[nodiscard]] bool should_log(level lvl) const noexcept { return logger_->should_log(lvl); }
-    /** @brief Flushes every sink. */
+    /**
+     * @brief Flushes every sink. On an asynchronous logger it only queues the request behind the waiting lines and
+     * returns at once.
+     */
     void flush() { logger_->flush(); }
     /** @brief Flushes automatically after every line at this level or above. */
     void flush_on(level lvl) { logger_->flush_on(lvl); }

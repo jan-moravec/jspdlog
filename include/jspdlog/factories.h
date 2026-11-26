@@ -90,7 +90,7 @@ enum class overflow_policy
 /** @brief Settings of the logger made by make_async_logger. */
 struct async_options
 {
-    /** @brief The number of lines the queue holds, at least 1. spdlog v2 accepts at most 250000. */
+    /** @brief The number of lines the queue holds, at least 1. With spdlog v2 at most 250000, its limit. */
     std::size_t queue_size = 8192;
     /** @brief What a call does when the queue is full. */
     overflow_policy overflow = overflow_policy::block;
@@ -164,8 +164,8 @@ struct owned_async_logger
  * affect the logger.
  *
  * Values and format arguments are serialized on the calling thread, so nothing captured by reference reaches the
- * worker. Throws std::invalid_argument if a sink is null, if queue_size is 0 or if the overflow policy is not
- * available.
+ * worker. flush only queues a request behind the waiting lines and returns at once. Throws std::invalid_argument if a
+ * sink is null, if queue_size is 0 or above the limit of spdlog v2, or if the overflow policy is not available.
  *
  * @code
  * auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("app.log", 10 * 1024 * 1024, 5);
@@ -192,6 +192,12 @@ struct owned_async_logger
     {
         throw std::invalid_argument("jspdlog: the queue of an async logger must hold at least one line");
     }
+#if JSPDLOG_SPDLOG_V2
+    if (async.queue_size > spdlog::sinks::async_sink::max_queue_size)
+    {
+        throw std::invalid_argument("jspdlog: the queue of an async logger holds at most 250000 lines with spdlog v2");
+    }
+#endif
     spdlog::err_handler on_error;
     if (async.json_errors)
     {

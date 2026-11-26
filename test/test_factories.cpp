@@ -441,11 +441,90 @@ TEST_CASE("factories: discard_new keeps the oldest lines, where spdlog has it", 
     }
 }
 
-TEST_CASE("factories: make_async_logger rejects a null sink and an empty queue", "[factories][async]")
+TEST_CASE("factories: make_async_logger rejects a null sink and a queue size spdlog cannot take", "[factories][async]")
 {
     const auto sink = std::make_shared<capture_sink>();
     CHECK_THROWS_AS(jspdlog::make_async_logger("app", {sink, nullptr}), std::invalid_argument);
     jspdlog::async_options async;
     async.queue_size = 0;
     CHECK_THROWS_AS(jspdlog::make_async_logger("app", {sink}, async), std::invalid_argument);
+#if JSPDLOG_SPDLOG_V2
+    async.queue_size = spdlog::sinks::async_sink::max_queue_size;
+    CHECK_NOTHROW(jspdlog::make_async_logger("app", {sink}, async));
+    async.queue_size = spdlog::sinks::async_sink::max_queue_size + 1;
+    CHECK_THROWS_AS(jspdlog::make_async_logger("app", {sink}, async), std::invalid_argument);
+#endif
+}
+
+TEST_CASE("factories: the last copy of an async logger may go away on any thread", "[factories][async]")
+{
+    constexpr int THREADS = 4;
+    constexpr int LINES_PER_THREAD = 250;
+    const auto sink = std::make_shared<capture_sink>();
+    std::vector<std::thread> threads;
+    {
+        jspdlog::async_options async;
+        async.queue_size = 16;
+        const auto root = jspdlog::make_async_logger("app", {sink}, async, deterministic_options());
+        for (int t = 0; t < THREADS; ++t)
+        {
+            // Each thread holds the only copies but this one, which goes away first, so a logging thread joins the
+            // worker.
+            threads.emplace_back([logger = root.with({"t", t})] {
+                for (int i = 0; i < LINES_PER_THREAD; ++i)
+                {
+                    logger.info({"n", i}, "line");
+                }
+            });
+        }
+    }
+    for (std::thread &thread : threads)
+    {
+        thread.join();
+    }
+    REQUIRE(sink->lines.size() == static_cast<std::size_t>(THREADS * LINES_PER_THREAD));
+    std::vector<int> next(THREADS, 0);
+    for (const std::string &line : sink->lines)
+    {
+        bool matched = false;
+        for (int t = 0; t < THREADS && !matched; ++t)
+        {
+            const std::string expected = R"({"logger":"app","level":"info","t":)" + std::to_string(t) + R"(,"n":)" +
+                                         std::to_string(next[static_cast<std::size_t>(t)]) + R"(,"message":"line"})";
+            if (line == expected)
+            {
+                ++next[static_cast<std::size_t>(t)];
+                matched = true;
+            }
+        }
+        CAPTURE(line);
+        CHECK(matched);
+    }
+}
+
+TEST_CASE("factories: a clone of an async logger's spdlog::logger", "[factories][async]")
+{
+    const auto sink = std::make_shared<capture_sink>();
+    std::shared_ptr<spdlog::logger> clone;
+    std::string reported;
+    {
+        stderr_capture capture;
+        {
+            const auto logger = jspdlog::make_async_logger("app", {sink}, {}, deterministic_options());
+            clone = logger.spdlog_logger()->clone("clone");
+        }
+        CHECK_NOTHROW(clone->info("after the logger"));
+        clone.reset();
+        reported = capture.finish();
+    }
+#if JSPDLOG_SPDLOG_V2
+    // The clone shares the async_sink, which owns the worker, so the line is written.
+    REQUIRE(sink->lines.size() == 1);
+    CHECK(sink->lines[0] == R"({"logger":"clone","level":"info","message":"after the logger"})");
+    CHECK(reported.empty());
+#else
+    // The clone only observes the thread pool, which went away with the logger: the line is reported, not written.
+    CHECK(sink->lines.empty());
+    CHECK(reported.find(R"({"logger":"app","level":"error","message":")") == 0);
+#endif
 }

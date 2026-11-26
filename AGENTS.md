@@ -37,7 +37,9 @@ class fields
 - Naming follows spdlog: `snake_case` types, functions and members; `CamelCase` template parameters; private members end
   with an underscore. `.clang-tidy` enforces it.
 - Formatting is the repository's `.clang-format`, applied by pre-commit. Do not reformat unrelated code.
-- The library must stay a single header with no dependency beyond spdlog and {fmt}.
+- The core header `include/jspdlog/jspdlog.h` must stay self-contained with no dependency beyond spdlog and {fmt}.
+  Anything that needs more spdlog headers or another library goes into an optional header next to it, such as
+  `jspdlog/factories.h` or `jspdlog/nlohmann.h`.
 - Support spdlog v1.x (1.12 or newer) and v2.x. Put version differences behind `JSPDLOG_SPDLOG_V2`.
 
 ## Non-negotiable rules

@@ -183,7 +183,9 @@ const auto logger = jspdlog::make_async_logger("app", {sink}, async);  // json_o
   `spdlog_logger()`. When the last one goes away, the queued lines are written to the sinks and the thread is joined,
   so let that happen before `main` returns. With spdlog v1, `spdlog::logger::clone()` does not keep the worker alive.
 - spdlog 1.12 has no `discard_new` policy, and `make_async_logger` throws `std::invalid_argument` for it there. It
-  throws the same for a null sink and for a queue size of 0.
+  throws the same for a null sink, for a queue size of 0 and, with spdlog v2, for one above 250000.
+- `flush()` only queues a flush behind the waiting lines and returns at once. Every line is on the sinks when the last
+  copy of the logger is gone.
 
 Example: [12_factories.cpp](example/12_factories.cpp).
 
@@ -594,7 +596,7 @@ lowercase hex: 32 digits for the trace id, 16 for the span id. A context that is
 | `presets::gcp_trace_fields(ctx, project)` | `logging.googleapis.com/trace` (the trace id, or `projects/<project>/traces/<id>`), `logging.googleapis.com/spanId`, `logging.googleapis.com/trace_sampled` (`true`/`false`) | [Link logs and traces](https://cloud.google.com/trace/docs/trace-log-integration), [structured logging](https://cloud.google.com/logging/docs/structured-logging) |
 | `presets::datadog_trace_fields(ctx)`      | `trace_id`, `span_id`                                                                                                                                                        | [Correlating OpenTelemetry traces and logs](https://docs.datadoghq.com/tracing/other_telemetry/connect_logs_and_traces/opentelemetry/)                            |
 
-- **OpenTelemetry.** `trace_keys` renames the three fields, and an empty `trace_flags` key leaves the flags out.
+- **OpenTelemetry.** `trace_keys` renames the three fields, and `std::nullopt` as the `trace_flags` key leaves the flags out.
 - **ECS** has no field for the flags. Its pages show lowercase hex examples and state no format.
 - **Google Cloud.** `project` is optional. Google prefers the bare trace id, which is what you get without it, and
   calls the `projects/<project>/traces/<id>` form legacy. Pass a project to name the one the trace belongs to.
@@ -1054,7 +1056,7 @@ struct async_options {
     overflow_policy overflow = overflow_policy::block;
     bool json_errors = true;
 };
-// Owns its worker thread. Throws on a null sink, a queue size of 0 or a policy that spdlog does not have.
+// Owns its worker thread. Throws on a null sink, a queue size that spdlog cannot take or a policy it does not have.
 json_logger make_async_logger(std::string name, std::vector<spdlog::sink_ptr> sinks, const async_options &async = {},
                               const json_options &options = {});
 

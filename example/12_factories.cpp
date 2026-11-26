@@ -3,6 +3,7 @@
 
 #include <jspdlog/factories.h>
 
+#include <cstddef>
 #include <memory>
 
 int main()
