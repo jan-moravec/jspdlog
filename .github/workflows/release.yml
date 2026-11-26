@@ -1,0 +1,37 @@
+name: release
+
+# A pushed version tag drafts the GitHub Release from the CHANGELOG. The maintainer reviews and publishes the draft.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  draft:
+    name: draft the GitHub Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the draft release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check that the tag names the version
+        run: python3 scripts/ci/check-version.py --tag "$GITHUB_REF_NAME"
+
+      - name: Extract the release notes
+        run: python3 scripts/ci/changelog-section.py "${GITHUB_REF_NAME#v}" > "$RUNNER_TEMP/notes.md"
+
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME"
+          --notes-file "$RUNNER_TEMP/notes.md"

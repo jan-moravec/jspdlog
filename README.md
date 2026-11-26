@@ -73,9 +73,6 @@ optional headers next to it include it and add to it:
 | [`jspdlog/factories.h`](include/jspdlog/factories.h) | [Factories](#factories) for common loggers | spdlog's stdout, rotating file and async parts |
 | [`jspdlog/nlohmann.h`](include/jspdlog/nlohmann.h)   | `nlohmann::json` values as field values    | nlohmann/json 3.10 or newer, which you provide |
 
-The optional headers and the [trace context](#trace-context) are newer than the latest tagged release. Until 0.6.0 is
-tagged, take them from `main`.
-
 Pick one:
 
 - **Copy the directory** [include/jspdlog](include/jspdlog) into your project.
@@ -84,7 +81,7 @@ Pick one:
 
   ```cmake
   include(FetchContent)
-  FetchContent_Declare(jspdlog GIT_REPOSITORY https://github.com/jan-moravec/jspdlog.git GIT_TAG v0.4.0)
+  FetchContent_Declare(jspdlog GIT_REPOSITORY https://github.com/jan-moravec/jspdlog.git GIT_TAG v0.6.0)
   FetchContent_MakeAvailable(jspdlog)
   target_link_libraries(my_app PRIVATE jspdlog::jspdlog)
   ```
@@ -92,6 +89,8 @@ Pick one:
 - **add_subdirectory(extern/jspdlog)**, then link `jspdlog::jspdlog`.
 
 - **find_package(jspdlog CONFIG REQUIRED)** after `cmake --install`.
+
+- **[vcpkg or Conan](#vcpkg-and-conan)**, from a checkout of this repository.
 
 With CMake, an installed spdlog of either major version is used if `find_package(spdlog CONFIG)` finds one. Otherwise
 spdlog is fetched at `JSPDLOG_SPDLOG_GIT_TAG` (default: a pinned v2.x commit; set for example `v1.17.0` for v1).
@@ -107,6 +106,34 @@ spdlog is fetched at `JSPDLOG_SPDLOG_GIT_TAG` (default: a pinned v2.x commit; se
 | `JSPDLOG_BUILD_BENCH`            | `OFF`              | Build the benchmark program.                                                                         |
 | `JSPDLOG_UTF8_POLICY`            | `replace`          | Invalid UTF-8 in logged strings: `replace`, `escape` or `pass`. See [Text encoding](#text-encoding). |
 | `JSPDLOG_ESCAPE_LINE_SEPARATORS` | `OFF`              | Write U+2028 and U+2029 as escapes. See [Text encoding](#text-encoding).                             |
+
+### vcpkg and Conan
+
+jspdlog is not in the vcpkg registry or in ConanCenter yet. This repository holds a vcpkg port and a Conan recipe, and
+CI tests both on Linux and Windows. Each uses its package manager's spdlog, which is v1, installs the headers with the
+default [text encoding](#text-encoding) settings, and gives you the target `jspdlog::jspdlog`:
+
+```cmake
+find_package(jspdlog CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE jspdlog::jspdlog)
+```
+
+**vcpkg:** the [port](packaging/vcpkg/ports/jspdlog) is written for the registry, where it downloads a release. A script
+turns it into an overlay port that builds your checkout instead. Run it from the checkout, with Git Bash on Windows:
+
+```sh
+scripts/ci/vcpkg-local-port.sh . build/overlay
+vcpkg install jspdlog --overlay-ports=build/overlay
+```
+
+After updating the checkout, run `vcpkg remove jspdlog` and then both commands again.
+
+**Conan 2:** create the package in your local cache from the checkout, then require `jspdlog/<version>` in your project,
+with the version that [conanfile.py](conanfile.py) states. Your profile needs C++17 or newer.
+
+```sh
+conan create . --build=missing -s compiler.cppstd=17
+```
 
 ## Usage
 

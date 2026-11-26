@@ -12,3 +12,11 @@ updates:
       actions:
         patterns:
           - "*"
+
+  # The Conan client that CI tests the recipe with.
+  - package-ecosystem: "pip"
+    directory: "/packaging/conan"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7

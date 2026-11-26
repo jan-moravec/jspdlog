@@ -41,7 +41,7 @@ These decide every feature below.
    headers or another library goes into an optional header next to the core.
 1. **No JSON library dependency.** `raw_json` is the bridge to one.
 
-## 3. Where we are (0.5.0)
+## 3. Where we are (0.6.0)
 
 The header ([include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h))
 provides `json_logger` (five call shapes per level plus `log(level, ...)`),
@@ -81,12 +81,13 @@ is checked at compile time and skips the escape scan.
 calling back into spdlog, which cannot deadlock spdlog v2's error mutex.
 spdlog v1 built with `SPDLOG_USE_STD_FORMAT` works with C++20.
 
-On `main`, toward 0.6.0: the optional header `jspdlog/factories.h` makes
-stdout, stderr, rotating file and asynchronous loggers without globals, the
-asynchronous one owning its worker. The core header parses a W3C
-`traceparent` and binds the trace context under the names of OpenTelemetry,
-ECS, Google Cloud Logging and Datadog. `jspdlog/nlohmann.h` makes
-`nlohmann::json` a value type.
+Since 0.6.0 the optional header `jspdlog/factories.h` makes stdout, stderr,
+rotating file and asynchronous loggers without globals, the asynchronous one
+owning its worker. The core header parses a W3C `traceparent` and binds the
+trace context under the names of OpenTelemetry, ECS, Google Cloud Logging and
+Datadog. `jspdlog/nlohmann.h` makes `nlohmann::json` a value type. The
+repository holds a vcpkg port and a Conan recipe, not yet submitted to their
+registries, and a pushed version tag drafts the GitHub Release.
 
 ## 4. Architecture decision: custom `spdlog::formatter` (proposed for 0.2)
 
@@ -254,7 +255,11 @@ possible, so numbers, booleans and nested data stay filterable as such
 - [x] Optional integration headers, never required by the core:
   `jspdlog/nlohmann.h` (`nlohmann::json` as a value type); glaze: README
   recipe.
-- [ ] vcpkg and Conan ports; track spdlog v2's first tagged release.
+- [x] vcpkg port and Conan recipe in the repository, tested in CI; they are
+  submitted upstream after the `v0.6.0` tag.
+- [x] Track spdlog v2's first tagged release: there is none yet, so a weekly
+  job builds against the head of the `v2.x` branch, and the default pin moves
+  to the tag when it appears.
 
 ### 1.0.0: stable
 

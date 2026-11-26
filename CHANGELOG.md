@@ -6,6 +6,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-26
+
+Factories for the usual loggers, trace context, nlohmann/json values, and a vcpkg port and Conan recipe. Nothing
+breaks.
+
 ### Added
 
 - `jspdlog/factories.h`, an optional header: `make_stdout_logger`, `make_stderr_logger` and
@@ -21,6 +26,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `jspdlog/nlohmann.h`, an optional header that makes `nlohmann::json`, `ordered_json` and other `basic_json` values
   field values, for nlohmann/json 3.10 or newer. Invalid UTF-8 in them is always replaced.
 - README recipes for OpenTelemetry C++ and glaze, and the examples `12_factories.cpp` and `13_trace_context.cpp`.
+- A vcpkg port, in `packaging/vcpkg`, and a Conan 2 recipe, `conanfile.py`, both tested in CI on Linux and Windows.
+  They are not in the vcpkg registry or ConanCenter yet; the README shows how to use them from a checkout.
+- A weekly build against the head of spdlog's `v2.x` branch, which has no tagged release yet.
+- A release workflow that checks a pushed version tag and drafts the GitHub Release from this file.
 
 ## [0.5.0] - 2026-11-26
 
@@ -166,4 +175,5 @@ First release. jspdlog is a single-header library that writes one JSON object pe
 [0.3.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.3.0
 [0.4.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.4.0
 [0.5.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.5.0
-[unreleased]: https://github.com/jan-moravec/jspdlog/compare/v0.5.0...HEAD
+[0.6.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.6.0
+[unreleased]: https://github.com/jan-moravec/jspdlog/compare/v0.6.0...HEAD

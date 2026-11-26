@@ -1,0 +1,2 @@
+# The Conan client that CI tests the recipe with. Dependabot updates the pin.
+conan==2.34.0
