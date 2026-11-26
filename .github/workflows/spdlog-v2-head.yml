@@ -1,0 +1,66 @@
+name: spdlog-v2-head
+
+# spdlog v2 has no tagged release, and the default build pins one commit of its v2.x branch. This builds and tests
+# against the head of that branch, weekly and on demand, so a change that breaks jspdlog is seen early.
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install GCC 13
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-13
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@16e8153a8b4918849d92aad131befe67a3705daa # v4.5.0
+
+      - name: Configure
+        run: cmake --preset release -DJSPDLOG_SPDLOG_GIT_TAG=v2.x
+        env:
+          CC: gcc-13
+          CXX: g++-13
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Test
+        run: ctest --preset release
+
+  report:
+    # One open issue at a time: later failures add a comment to it. The spdlog-v2 label must exist in the repository.
+    needs: build
+    if: failure()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update an issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |-
+          set -euo pipefail
+          body="The build or the tests failed against the head of spdlog's v2.x branch: $RUN_URL"
+          issue="$(gh issue list --label spdlog-v2 --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body "$body"
+          else
+            gh issue create --title "Build fails against spdlog v2.x head" --body "$body" --label spdlog-v2
+          fi
