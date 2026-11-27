@@ -121,6 +121,37 @@ jspdlog_add_utf8_variant(jspdlog_utf8_pass_tests POLICY PASS)
 jspdlog_add_utf8_variant(jspdlog_utf8_separator_tests POLICY REPLACE SEPARATORS ON)
 jspdlog_add_utf8_variant(jspdlog_utf8_pass_separator_tests POLICY PASS SEPARATORS ON)
 
+# fork after a module that logged was unloaded with dlclose, which the cached process id must survive.
+if(UNIX)
+    add_library(jspdlog_test_module MODULE dlclose_fork/module.cpp)
+    target_link_libraries(jspdlog_test_module PRIVATE jspdlog::jspdlog)
+    jspdlog_set_warnings(jspdlog_test_module)
+    # The test needs the module gone after dlclose. A static spdlog, and {fmt} where it is a library of its own, go into
+    # the module, so they need position independent code, and GCC's unique symbols in any of them would keep it loaded.
+    foreach(dependency jspdlog_test_module spdlog fmt)
+        if(TARGET ${dependency})
+            get_target_property(dependency_imported ${dependency} IMPORTED)
+            if(NOT dependency_imported)
+                set_target_properties(${dependency} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+                if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+                    target_compile_options(${dependency} PRIVATE -fno-gnu-unique)
+                endif()
+            endif()
+        endif()
+    endforeach()
+    add_executable(jspdlog_dlclose_fork_test dlclose_fork/main.cpp)
+    target_link_libraries(jspdlog_dlclose_fork_test PRIVATE ${CMAKE_DL_LIBS})
+    jspdlog_set_warnings(jspdlog_dlclose_fork_test)
+    target_compile_definitions(
+        jspdlog_dlclose_fork_test
+        PRIVATE JSPDLOG_TEST_MODULE_PATH="$<TARGET_FILE:jspdlog_test_module>"
+    )
+    add_dependencies(jspdlog_dlclose_fork_test jspdlog_test_module)
+    add_test(NAME dlclose_fork COMMAND jspdlog_dlclose_fork_test)
+    # 77: the C library kept the module loaded, so there was nothing to test.
+    set_tests_properties(dlclose_fork PROPERTIES TIMEOUT 10 SKIP_RETURN_CODE 77)
+endif()
+
 # Code that must not compile: each file is a target excluded from the build, and the test builds it and expects failure.
 # A control target builds the same file with the offending line replaced by a valid one and must succeed, so a failure
 # for an unrelated reason (a broken include, a typo) cannot pass as the expected one. The tests build in the shared

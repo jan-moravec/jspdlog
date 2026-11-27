@@ -6,6 +6,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <list>
@@ -212,6 +213,13 @@ TEST_CASE("value types: enums are numbers unless they have a formatter", "[value
     const test_support::fixture f;
     f.logger.info({"c", color::green, "p", one, "n", named::up});
     CHECK(f.last() == R"({"logger":"t","level":"info","c":1,"p":1,"n":"up"})");
+}
+
+TEST_CASE("value types: std::byte is a number on every fmt", "[value_types]")
+{
+    const test_support::fixture f;
+    f.logger.info({"b", std::byte{42}, "buf", std::vector<std::byte>{std::byte{0}, std::byte{255}}});
+    CHECK(f.last() == R"({"logger":"t","level":"info","b":42,"buf":[0,255]})");
 }
 
 #if FMT_VERSION >= 100000

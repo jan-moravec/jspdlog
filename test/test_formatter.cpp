@@ -10,6 +10,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <limits>
 #include <regex>
 #include <string>
 #include <vector>
@@ -294,7 +295,6 @@ TEST_CASE("formatter: timestamps are RFC 3339 with milliseconds", "[formatter]")
         formatter.format(msg, buf);
         CHECK(std::string(buf.data(), buf.size()).rfind(R"({"ts":"2026-05-13T08:00:02.000Z",)", 0) == 0);
     }
-#ifndef _WIN32 // The Windows C runtime does not convert times before the epoch.
     SECTION("times before the epoch")
     {
         opts.time_type = spdlog::pattern_time_type::utc;
@@ -306,7 +306,6 @@ TEST_CASE("formatter: timestamps are RFC 3339 with milliseconds", "[formatter]")
         formatter.format(msg, buf);
         CHECK(std::string(buf.data(), buf.size()).rfind(R"({"ts":"1969-12-31T23:59:59.250Z",)", 0) == 0);
     }
-#endif
 }
 
 TEST_CASE("formatter: process and thread are numbers", "[formatter]")
@@ -624,7 +623,6 @@ TEST_CASE("formatter: times before the epoch round down", "[formatter]")
         opts.timestamp_style = jspdlog::timestamp_format::epoch_millis;
         CHECK(format_at(opts, time) == "{\"ts\":-751}\n");
     }
-#ifndef _WIN32 // The Windows C runtime does not convert times before the epoch.
     const long long nanos = nanos_of_second(time);
     SECTION("milliseconds")
     {
@@ -645,5 +643,99 @@ TEST_CASE("formatter: times before the epoch round down", "[formatter]")
         const std::string expected = R"({"ts":"1969-12-31T23:59:59.)" + fraction(nanos, 9) + "Z\"}\n";
         CHECK(format_at(opts, time) == expected);
     }
+}
+
+TEST_CASE("formatter: break_down covers RFC 3339 and nothing else", "[formatter]")
+{
+    constexpr long long LAST_SECOND = 253402300799;  // 9999-12-31T23:59:59Z
+    constexpr long long FIRST_SECOND = -62167219200; // 0000-01-01T00:00:00Z
+    jspdlog::detail::broken_down parts;
+
+    CHECK(jspdlog::detail::break_down(LAST_SECOND, false, parts));
+    CHECK((parts.year == 9999 && parts.month == 12 && parts.day == 31));
+    CHECK((parts.hour == 23 && parts.minute == 59 && parts.second == 59 && parts.utc));
+    CHECK_FALSE(jspdlog::detail::break_down(LAST_SECOND + 1, false, parts));
+
+    CHECK(jspdlog::detail::break_down(FIRST_SECOND, false, parts));
+    CHECK((parts.year == 0 && parts.month == 1 && parts.day == 1 && parts.hour == 0));
+    CHECK_FALSE(jspdlog::detail::break_down(FIRST_SECOND - 1, false, parts));
+
+    CHECK(jspdlog::detail::break_down(-86400, false, parts)); // before 1970, also on Windows
+    CHECK((parts.year == 1969 && parts.month == 12 && parts.day == 31 && parts.utc));
+
+    // Far beyond what any C library converts, in local time too.
+    for (const bool local : {false, true})
+    {
+        CHECK_FALSE(jspdlog::detail::break_down(std::numeric_limits<long long>::max(), local, parts));
+        CHECK(parts.utc);
+        CHECK_FALSE(jspdlog::detail::break_down(std::numeric_limits<long long>::min(), local, parts));
+        CHECK(parts.utc);
+    }
+}
+
+TEST_CASE("formatter: a timestamp before 1970 is valid in UTC and local time", "[formatter]")
+{
+    const auto before = spdlog::log_clock::time_point{} - std::chrono::hours(24);
+    CHECK(format_at(deterministic_options(), before) == "{\"ts\":\"1969-12-31T00:00:00.000Z\"}\n");
+
+    // Local time, or UTC where the C library cannot convert the second, as on Windows.
+    auto opts = no_header_options();
+    opts.timestamp_key = "ts";
+    opts.time_type = spdlog::pattern_time_type::local;
+    jspdlog::json_formatter formatter(opts);
+    spdlog::details::log_msg msg("name", jspdlog::level::info, "x");
+    msg.time = before;
+    spdlog::memory_buf_t buf;
+    formatter.format(msg, buf);
+    const std::string line(buf.data(), buf.size());
+    INFO(line);
+    const std::regex local(R"re(^\{"ts":"1969-12-3[01]T\d\d:\d\d:\d\d\.000(Z|[+-]\d\d:\d\d)",)re");
+    CHECK(std::regex_search(line, local));
+#ifdef _WIN32
+    CHECK(line.rfind(R"({"ts":"1969-12-31T00:00:00.000Z",)", 0) == 0);
 #endif
 }
+
+TEST_CASE("formatter: the ends of the clock give a valid line", "[formatter]")
+{
+    for (const auto time : {spdlog::log_clock::time_point::min(), spdlog::log_clock::time_point::max()})
+    {
+        for (const auto style : {jspdlog::timestamp_format::rfc3339_nanos, jspdlog::timestamp_format::epoch_millis})
+        {
+            auto opts = deterministic_options();
+            opts.timestamp_style = style;
+            std::string line = format_at(opts, time);
+            line.pop_back(); // the line terminator
+            INFO(line);
+            CHECK(test_support::is_single_json_object(line));
+        }
+    }
+}
+
+#ifdef _MSC_VER // 100 ns ticks reach about 29000 years either side of 1970. Nanosecond clocks end in 2262.
+TEST_CASE("formatter: a year outside 0000 to 9999 is null", "[formatter]")
+{
+    const auto opts = deterministic_options();
+    const auto after = spdlog::log_clock::time_point{std::chrono::seconds(253402300800)}; // 10000-01-01
+    CHECK(format_at(opts, after) == "{\"ts\":null}\n");
+    // The cached second is rebuilt after a null, and a null after a string.
+    jspdlog::json_options cached = no_header_options();
+    cached.timestamp_key = "ts";
+    cached.time_type = spdlog::pattern_time_type::utc;
+    jspdlog::json_formatter formatter(cached);
+    spdlog::details::log_msg msg("name", jspdlog::level::info, "x");
+    std::vector<std::string> lines;
+    for (const auto time : {after, after, after - std::chrono::seconds(1), after})
+    {
+        msg.time = time;
+        spdlog::memory_buf_t buf;
+        formatter.format(msg, buf);
+        lines.emplace_back(buf.data(), buf.size());
+    }
+    const std::string null_line = "{\"ts\":null,\"message\":\"x\"}\n";
+    CHECK(lines[0] == null_line);
+    CHECK(lines[1] == null_line);
+    CHECK(lines[2] == "{\"ts\":\"9999-12-31T23:59:59.000Z\",\"message\":\"x\"}\n");
+    CHECK(lines[3] == null_line);
+}
+#endif

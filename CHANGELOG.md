@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-27
+
+Fixes for defects found in a review of 0.6.0. No API changes.
+
+### Fixed
+
+- `std::byte` is a number with {fmt} 10 and newer too; it was written as a string of digits, so a
+  `std::vector<std::byte>` was an array of strings.
+- spdlog v1's `enable_backtrace()` stores `json_logger` calls below the level, from the member functions and the
+  macros, so `dump_backtrace()` writes them. They were dropped. While a backtrace is enabled, such calls serialize their
+  fields, run lazy values and format their arguments, as spdlog's own calls do. spdlog v2 has no backtrace.
+- The header timestamp is a valid RFC 3339 string or `null`, whatever time a caller gives spdlog. A year outside 0000 to
+  9999 and, on Windows, a time before 1970 wrote a broken string, or one that could break the line. UTC timestamps no
+  longer depend on `gmtime`, and a time that has no local form is written in UTC with `Z`.
+- On macOS, a `fork()` after `dlclose()` of a shared library that logged the process id no longer crashes: macOS keeps
+  that library's `pthread_atfork` handler after unloading it, so the id is no longer cached there and is read on every
+  line. glibc removes the handler, so Linux keeps the cache.
+- Documentation: the README no longer says that the formatter caches the file name of a call site per pointer. It
+  caches nothing, so a temporary file name is safe.
+
 ## [0.6.0] - 2026-11-26
 
 Factories for the usual loggers, trace context, nlohmann/json values, and a vcpkg port and Conan recipe. Nothing
@@ -176,4 +196,5 @@ First release. jspdlog is a single-header library that writes one JSON object pe
 [0.4.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.4.0
 [0.5.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.5.0
 [0.6.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.6.0
-[unreleased]: https://github.com/jan-moravec/jspdlog/compare/v0.6.0...HEAD
+[0.6.1]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.6.1
+[unreleased]: https://github.com/jan-moravec/jspdlog/compare/v0.6.1...HEAD

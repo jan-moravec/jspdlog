@@ -81,7 +81,7 @@ Pick one:
 
   ```cmake
   include(FetchContent)
-  FetchContent_Declare(jspdlog GIT_REPOSITORY https://github.com/jan-moravec/jspdlog.git GIT_TAG v0.6.0)
+  FetchContent_Declare(jspdlog GIT_REPOSITORY https://github.com/jan-moravec/jspdlog.git GIT_TAG v0.6.1)
   FetchContent_MakeAvailable(jspdlog)
   target_link_libraries(my_app PRIVATE jspdlog::jspdlog)
   ```
@@ -294,14 +294,16 @@ its own, higher level: spdlog formats a line before its sinks check their levels
 braced list of a call, not in a fields object or `with()`: bound fields are serialized once, when the child logger is
 created. An exception thrown by the callable, or by a serializer of a value in a braced list, goes to the error handler
 and the line is dropped, like an exception from a formatter. A type that has a JSON form is always a value, even when
-it is callable. Format arguments are evaluated before the call too; use the [macros](#level-macros-optional) when they
-are expensive. Example: [10_lazy_values.cpp](example/10_lazy_values.cpp).
+it is callable. With spdlog v1's `enable_backtrace()`, a call below the level is stored for `dump_backtrace()`, so its
+callables and format arguments run. Format arguments are evaluated before the call too; use the
+[macros](#level-macros-optional) when they are expensive. Example: [10_lazy_values.cpp](example/10_lazy_values.cpp).
 
 ### Level macros (optional)
 
 `JSPDLOG_TRACE`, `JSPDLOG_DEBUG`, `JSPDLOG_INFO`, `JSPDLOG_WARN`, `JSPDLOG_ERROR`, `JSPDLOG_CRITICAL` and
 `JSPDLOG_LOG(logger, level, ...)` take the same arguments as the member functions. They evaluate nothing in the call
-when the level is off, neither fields nor format arguments:
+when the level is off, neither fields nor format arguments. With spdlog v1's backtrace enabled, a call below the
+logger's level is evaluated, because spdlog stores it:
 
 ```cpp
 JSPDLOG_DEBUG(logger, {"plan", explain(q)}, "planned {}", describe(q));
@@ -330,6 +332,7 @@ Values keep their JSON type, however deeply they are nested. Everything below al
 | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `std::optional<T>`                                               | the value, or `null` when empty                                                                     |
 | enums                                                            | the name if {fmt} has a formatter for the enum, otherwise the number                                |
+| `std::byte`                                                      | a number                                                                                            |
 | `std::chrono::duration`                                          | milliseconds as a number                                                                            |
 | `std::chrono::system_clock::time_point` (any duration)           | RFC 3339 UTC string with milliseconds, `"2026-11-23T08:00:00.123Z"`                                 |
 | ranges (`vector`, `array`, `span`, `list`, `set`, C arrays)      | array                                                                                               |
@@ -342,6 +345,8 @@ Values keep their JSON type, however deeply they are nested. Everything below al
 - **Enums.** An enum written as a name needs a `fmt::formatter` specialization, or `format_as` with {fmt} 10 and newer.
   `format_as` that returns an integer gives a number. {fmt} 9, which spdlog 1.12 bundles, formats every unscoped enum
   as an integer, and jspdlog still writes a number for it, so the output does not depend on the {fmt} version.
+  `std::byte` is the one standard enum that {fmt} formats, from version 10 on. It is a byte and not a named value, so
+  it is a number everywhere, and a `std::vector<std::byte>` is an array of numbers.
 - **Durations** are milliseconds. A duration with an integer representation and a period that is a whole number of
   milliseconds (`milliseconds`, `seconds`, `minutes`, `hours`) is an integer. Any other (`microseconds`, `nanoseconds`,
   floating-point) is a float, which keeps `.0`: `1500us` is `1.5` and `1000000ns` is `1.0`. The JSON type depends on the
@@ -552,6 +557,10 @@ opts.severity_key = "severity";
 The digits below the resolution of the clock are zero: `spdlog::log_clock` is `std::chrono::system_clock`, which counts
 nanoseconds with libstdc++ and libc++ and 100 ns ticks with MSVC. `epoch_millis` ignores `time_type`, because an epoch
 has no zone.
+
+An RFC 3339 timestamp outside the years 0000 to 9999 is `null`; only a time that the caller passes to spdlog can be
+that far away. If the C library cannot give the local time of a line, as on Windows before 1970, it is written in UTC
+with `Z`.
 
 ### Schema presets
 
@@ -776,7 +785,8 @@ jspdlog::install_json_formatter(*extra_sink, options);
 - async through `async_sink` (v2) or `adopt()` (v1); the payload, with its token, is copied to the worker
 - several json_loggers sharing a sink, several wrappers of one `spdlog::logger`, and `spdlog::logger::clone()`
 - logging through `spdlog_logger()`, `SPDLOG_LOGGER_INFO` and similar macros: the message is escaped
-- `dup_filter_sink`'s "Skipped N duplicate messages.." line and v1 `dump_backtrace()`: valid lines
+- `dup_filter_sink`'s "Skipped N duplicate messages.." line: a valid line
+- v1 `enable_backtrace()` and `dump_backtrace()`: calls below the level are stored and dumped as JSON lines
 - registering in the spdlog v1 registry, `spdlog::get()`, registry levels
 
 #### Needs care
@@ -1113,11 +1123,11 @@ surprising output:
 - two different invalid keys of one object that are replaced by the same text, which then appear twice;
 - a serializer that writes more or less than one value, or leaves an object or array open: release builds do not check;
 - a discarded nlohmann/json value nested inside another one, logged through `jspdlog/nlohmann.h`;
-- time points outside the years 0000 to 9999, which are `null`, and maps, which are written in iteration order;
+- time points and header timestamps outside the years 0000 to 9999, which are `null`, and maps, which are written in
+  iteration order;
 - a `long double` beyond the range of `double`: it is a valid JSON number, but many parsers cannot read it;
 - a `json_logger` and a formatter installed from another module on one sink, where each module has its own copy of
-  the header, such as Windows DLLs: the line stays valid JSON, but the fields appear inside the message;
-- a `spdlog::source_loc` whose file name is a temporary: the formatter caches the escaped name per pointer.
+  the header, such as Windows DLLs: the line stays valid JSON, but the fields appear inside the message.
 
 The message is a single formatted string, and the call site is written only when `source_key` is set and the message
 has one: `json_logger` calls always record it, and for other loggers spdlog's macros and `logger->log(source_loc, ...)`

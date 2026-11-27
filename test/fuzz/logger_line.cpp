@@ -2,9 +2,12 @@
 // time type, the line terminator and the message, on top of the defaults or of one of the schema presets, which add
 // their level names, timestamp style and flat call site. Keys and names containing percent signs, quotes and control
 // bytes must never change the shape of the line. The message is also read as a traceparent header: one that parses
-// must be written back by trace_fields with the same hex. The logger name is too short to hold one.
+// must be written back by trace_fields with the same hex. The logger name is too short to hold one. With the top flag
+// bit set, a time anywhere in the range of the clock is formatted too, and its timestamp compared with the model.
 #include "fuzz_support.h"
 
+#include <algorithm>
+#include <chrono>
 #include <set>
 
 namespace
@@ -42,6 +45,64 @@ void check_traceparent(std::string_view text)
                                  std::string{text.substr(36, 16)} + R"(","trace_flags":")" +
                                  std::string{text.substr(53, 2)} + R"("})";
     FUZZ_CHECK(jspdlog::trace_fields(*ctx).to_json() == expected);
+}
+
+// A message logged with a time of the caller's choosing, as spdlog allows, has a valid timestamp: epoch milliseconds,
+// or the RFC 3339 string of the model, or null for a year that RFC 3339 cannot write.
+void check_time(
+    const jspdlog::json_options &options, std::string_view timestamp_key, std::string_view eol, std::int64_t wanted
+)
+{
+    using clock = spdlog::log_clock;
+    // Both ends are rounded toward zero, so every second between them converts to the clock without overflow.
+    const std::int64_t lowest = std::chrono::duration_cast<std::chrono::seconds>(clock::duration::min()).count();
+    const std::int64_t highest = std::chrono::duration_cast<std::chrono::seconds>(clock::duration::max()).count();
+    const std::int64_t seconds = std::clamp(wanted, lowest, highest);
+
+    jspdlog::json_formatter formatter(options);
+    spdlog::details::log_msg msg("name", jspdlog::level::info, "x");
+    msg.time = clock::time_point{std::chrono::duration_cast<clock::duration>(std::chrono::seconds(seconds))};
+    spdlog::memory_buf_t buf;
+    formatter.format(msg, buf);
+    const std::string_view line{buf.data(), buf.size()};
+    // The header keys are the only strings that can be invalid UTF-8 here.
+    if (!fuzz::parseable(timestamp_key) || !fuzz::parseable(options.message_key) ||
+        !fuzz::parseable(options.logger_key.value_or("")) || !fuzz::parseable(options.level_key.value_or("")) ||
+        !fuzz::parseable(options.process_key.value_or("")) || !fuzz::parseable(options.thread_key.value_or("")))
+    {
+        fuzz::check_shape(line, eol);
+        return;
+    }
+    const ojson parsed = fuzz::parse_line(line, eol);
+    const ojson &ts = parsed.at(fuzz::written_text(timestamp_key));
+
+    if (options.timestamp_style == jspdlog::timestamp_format::epoch_millis)
+    {
+        FUZZ_CHECK(ts == ojson(seconds * 1000));
+        return;
+    }
+    const std::optional<std::string> utc = fuzz::rfc3339_utc_ms(seconds * 1000);
+    if (options.time_type == spdlog::pattern_time_type::utc)
+    {
+        if (!utc)
+        {
+            FUZZ_CHECK(ts.is_null());
+            return;
+        }
+        const std::string text = ts.get<std::string>();
+        // The model has milliseconds; the date and time before the fraction are the same in every style.
+        FUZZ_CHECK(text.substr(0, 20) == utc->substr(0, 20));
+        FUZZ_CHECK(text.find_first_not_of('0', 20) == text.size() - 1 && text.back() == 'Z');
+        return;
+    }
+    // Local time can cross the first or the last year by the zone offset, so only its form is checked.
+    if (ts.is_null())
+    {
+        return;
+    }
+    const std::string text = ts.get<std::string>();
+    FUZZ_CHECK(text.size() >= 24 && text[4] == '-' && text[7] == '-' && text[10] == 'T' && text[13] == ':');
+    FUZZ_CHECK(text.find_first_not_of("0123456789-+:.TZ") == std::string::npos);
 }
 
 // The options to start from: the defaults, or one of the presets.
@@ -103,6 +164,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     const header_key message_key = next_key(true);
     const bool utc = (flags & 0x40U) != 0;
     const std::string_view eol = eol_for(eol_choice);
+    const bool timed = (flags & 0x80U) != 0;
+    const std::int64_t seconds = timed ? r.value<std::int64_t>() : 0;
     const std::string message{r.rest()};
     check_traceparent(message);
 
@@ -119,6 +182,10 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     options.time_type = utc ? spdlog::pattern_time_type::utc : spdlog::pattern_time_type::local;
     options.eol = std::string{eol};
     options.severity_key.reset(); // a preset's severity field is not one of the fuzzed keys
+    if (timed && timestamp.enabled)
+    {
+        check_time(options, timestamp.key, eol, seconds);
+    }
 
     const fuzz::harness h(name, options);
     h.logger.info(message);

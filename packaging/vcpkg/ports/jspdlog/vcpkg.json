@@ -1,6 +1,6 @@
 {
   "name": "jspdlog",
-  "version-semver": "0.6.0",
+  "version-semver": "0.6.1",
   "description": "JSON-lines logging for C++ with typed fields and explicit context, on spdlog's sinks.",
   "homepage": "https://github.com/jan-moravec/jspdlog",
   "license": "MIT",

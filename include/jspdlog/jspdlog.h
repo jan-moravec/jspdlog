@@ -41,7 +41,7 @@
 /** @brief Minor version of jspdlog. */
 #define JSPDLOG_VERSION_MINOR 6
 /** @brief Patch version of jspdlog. */
-#define JSPDLOG_VERSION_PATCH 0
+#define JSPDLOG_VERSION_PATCH 1
 /** @brief The version as one number, major * 10000 + minor * 100 + patch, for #if comparisons. */
 #define JSPDLOG_VERSION ((JSPDLOG_VERSION_MAJOR * 10000) + (JSPDLOG_VERSION_MINOR * 100) + JSPDLOG_VERSION_PATCH)
 
@@ -290,10 +290,16 @@ struct json_options
     /** @brief Key of the exception's message inside its object. Used only by the exception call forms. */
     std::string error_message_key = "message";
 
-    /** @brief How the timestamp is written. */
+    /**
+     * @brief How the timestamp is written. An RFC 3339 string cannot hold a year outside 0000 to 9999, so such a
+     * timestamp is null.
+     */
     timestamp_format timestamp_style = timestamp_format::rfc3339_millis;
 
-    /** @brief Local time with its UTC offset, or UTC ending in Z. Does not apply to epoch_millis. */
+    /**
+     * @brief Local time with its UTC offset, or UTC ending in Z. A time that the C library cannot give in local time is
+     * written in UTC. Does not apply to epoch_millis.
+     */
     spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local;
 
     /**
@@ -684,12 +690,14 @@ inline const payload_token &process_token()
  * On POSIX systems getpid is a system call, which would cost more than the rest of a short line, so the id is read once
  * and cached. A handler registered with pthread_atfork clears the cache in the child after fork, so a forked child
  * writes its own id. A child created without the fork function of the C library, for example by a raw clone system
- * call, would keep the parent's id. If the handler cannot be registered, the id is read on every call. On Windows the
- * call is cheap and is not cached.
+ * call, would keep the parent's id. If the handler cannot be registered, the id is read on every call. The handler
+ * belongs to the shared object that registered it: glibc removes it when dlclose unloads that object, so a later fork
+ * does not call into it. macOS keeps such a handler after dlclose, and a fork would then call unmapped code, so there
+ * the id is read on every call. On Windows the call is cheap and is not cached.
  */
 inline std::size_t process_id() noexcept
 {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
     return static_cast<std::size_t>(spdlog::details::os::pid());
 #else
     static std::atomic<std::size_t> cached{0};
@@ -852,6 +860,113 @@ namespace jspdlog
 {
 
 class json_logger;
+
+namespace detail
+{
+
+struct logger_access;
+
+/**
+ * @brief Year, month and day of a count of days since 1970-01-01, proleptic Gregorian.
+ *
+ * This is Howard Hinnant's civil_from_days. It needs no time zone database and no gmtime, so it is thread-safe and
+ * works for any year. The constants are those of the published algorithm.
+ */
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+constexpr void civil_from_days(long long z, long long &y, unsigned &m, unsigned &d) noexcept
+{
+    z += 719468;
+    const long long era = (z >= 0 ? z : z - 146096) / 146097;
+    const auto doe = static_cast<unsigned>(z - (era * 146097));
+    const unsigned yoe = (doe - (doe / 1460) + (doe / 36524) - (doe / 146096)) / 365;
+    const unsigned doy = doe - ((365 * yoe) + (yoe / 4) - (yoe / 100));
+    const unsigned mp = ((5 * doy) + 2) / 153;
+    d = doy - (((153 * mp) + 2) / 5) + 1;
+    m = mp < 10 ? mp + 3 : mp - 9;
+    y = static_cast<long long>(yoe) + (era * 400) + (m <= 2 ? 1 : 0);
+}
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+
+/** @brief Local time of a second, false when the C library cannot convert it. */
+inline bool local_time(std::time_t t, std::tm &out) noexcept
+{
+#ifdef _WIN32
+    return ::localtime_s(&out, &t) == 0;
+#else
+    return ::localtime_r(&t, &out) != nullptr;
+#endif
+}
+
+/** @brief The parts of the RFC 3339 timestamp of one second. */
+struct broken_down
+{
+    /** @brief The year, 0 to 9999 when RFC 3339 can write it. */
+    long long year = 0;
+    /** @brief The month, from 1. */
+    unsigned month = 0;
+    /** @brief The day of the month, from 1. */
+    unsigned day = 0;
+    /** @brief The hour, 0 to 23. */
+    unsigned hour = 0;
+    /** @brief The minute, 0 to 59. */
+    unsigned minute = 0;
+    /** @brief The second, 0 to 59, or 60 for a leap second of the local time zone. */
+    unsigned second = 0;
+    /** @brief Minutes east of UTC, zero in UTC. */
+    int offset_minutes = 0;
+    /** @brief Whether the parts are in UTC, asked for or because local time was not available. */
+    bool utc = true;
+};
+
+/**
+ * @brief Fills out for a second since the Unix epoch, in local time or UTC. Returns false when the year is outside 0000
+ * to 9999, which RFC 3339 cannot write.
+ *
+ * UTC is computed here and cannot fail. A second that the C library cannot give in local time is given in UTC, so the
+ * result still says when it was, and utc says in which zone.
+ */
+inline bool break_down(long long second, bool local, broken_down &out)
+{
+    static constexpr long long SECONDS_PER_MINUTE = 60;
+    static constexpr long long MINUTES_PER_HOUR = 60;
+    static constexpr long long SECONDS_PER_HOUR = SECONDS_PER_MINUTE * MINUTES_PER_HOUR;
+    static constexpr long long SECONDS_PER_DAY = SECONDS_PER_HOUR * 24;
+    static constexpr long long TM_YEAR_BASE = 1900;
+    static constexpr long long LAST_YEAR = 9999;
+    std::tm tm{};
+    const auto t = static_cast<std::time_t>(second);
+    // The comparison fails for a second that does not fit a narrow time_t.
+    if (local && static_cast<long long>(t) == second && local_time(t, tm))
+    {
+        out.year = tm.tm_year + TM_YEAR_BASE;
+        out.month = static_cast<unsigned>(tm.tm_mon + 1);
+        out.day = static_cast<unsigned>(tm.tm_mday);
+        out.hour = static_cast<unsigned>(tm.tm_hour);
+        out.minute = static_cast<unsigned>(tm.tm_min);
+        out.second = static_cast<unsigned>(tm.tm_sec);
+        out.offset_minutes = spdlog::details::os::utc_minutes_offset(tm);
+        out.utc = false;
+    }
+    else
+    {
+        long long days = second / SECONDS_PER_DAY;
+        long long in_day = second % SECONDS_PER_DAY;
+        if (in_day < 0)
+        {
+            in_day += SECONDS_PER_DAY;
+            --days;
+        }
+        civil_from_days(days, out.year, out.month, out.day);
+        out.hour = static_cast<unsigned>(in_day / SECONDS_PER_HOUR);
+        out.minute = static_cast<unsigned>((in_day / SECONDS_PER_MINUTE) % MINUTES_PER_HOUR);
+        out.second = static_cast<unsigned>(in_day % SECONDS_PER_MINUTE);
+        out.offset_minutes = 0;
+        out.utc = true;
+    }
+    return out.year >= 0 && out.year <= LAST_YEAR;
+}
+
+} // namespace detail
 
 /**
  * @brief An spdlog formatter that renders every message as one JSON object.
@@ -1060,15 +1175,13 @@ private:
     }
 
     /**
-     * @brief Appends the timestamp as chosen by timestamp_style.
+     * @brief Appends the timestamp as chosen by timestamp_style: an RFC 3339 string, or null for a year it cannot
+     * write, or a number of milliseconds.
      *
      * An RFC 3339 string rebuilds its cached date and time part once per second.
      */
     void append_timestamp_(const spdlog::details::log_msg &msg, spdlog::memory_buf_t &dest)
     {
-        static constexpr int YEAR_BASE = 1900;
-        static constexpr int CENTURY = 100;
-        static constexpr int MINUTES_PER_HOUR = 60;
         static constexpr std::int64_t NANOS_PER_MILLI = 1'000'000;
         static constexpr std::int64_t NANOS_PER_MICRO = 1'000;
         const auto since_epoch = msg.time.time_since_epoch();
@@ -1077,45 +1190,24 @@ private:
             detail::append_int(dest, std::chrono::floor<std::chrono::milliseconds>(since_epoch).count());
             return;
         }
-        // floor keeps the fraction in 0 to 999999999 nanoseconds for times before the epoch too.
-        const auto whole = std::chrono::floor<std::chrono::seconds>(since_epoch);
-        const std::int64_t nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(since_epoch - whole).count();
-        const std::time_t second = spdlog::log_clock::to_time_t(spdlog::log_clock::time_point{whole});
-        if (!cached_second_ || second != *cached_second_)
+        // The fraction is 0 to 999999999 nanoseconds for times before the epoch too. std::chrono::floor is not enough:
+        // subtracting its result would overflow at the lowest time of a nanosecond clock.
+        auto whole = std::chrono::duration_cast<std::chrono::seconds>(since_epoch); // toward zero
+        auto fraction = std::chrono::duration_cast<std::chrono::nanoseconds>(since_epoch - whole);
+        if (fraction < std::chrono::nanoseconds::zero())
         {
-            const bool utc = opts_.time_type == spdlog::pattern_time_type::utc;
-            const std::tm tm = utc ? spdlog::details::os::gmtime(second) : spdlog::details::os::localtime(second);
-            cached_prefix_.clear();
-            cached_prefix_.push_back('"');
-            append_2_(cached_prefix_, (tm.tm_year + YEAR_BASE) / CENTURY);
-            append_2_(cached_prefix_, (tm.tm_year + YEAR_BASE) % CENTURY);
-            cached_prefix_.push_back('-');
-            append_2_(cached_prefix_, tm.tm_mon + 1);
-            cached_prefix_.push_back('-');
-            append_2_(cached_prefix_, tm.tm_mday);
-            cached_prefix_.push_back('T');
-            append_2_(cached_prefix_, tm.tm_hour);
-            cached_prefix_.push_back(':');
-            append_2_(cached_prefix_, tm.tm_min);
-            cached_prefix_.push_back(':');
-            append_2_(cached_prefix_, tm.tm_sec);
-            cached_prefix_.push_back('.');
-            zone_.clear();
-            if (utc)
-            {
-                zone_ = "Z\"";
-            }
-            else
-            {
-                const int offset = spdlog::details::os::utc_minutes_offset(tm);
-                const int magnitude = offset < 0 ? -offset : offset;
-                zone_.push_back(offset < 0 ? '-' : '+');
-                append_2_(zone_, magnitude / MINUTES_PER_HOUR);
-                zone_.push_back(':');
-                append_2_(zone_, magnitude % MINUTES_PER_HOUR);
-                zone_.push_back('"');
-            }
-            cached_second_ = second;
+            fraction += std::chrono::seconds(1);
+            whole -= std::chrono::seconds(1);
+        }
+        const std::int64_t nanos = fraction.count();
+        if (!cached_second_ || whole != *cached_second_)
+        {
+            cache_second_(whole);
+        }
+        if (out_of_range_)
+        {
+            detail::append(dest, std::string_view{"null"});
+            return;
         }
         detail::append(dest, cached_prefix_);
         switch (opts_.timestamp_style)
@@ -1132,6 +1224,49 @@ private:
             break;
         }
         detail::append(dest, zone_);
+    }
+
+    /** @brief Builds the cached parts of the RFC 3339 string of one second: everything but the fraction. */
+    void cache_second_(std::chrono::seconds second)
+    {
+        static constexpr int CENTURY = 100;
+        static constexpr int MINUTES_PER_HOUR = 60;
+        detail::broken_down parts;
+        const bool local = opts_.time_type != spdlog::pattern_time_type::utc;
+        out_of_range_ = !detail::break_down(second.count(), local, parts);
+        cached_second_ = second;
+        if (out_of_range_)
+        {
+            return;
+        }
+        const int year = static_cast<int>(parts.year);
+        cached_prefix_.clear();
+        cached_prefix_.push_back('"');
+        append_2_(cached_prefix_, year / CENTURY);
+        append_2_(cached_prefix_, year % CENTURY);
+        cached_prefix_.push_back('-');
+        append_2_(cached_prefix_, static_cast<int>(parts.month));
+        cached_prefix_.push_back('-');
+        append_2_(cached_prefix_, static_cast<int>(parts.day));
+        cached_prefix_.push_back('T');
+        append_2_(cached_prefix_, static_cast<int>(parts.hour));
+        cached_prefix_.push_back(':');
+        append_2_(cached_prefix_, static_cast<int>(parts.minute));
+        cached_prefix_.push_back(':');
+        append_2_(cached_prefix_, static_cast<int>(parts.second));
+        cached_prefix_.push_back('.');
+        zone_.clear();
+        if (parts.utc)
+        {
+            zone_ = "Z\"";
+            return;
+        }
+        const int magnitude = parts.offset_minutes < 0 ? -parts.offset_minutes : parts.offset_minutes;
+        zone_.push_back(parts.offset_minutes < 0 ? '-' : '+');
+        append_2_(zone_, magnitude / MINUTES_PER_HOUR);
+        zone_.push_back(':');
+        append_2_(zone_, magnitude % MINUTES_PER_HOUR);
+        zone_.push_back('"');
     }
 
     /** @brief The base name of the file of a call site. */
@@ -1181,7 +1316,9 @@ private:
     /** @brief The severity numbers in decimal, indexed by level. */
     std::array<std::string, LEVEL_COUNT> severity_texts_;
     /** @brief The second of the cached timestamp part, empty before the first line. */
-    std::optional<std::time_t> cached_second_;
+    std::optional<std::chrono::seconds> cached_second_;
+    /** @brief Whether the cached second is in a year that RFC 3339 cannot write, so the timestamp is null. */
+    bool out_of_range_ = false;
     /** @brief The quoted date and time up to the decimal point. */
     std::string cached_prefix_;
     /** @brief The UTC offset, or Z, with the closing quote. */
@@ -2253,27 +2390,6 @@ void write_duration(json_writer &w, std::chrono::duration<Rep, Period> d)
     }
 }
 
-/**
- * @brief Year, month and day of a count of days since 1970-01-01, proleptic Gregorian.
- *
- * This is Howard Hinnant's civil_from_days. It needs no time zone database and no gmtime, so it is thread-safe and
- * works for any year. The constants are those of the published algorithm.
- */
-// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-constexpr void civil_from_days(long long z, long long &y, unsigned &m, unsigned &d) noexcept
-{
-    z += 719468;
-    const long long era = (z >= 0 ? z : z - 146096) / 146097;
-    const auto doe = static_cast<unsigned>(z - (era * 146097));
-    const unsigned yoe = (doe - (doe / 1460) + (doe / 36524) - (doe / 146096)) / 365;
-    const unsigned doy = doe - ((365 * yoe) + (yoe / 4) - (yoe / 100));
-    const unsigned mp = ((5 * doy) + 2) / 153;
-    d = doy - (((153 * mp) + 2) / 5) + 1;
-    m = mp < 10 ? mp + 3 : mp - 9;
-    y = static_cast<long long>(yoe) + (era * 400) + (m <= 2 ? 1 : 0);
-}
-// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-
 /** @brief The most milliseconds floor_milliseconds returns, far outside the years 0 to 9999. */
 inline constexpr long long MAX_TIME_POINT_MS = std::numeric_limits<long long>::max() / 2;
 
@@ -2748,6 +2864,12 @@ void write_value(json_writer &w, const T &v)
     else if constexpr (is_variant_v<value_type>)
     {
         write_variant(w, v);
+    }
+    else if constexpr (std::is_same_v<value_type, std::byte>)
+    {
+        // A number on every {fmt}: {fmt} 10 and newer have a formatter for it, the only standard enum with one, which
+        // would make it a string.
+        writer_access::integer(w, std::to_integer<unsigned>(v));
     }
     else if constexpr (std::is_enum_v<value_type>)
     {
@@ -3258,6 +3380,8 @@ using format_here_t = basic_format_here<typename detail::type_identity<Args>::ty
  * means whenever the logger's level lets the call through, even if each sink then drops the line because of a higher
  * level of its own. Lazy values are allowed only here, not in a fields object or with. The format arguments of a call
  * are evaluated before the call; the JSPDLOG_* macros at the end of this header skip them too when the level is off.
+ * With spdlog v1's backtrace enabled, a call below the logger's level counts as written: spdlog formats it and stores
+ * it for dump_backtrace, so its values are serialized and its arguments run.
  *
  * The message is always a JSON string, and a single argument that is not a string is rejected at compile time: put
  * values that should keep their type in fields. A string literal is a format string checked at compile time; a
@@ -3509,6 +3633,9 @@ public:
     void set_level(level lvl) { logger_->set_level(lvl); }
     /**
      * @brief Whether a call at this level would be written. Use it to skip building expensive fields or arguments.
+     *
+     * With spdlog v1's backtrace enabled, a call at a level that should_log rejects is still stored for dump_backtrace;
+     * guard with should_log only what the backtrace may miss.
      */
     [[nodiscard]] bool should_log(level lvl) const noexcept { return logger_->should_log(lvl); }
     /**
@@ -3529,6 +3656,8 @@ public:
     [[nodiscard]] const std::shared_ptr<spdlog::logger> &spdlog_logger() const noexcept { return logger_; }
 
 private:
+    friend struct detail::logger_access;
+
     /** @brief What a logger and its copies share: the bound fields and what is derived from them. Immutable. */
     struct context_data
     {
@@ -3611,10 +3740,23 @@ private:
         detail::append_json_quoted(out, std::string_view{msg.data(), msg.size()});
     }
 
+    /**
+     * @brief Whether a call at this level does any work: the level lets it through, or the spdlog v1 backtrace stores
+     * it for dump_backtrace. spdlog then decides on its own whether to write the line, store it or both.
+     */
+    [[nodiscard]] bool processes_(level lvl) const noexcept
+    {
+#if JSPDLOG_SPDLOG_V2
+        return logger_->should_log(lvl);
+#else
+        return logger_->should_log(lvl) || logger_->should_backtrace();
+#endif
+    }
+
     /** @brief Writes a line with fields only. */
     void log_fields_(level lvl, const std::exception *ex, const detail::call_fields &f, detail::site where) const
     {
-        if (should_log(lvl))
+        if (processes_(lvl))
         {
             emit_(lvl, ex, f, where, detail::KIND_FIELDS, [](spdlog::memory_buf_t & /*out*/) {});
         }
@@ -3626,7 +3768,7 @@ private:
         level lvl, const std::exception *ex, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args
     ) const
     {
-        if (should_log(lvl))
+        if (processes_(lvl))
         {
             emit_(lvl, ex, f, fmt.where(), detail::KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
                 spdlog::memory_buf_t msg;
@@ -3647,7 +3789,7 @@ private:
         level lvl, const std::exception *ex, const detail::call_fields &f, std::string_view msg, detail::site where
     ) const
     {
-        if (should_log(lvl))
+        if (processes_(lvl))
         {
             emit_(lvl, ex, f, where, detail::KIND_MESSAGE, [msg](spdlog::memory_buf_t &out) {
                 detail::append_json_quoted(out, msg);
@@ -3811,6 +3953,13 @@ private:
 /** @brief Implementation details. Not part of the public API. */
 namespace detail
 {
+
+/** @brief Lets the JSPDLOG_* macros ask whether a call does any work, without making that a member of the API. */
+struct logger_access
+{
+    /** @brief Whether a call at this level reaches spdlog. */
+    static bool processes(const json_logger &logger, level lvl) noexcept { return logger.processes_(lvl); }
+};
 
 /** @brief The number of bytes of a W3C trace id. */
 inline constexpr std::size_t TRACE_ID_SIZE = 16;
@@ -4217,7 +4366,8 @@ inline spdlog::err_handler make_error_handler(std::string logger_name, error_rep
 #define JSPDLOG_DETAIL_ENABLED(lvl) (static_cast<int>(lvl) >= JSPDLOG_ACTIVE_LEVEL)
 #endif
 
-// The logger and the level are evaluated once. Nothing else in the call runs unless the level is on.
+// The logger and the level are evaluated once. Nothing else in the call runs unless the level is on, or the spdlog v1
+// backtrace stores the call.
 #define JSPDLOG_DETAIL_LOG(id, logger, lvl, ...)                                                                       \
     do                                                                                                                 \
     {                                                                                                                  \
@@ -4225,7 +4375,9 @@ inline spdlog::err_handler make_error_handler(std::string logger_name, error_rep
         const ::jspdlog::json_logger &JSPDLOG_DETAIL_CAT(jspdlog_logger_, id) = (logger);                              \
         const ::jspdlog::level JSPDLOG_DETAIL_CAT(jspdlog_level_, id) = (lvl);                                         \
         if (JSPDLOG_DETAIL_ENABLED(JSPDLOG_DETAIL_CAT(jspdlog_level_, id)) &&                                          \
-            JSPDLOG_DETAIL_CAT(jspdlog_logger_, id).should_log(JSPDLOG_DETAIL_CAT(jspdlog_level_, id)))                \
+            ::jspdlog::detail::logger_access::processes(                                                               \
+                JSPDLOG_DETAIL_CAT(jspdlog_logger_, id), JSPDLOG_DETAIL_CAT(jspdlog_level_, id)                        \
+            ))                                                                                                         \
         {                                                                                                              \
             JSPDLOG_DETAIL_CAT(jspdlog_logger_, id).log(JSPDLOG_DETAIL_CAT(jspdlog_level_, id), __VA_ARGS__);          \
         }                                                                                                              \
@@ -4249,9 +4401,10 @@ inline spdlog::err_handler make_error_handler(std::string logger_name, error_rep
  * @brief Logs through a json_logger at a level that may be a variable, evaluating nothing else when it is off.
  *
  * The arguments after the level are anything that json_logger::log takes: a format string and its arguments, a runtime
- * string, or a braced list of fields with or without a message. None of them is evaluated when the level is below the
- * logger's level or below JSPDLOG_ACTIVE_LEVEL, so use it for format arguments that are costly to build. The logger
- * and the level are evaluated once. The macro is a statement. The recorded source line is the line of the macro.
+ * string, or a braced list of fields with or without a message. None of them is evaluated when the level is below
+ * JSPDLOG_ACTIVE_LEVEL, or below the logger's level without spdlog v1's backtrace enabled, which stores such calls. So
+ * use it for format arguments that are costly to build. The logger and the level are evaluated once. The macro is a
+ * statement. The recorded source line is the line of the macro.
  *
  * @code
  * JSPDLOG_LOG(logger, level, {"plan", explain(q)}, "planned {}", describe(q));
