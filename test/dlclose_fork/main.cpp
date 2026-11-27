@@ -1,5 +1,6 @@
-// Loads the module given as the argument, logs through it, unloads it and forks. The module registers a pthread_atfork
-// handler for the cached process id, and a handler that outlives its module would crash the child.
+// Loads the module that CMake names in JSPDLOG_TEST_MODULE_PATH, logs through it, unloads it and forks. The module
+// registers a pthread_atfork handler for the cached process id, and a handler that outlives its module would crash the
+// child.
 
 #include <sys/wait.h>
 
@@ -27,15 +28,14 @@ const char *loader_error()
 // The exit code that CTest reports as skipped.
 constexpr int SKIPPED = 77;
 
+// The path of the module, which CMake builds with this program.
+constexpr const char *MODULE_PATH = JSPDLOG_TEST_MODULE_PATH;
+
 } // namespace
 
-int main(int argc, char **argv)
+int main()
 {
-    if (argc != 2)
-    {
-        return fail("pass the path of the module");
-    }
-    void *const module = ::dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+    void *const module = ::dlopen(MODULE_PATH, RTLD_NOW | RTLD_LOCAL);
     if (module == nullptr)
     {
         return fail(loader_error());
@@ -52,7 +52,7 @@ int main(int argc, char **argv)
         return fail(loader_error());
     }
 
-    void *const still_loaded = ::dlopen(argv[1], RTLD_NOW | RTLD_NOLOAD);
+    void *const still_loaded = ::dlopen(MODULE_PATH, RTLD_NOW | RTLD_NOLOAD);
     const bool unloaded = still_loaded == nullptr;
     if (!unloaded)
     {

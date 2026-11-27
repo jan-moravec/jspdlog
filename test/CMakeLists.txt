@@ -142,8 +142,12 @@ if(UNIX)
     add_executable(jspdlog_dlclose_fork_test dlclose_fork/main.cpp)
     target_link_libraries(jspdlog_dlclose_fork_test PRIVATE ${CMAKE_DL_LIBS})
     jspdlog_set_warnings(jspdlog_dlclose_fork_test)
+    target_compile_definitions(
+        jspdlog_dlclose_fork_test
+        PRIVATE JSPDLOG_TEST_MODULE_PATH="$<TARGET_FILE:jspdlog_test_module>"
+    )
     add_dependencies(jspdlog_dlclose_fork_test jspdlog_test_module)
-    add_test(NAME dlclose_fork COMMAND jspdlog_dlclose_fork_test $<TARGET_FILE:jspdlog_test_module>)
+    add_test(NAME dlclose_fork COMMAND jspdlog_dlclose_fork_test)
     # 77: the C library kept the module loaded, so there was nothing to test.
     set_tests_properties(dlclose_fork PROPERTIES TIMEOUT 10 SKIP_RETURN_CODE 77)
 endif()
