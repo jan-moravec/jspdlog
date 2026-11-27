@@ -213,6 +213,55 @@ TEST_CASE("interop: the spdlog v1 backtrace keeps every line valid", "[interop]"
     CHECK(f.sink->lines.size() == 8);
 }
 
+TEST_CASE("interop: the spdlog v1 backtrace keeps calls below the level", "[interop]")
+{
+    test_support::fixture f;
+    f.logger.set_level(jspdlog::level::info);
+    f.logger.spdlog_logger()->enable_backtrace(4);
+    f.logger.debug({"k", 1}, "fields and message");
+    f.logger.debug("runtime {}", 2);
+    JSPDLOG_DEBUG(f.logger, {"k", 3}, "macro");
+    CHECK(f.sink->lines.empty()); // nothing written live
+    CHECK_FALSE(f.logger.should_log(jspdlog::level::debug));
+    f.logger.spdlog_logger()->dump_backtrace();
+
+    REQUIRE(f.sink->lines.size() == 5); // start marker, three lines, end marker
+    CHECK(f.sink->lines[1] == R"({"logger":"t","level":"debug","k":1,"message":"fields and message"})");
+    CHECK(f.sink->lines[2] == R"({"logger":"t","level":"debug","message":"runtime 2"})");
+    CHECK(f.sink->lines[3] == R"({"logger":"t","level":"debug","k":3,"message":"macro"})");
+}
+
+TEST_CASE("interop: the spdlog v1 backtrace keeps every call form below the level", "[interop]")
+{
+    test_support::fixture f;
+    f.logger.set_level(jspdlog::level::info);
+    f.logger.spdlog_logger()->enable_backtrace(4);
+    f.logger.debug({"k", 1});                   // fields only
+    f.logger.debug(std::string{"runtime"});     // a runtime string
+    f.logger.debug(std::runtime_error("boom")); // an exception
+    f.logger.spdlog_logger()->dump_backtrace();
+
+    REQUIRE(f.sink->lines.size() == 5);
+    CHECK(f.sink->lines[1] == R"({"logger":"t","level":"debug","k":1})");
+    CHECK(f.sink->lines[2] == R"({"logger":"t","level":"debug","message":"runtime"})");
+    CHECK(f.sink->lines[3].find(R"("message":"boom")") != std::string::npos);
+}
+
+TEST_CASE("interop: a lazy value below the level runs only with a backtrace", "[interop]")
+{
+    test_support::fixture f;
+    f.logger.set_level(jspdlog::level::info);
+    int runs = 0;
+    f.logger.debug({"n", [&] { return ++runs; }});
+    CHECK(runs == 0);
+    f.logger.spdlog_logger()->enable_backtrace(2);
+    f.logger.debug({"n", [&] { return ++runs; }});
+    CHECK(runs == 1);
+    f.logger.spdlog_logger()->disable_backtrace();
+    f.logger.debug({"n", [&] { return ++runs; }});
+    CHECK(runs == 1);
+}
+
 TEST_CASE("interop: spdlog::set_pattern on a registered logger replaces the formatter", "[interop]")
 {
     test_support::fixture f("replaced");

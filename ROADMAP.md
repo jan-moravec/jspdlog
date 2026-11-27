@@ -41,7 +41,7 @@ These decide every feature below.
    headers or another library goes into an optional header next to the core.
 1. **No JSON library dependency.** `raw_json` is the bridge to one.
 
-## 3. Where we are (0.6.0)
+## 3. Where we are (0.6.1)
 
 The header ([include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h))
 provides `json_logger` (five call shapes per level plus `log(level, ...)`),
@@ -89,6 +89,11 @@ Datadog. `jspdlog/nlohmann.h` makes `nlohmann::json` a value type. The
 repository holds a vcpkg port and a Conan recipe, not yet submitted to their
 registries, and a pushed version tag drafts the GitHub Release.
 
+0.6.1 fixes `std::byte` with {fmt} 10 and newer, calls below the level that
+spdlog v1's backtrace missed, header timestamps outside what RFC 3339 can
+write, and a crash on macOS when a process forks after unloading a library
+that logged.
+
 ## 4. Architecture decision: custom `spdlog::formatter` (proposed for 0.2)
 
 The proof of concept on the
@@ -118,8 +123,9 @@ formatting, with no I/O.
 | formatter PoC with source location, message only |         299 |         315 |
 
 Source location currently costs about 100 ns, mostly from escaping the full
-path on every line. Planned fix: emit the base name and cache the escaped
-form per `filename` pointer.
+path on every line. Since 0.2 the formatter emits the base name only. It does
+not cache the escaped form, because a `filename` pointer may be reused for
+other text.
 
 **Decision:** adopt the formatter design for 0.2. The public API keeps its
 shape (`json_logger`, a typed field set, `raw_json`, one options struct), with

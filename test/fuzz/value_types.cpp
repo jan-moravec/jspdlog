@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <functional>
 #include <limits>
 #include <map>
@@ -223,9 +224,20 @@ struct builder
         }
         case 8:
         {
-            // An enum without a formatter is a number whatever {fmt} version is in use.
+            // An enum without a formatter is a number whatever {fmt} version is in use, and so is std::byte.
             const auto v = r.value<std::int16_t>();
-            set(static_cast<unnamed>(v), fuzz::ojson(v));
+            const auto bits = static_cast<std::uint16_t>(v);
+            if ((bits & 1U) != 0)
+            {
+                const auto high = static_cast<std::uint8_t>(bits >> 8U);
+                set(static_cast<std::byte>(high), fuzz::ojson(high));
+            }
+            else
+            {
+                // Every value of the underlying type is a value of a scoped enum.
+                // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+                set(static_cast<unnamed>(v), fuzz::ojson(v));
+            }
             break;
         }
         case 9:

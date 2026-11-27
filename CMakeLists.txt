@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(
     jspdlog
-    VERSION 0.6.0
+    VERSION 0.6.1
     DESCRIPTION "JSON-line logging on top of spdlog."
     HOMEPAGE_URL "https://github.com/jan-moravec/jspdlog"
     LANGUAGES CXX
