@@ -30,14 +30,6 @@ std::vector<std::string> &failures()
 
 using test_support::fixture;
 
-namespace
-{
-jspdlog::fields fields_without_error_key()
-{
-    return jspdlog::fields{"a", 1};
-}
-} // namespace
-
 TEST_CASE("assert: field keys that clash with header keys are reported", "[assert]")
 {
     failures().clear();
@@ -51,10 +43,14 @@ TEST_CASE("assert: field keys that clash with header keys are reported", "[asser
         f.logger.info({"c", 3});
         CHECK(failures().empty());
     }
-    SECTION("with")
+    SECTION("bound, reported when a line is written and not by with")
     {
-        (void)f.logger.with({"level", "x"});
-        CHECK(failures().size() == 1);
+        const auto child = f.logger.with({"level", "x"});
+        CHECK(failures().empty());
+        child.info("x");
+        child.info("y");
+        CHECK(failures().size() == 2);
+        CHECK(failures().front() == "jspdlog: a field key equals a header, source or message key");
     }
     SECTION("per call, for each reserved key")
     {
@@ -156,39 +152,40 @@ TEST_CASE("assert: a serializer must write exactly one complete value", "[assert
     }
 }
 
-TEST_CASE("assert: a per-call field with the error key of an exception call is reported", "[assert]")
+TEST_CASE("assert: the keys of the sink that writes the line are checked, once per sink", "[assert]")
+{
+    failures().clear();
+    const auto first = std::make_shared<test_support::capture_sink>();
+    const auto second = std::make_shared<test_support::capture_sink>();
+    const jspdlog::json_logger logger("t", {first, second}, test_support::deterministic_options());
+
+    logger.info({"level", 1});
+    CHECK(failures().size() == 2);
+
+    // The logger never changes; renaming the level key of one sink settles its check.
+    failures().clear();
+    auto renamed = test_support::deterministic_options();
+    renamed.level_key = "severity";
+    jspdlog::install_json_formatter(*first, renamed);
+    logger.info({"level", 1});
+    CHECK(failures().size() == 1);
+    jspdlog::install_json_formatter(*second, renamed);
+    failures().clear();
+    logger.info({"level", 1});
+    CHECK(failures().empty());
+    logger.info({"severity", 1});
+    CHECK(failures().size() == 2);
+}
+
+TEST_CASE("assert: a field with the error key of an exception call is not a mistake", "[assert]")
 {
     failures().clear();
     const fixture f;
     const std::runtime_error ex("boom");
-
-    f.logger.error(ex, {"ok", 1}, "x");
-    f.logger.error(ex, fields_without_error_key());
-    CHECK(failures().empty());
-
     f.logger.error(ex, {"error", 1});
-    REQUIRE(failures().size() == 1);
-    CHECK(failures().front() == "jspdlog: a field key equals the error key of an exception call");
-
-    // Without an exception the key is an ordinary one.
-    failures().clear();
-    f.logger.error({"error", 1});
+    f.logger.with({"error", 2}).error(ex);
+    f.logger.error({"error", 3});
     CHECK(failures().empty());
-}
-
-TEST_CASE("assert: an error key that equals a header or message key is reported", "[assert]")
-{
-    failures().clear();
-    auto opts = test_support::deterministic_options();
-    opts.error_key = "message";
-    const fixture f("t", opts);
-    const std::runtime_error ex("boom");
-
-    f.logger.info({"error", 1}); // without an exception the error key is not written
-    CHECK(failures().empty());
-    f.logger.error(ex);
-    REQUIRE(failures().size() == 1);
-    CHECK(failures().front() == "jspdlog: a field key equals a header, source or message key");
 }
 
 TEST_CASE("assert: flat call site keys are reserved instead of the source key", "[assert]")

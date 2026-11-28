@@ -314,10 +314,81 @@ TEST_CASE("json_logger: construction", "[json_logger]")
         CHECK(sink->last() == R"({"logger":"raw","level":"info","message":"adopted"})");
         CHECK(logger.spdlog_logger() == raw);
     }
-    SECTION("adopt rejects null")
+    SECTION("adopt and attach reject null")
     {
         CHECK_THROWS_AS(jspdlog::json_logger::adopt(nullptr), std::invalid_argument);
+        CHECK_THROWS_AS(jspdlog::json_logger::attach(nullptr), std::invalid_argument);
     }
+}
+
+TEST_CASE("json_logger: attach keeps the formatters of the sinks", "[json_logger]")
+{
+    auto ecs = jspdlog::presets::ecs();
+    ecs.timestamp_key = std::nullopt;
+    ecs.process_key = std::nullopt;
+    ecs.thread_key = std::nullopt;
+    auto datadog = jspdlog::presets::datadog();
+    datadog.timestamp_key = std::nullopt;
+    datadog.thread_key = std::nullopt;
+    const auto first = std::make_shared<test_support::capture_sink>();
+    const auto second = std::make_shared<test_support::capture_sink>();
+    jspdlog::install_json_formatter(*first, ecs);
+    jspdlog::install_json_formatter(*second, datadog);
+
+    const auto raw = std::make_shared<spdlog::logger>("db", spdlog::sinks_init_list{first, second});
+    const auto db = jspdlog::json_logger::attach(raw);
+    CHECK(db.spdlog_logger() == raw);
+    CHECK(db.context().empty());
+    // Each sink writes its own schema, exceptions included.
+    db.error(std::runtime_error("boom"), {"k", 1}, "x");
+    CHECK(
+        first->last() == R"({"log.logger":"db","log.level":"error",)"
+                         R"("error":{"type":"std::runtime_error","message":"boom"},"k":1,"message":"x"})"
+    );
+    CHECK(
+        second->last() == R"({"logger.name":"db","status":"error",)"
+                          R"("error":{"kind":"std::runtime_error","message":"boom"},"k":1,"message":"x"})"
+    );
+
+    // A second logger on the same sinks changes nothing about them.
+    const auto http =
+        jspdlog::json_logger::attach(std::make_shared<spdlog::logger>("http", spdlog::sinks_init_list{first, second}));
+    http.with({"a", 1}).info("y");
+    CHECK(first->last() == R"({"log.logger":"http","log.level":"info","a":1,"message":"y"})");
+    CHECK(second->last() == R"({"logger.name":"http","status":"info","a":1,"message":"y"})");
+}
+
+TEST_CASE("json_logger: attach on a sink without a json_formatter shows the payload protocol", "[json_logger]")
+{
+    const auto sink = std::make_shared<test_support::capture_sink>();
+    sink->set_pattern("%v");
+    const auto logger = jspdlog::json_logger::attach(std::make_shared<spdlog::logger>("t", sink));
+    logger.info({"k", 1}, "x");
+    const auto &token = jspdlog::detail::process_token();
+    CHECK(sink->last() == std::string(token.data(), token.size()) + R"(M000000006,"k":1"x")");
+}
+
+TEST_CASE("json_logger: one set of options writes the whole line of a shared sink", "[json_logger]")
+{
+    auto ecs = jspdlog::presets::ecs();
+    ecs.timestamp_key = std::nullopt;
+    ecs.process_key = std::nullopt;
+    ecs.thread_key = std::nullopt;
+    auto datadog = jspdlog::presets::datadog();
+    datadog.timestamp_key = std::nullopt;
+    datadog.thread_key = std::nullopt;
+    const auto sink = std::make_shared<test_support::capture_sink>();
+    const jspdlog::json_logger first("a", sink, ecs);
+    const jspdlog::json_logger last("b", sink, datadog);
+
+    // The options of the logger created last apply to both, to the header and to the exception.
+    const std::runtime_error ex("boom");
+    const std::string tail = R"("status":"error","error":{"kind":"std::runtime_error","message":"boom"},)"
+                             R"("e":{"kind":"std::runtime_error","message":"boom"},"message":"x"})";
+    first.error(ex, {"e", ex}, "x");
+    CHECK(sink->last() == R"({"logger.name":"a",)" + tail);
+    last.error(ex, {"e", ex}, "x");
+    CHECK(sink->last() == R"({"logger.name":"b",)" + tail);
 }
 
 TEST_CASE("json_logger: copies are small and share their context", "[json_logger]")
@@ -329,4 +400,7 @@ TEST_CASE("json_logger: copies are small and share their context", "[json_logger
     copy.set_level(copy.log_level());
     CHECK(&copy.context() == &child.context());
     CHECK(&f.logger.context() != &child.context());
+    // A child with nothing new shares the context too.
+    const auto same = child.with(jspdlog::fields{});
+    CHECK(&same.context() == &child.context());
 }

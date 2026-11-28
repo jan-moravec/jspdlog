@@ -24,12 +24,13 @@
  * A json_formatter renders the whole line from the spdlog message: the header fields, the call site when asked for, the
  * fields and the message. A json_logger hands it the fields and the message in a payload that starts with a random,
  * process-wide token, and the formatter recognizes that token. Any other payload, such as a message logged directly on
- * the underlying spdlog::logger, by a macro or by third-party code, is escaped into the message field. So every line
- * that a json_formatter writes is one valid JSON object, whoever logged it, and valid UTF-8: invalid bytes in any
- * string follow JSPDLOG_UTF8_POLICY, which replaces them by default. install_json_formatter gives the same guarantee to
- * loggers and sinks that jspdlog does not wrap. A sink that writes the raw payload instead of the formatted line shows
- * the payload protocol, which is not JSON. Logging calls do not throw: a formatting error goes to the spdlog error
- * handler, as in spdlog.
+ * the underlying spdlog::logger, by a macro or by third-party code, is escaped into the message field. The json_options
+ * belong to a sink: only its json_formatter applies them, and where the fields need a key from them, as in an exception
+ * object, the payload holds a marker that the formatter replaces. So every line that a json_formatter writes is one
+ * valid JSON object, whoever logged it, and valid UTF-8: invalid bytes in any string follow JSPDLOG_UTF8_POLICY, which
+ * replaces them by default. install_json_formatter gives the same guarantee to loggers and sinks that jspdlog does not
+ * wrap. A sink that writes the raw payload instead of the formatted line shows the payload protocol, which is not JSON.
+ * Logging calls do not throw: a formatting error goes to the spdlog error handler, as in spdlog.
  *
  * @copyright Copyright (c) 2026 Jan Moravec. Distributed under the MIT License, see LICENSE.
  */
@@ -92,6 +93,7 @@
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -123,9 +125,11 @@
 #ifndef JSPDLOG_ASSERT
 #include <cassert>
 /**
- * @brief Called with a condition that must hold and a message. Debug builds use it to find field keys that clash with
- * the keys of the line. Define it before including jspdlog to use your own handler, for example one that logs. With
- * NDEBUG the default expands to nothing and the condition is not evaluated.
+ * @brief Called with a condition that must hold and a message. Debug builds use it to find misuse of json_writer, and
+ * field keys that clash with the keys of a line, which a json_formatter checks when it writes the line. Define it
+ * before including jspdlog to use your own handler, for example one that logs. With NDEBUG the default expands to
+ * nothing and the condition is not evaluated. A definition that evaluates its condition in every build pays a walk over
+ * the fields of every line, for each sink.
  */
 #define JSPDLOG_ASSERT(cond, msg) assert((cond) && (msg))
 #endif
@@ -232,7 +236,8 @@ enum class timestamp_format
 };
 
 /**
- * @brief Settings of a json_logger or a json_formatter.
+ * @brief Settings of a sink's output. Every key here is applied by the json_formatter of the sink, and checked for
+ * duplicates when the formatter is created.
  *
  * The key members control the header fields, which always appear in this order: timestamp, logger, level, severity,
  * process, thread, source. They are followed by the fields and then the message. A string renames a field and an empty
@@ -283,12 +288,15 @@ struct json_options
     bool source_flat = false;
     /** @brief Key of the message. It is not optional, because a message from outside jspdlog needs a place to go. */
     std::string message_key = "message";
-    /** @brief Key of the exception passed first to a logging call. Used only by those call forms. */
+    /** @brief Key of the exception passed first to a logging call. The exception replaces a field with this key. */
     std::string error_key = "error";
-    /** @brief Key of the exception's type name inside its object. Used only by the exception call forms. */
+    /** @brief Key of the type name inside an exception object, whether a call passed it first or it is a field value.
+     */
     std::string error_type_key = "type";
-    /** @brief Key of the exception's message inside its object. Used only by the exception call forms. */
+    /** @brief Key of the message inside an exception object. */
     std::string error_message_key = "message";
+    /** @brief Key of the nested cause inside an exception object, itself an exception object. */
+    std::string error_cause_key = "cause";
 
     /**
      * @brief How the timestamp is written. An RFC 3339 string cannot hold a year outside 0000 to 9999, so such a
@@ -308,6 +316,70 @@ struct json_options
      */
     std::optional<std::string> eol;
 };
+
+/** @brief Implementation details. Not part of the public API. */
+namespace detail
+{
+
+/** @brief Reports two options that give the same key: throws std::invalid_argument, or aborts without exceptions. */
+[[noreturn]] inline void duplicate_option_key(const std::string &key)
+{
+#if JSPDLOG_HAS_EXCEPTIONS
+    throw std::invalid_argument("jspdlog: json_options key \"" + key + "\" is used twice");
+#else
+    static_cast<void>(key);
+    std::abort();
+#endif
+}
+
+/** @brief Rejects two equal keys among those that end up in one JSON object. A null entry is a key that is off. */
+inline void require_distinct(std::initializer_list<const std::string *> keys)
+{
+    for (const auto *key = keys.begin(); key != keys.end(); ++key)
+    {
+        for (const auto *other = keys.begin(); other != key; ++other)
+        {
+            if (*key != nullptr && *other != nullptr && **key == **other)
+            {
+                duplicate_option_key(**key);
+            }
+        }
+    }
+}
+
+/**
+ * @brief Rejects options that would write a key twice: among the keys of the line, inside the call site object and
+ * inside an exception object.
+ *
+ * Keys are compared as given, before escaping. Level names, severity numbers and the line terminator may be anything.
+ */
+inline void validate(const json_options &o)
+{
+    const auto enabled = [](const std::optional<std::string> &key) { return key ? &*key : nullptr; };
+    const bool flat = o.source_key && o.source_flat;
+    const bool object = o.source_key && !o.source_flat;
+    require_distinct({
+        enabled(o.timestamp_key),
+        enabled(o.logger_key),
+        enabled(o.level_key),
+        enabled(o.severity_key),
+        enabled(o.process_key),
+        enabled(o.thread_key),
+        object ? &*o.source_key : nullptr,
+        flat ? &o.source_file_key : nullptr,
+        flat ? &o.source_line_key : nullptr,
+        flat ? &o.source_function_key : nullptr,
+        &o.message_key,
+        &o.error_key,
+    });
+    if (object)
+    {
+        require_distinct({&o.source_file_key, &o.source_line_key, &o.source_function_key});
+    }
+    require_distinct({&o.error_type_key, &o.error_message_key, &o.error_cause_key});
+}
+
+} // namespace detail
 
 /**
  * @brief A JSON value that is already serialized, written to the line unchanged.
@@ -630,14 +702,81 @@ inline int hex_value(char c) noexcept
 inline constexpr std::size_t TOKEN_SIZE = 32;
 /** @brief Number of hexadecimal digits that give the size of the fields in a payload. */
 inline constexpr std::size_t SIZE_DIGITS = 8;
-/** @brief Size of the payload up to the first byte of the fields: token, kind and size. */
-inline constexpr std::size_t PAYLOAD_HEADER_SIZE = TOKEN_SIZE + 1 + SIZE_DIGITS;
+/**
+ * @brief Size of the payload up to the first byte of the fields: token, kind, flags and size. The fields follow, each
+ * entry starting with a comma, and then the message as a quoted JSON string.
+ */
+inline constexpr std::size_t PAYLOAD_HEADER_SIZE = TOKEN_SIZE + 1 + 1 + SIZE_DIGITS;
 /** @brief Payload kind: fields only. */
 inline constexpr char KIND_FIELDS = 'F';
 /** @brief Payload kind: fields followed by a message. */
 inline constexpr char KIND_MESSAGE = 'M';
+/** @brief Payload flag, a bit of the flags digit: the fields contain key markers. */
+inline constexpr unsigned FLAG_MARKERS = 1U;
+/** @brief Payload flag: the fields contain the entry of the exception of an exception call, marked MARK_ERROR. */
+inline constexpr unsigned FLAG_EXCEPTION = 2U;
 /** @brief Largest fields size the payload can hold. */
 inline constexpr std::size_t MAX_FIELDS_SIZE = 0xffffffffU;
+
+/**
+ * @brief The first byte of a key marker, which stands where the fields need a quoted key and its colon that only the
+ * json_options of a sink give. The next byte says which key.
+ *
+ * Serialized JSON never holds this byte: every string jspdlog writes escapes it, and valid raw JSON has no such byte.
+ * So the formatter finds each marker by looking for it, and only in a payload that carries the token.
+ */
+inline constexpr char MARKER = '\x01';
+/** @brief Marker of json_options::error_key, the key of the exception of an exception call. */
+inline constexpr char MARK_ERROR = 'E';
+/** @brief Marker of json_options::error_type_key. */
+inline constexpr char MARK_TYPE = 'T';
+/** @brief Marker of json_options::error_message_key. */
+inline constexpr char MARK_MESSAGE = 'M';
+/** @brief Marker of json_options::error_cause_key. */
+inline constexpr char MARK_CAUSE = 'C';
+/** @brief The size of a key marker. */
+inline constexpr std::size_t MARKER_SIZE = 2;
+
+/**
+ * @brief The key, quoted and followed by a colon, that a marker inside an exception object stands for where no sink
+ * says otherwise. Empty for any other letter.
+ */
+inline std::string_view default_exception_key(char letter) noexcept
+{
+    switch (letter)
+    {
+    case MARK_TYPE:
+        return "\"type\":";
+    case MARK_MESSAGE:
+        return "\"message\":";
+    case MARK_CAUSE:
+        return "\"cause\":";
+    default:
+        return {};
+    }
+}
+
+/**
+ * @brief Appends text with every key marker replaced by what key_for returns for its two bytes. A marker cut short at
+ * the end, which only a damaged payload has, is copied unchanged.
+ */
+template <typename Buffer, typename KeyFor>
+void append_replacing_markers(Buffer &out, std::string_view text, const KeyFor &key_for)
+{
+    while (!text.empty())
+    {
+        const auto *at = static_cast<const char *>(std::memchr(text.data(), MARKER, text.size()));
+        const std::size_t before = at != nullptr ? static_cast<std::size_t>(at - text.data()) : text.size();
+        if (text.size() - before < MARKER_SIZE)
+        {
+            break;
+        }
+        append(out, text.substr(0, before));
+        append(out, std::string_view{key_for(text.substr(before, MARKER_SIZE))});
+        text.remove_prefix(before + MARKER_SIZE);
+    }
+    append(out, text);
+}
 
 /** @brief The token that marks a payload as written by a json_logger. */
 using payload_token = std::array<char, TOKEN_SIZE>;
@@ -726,6 +865,8 @@ struct parsed_payload
     std::string_view fields;
     /** @brief The message as a quoted JSON string, or empty when the line has no message. */
     std::string_view message;
+    /** @brief The bits FLAG_MARKERS and FLAG_EXCEPTION. */
+    unsigned flags = 0;
 };
 
 /**
@@ -742,10 +883,15 @@ inline parsed_payload parse_payload(std::string_view p, const payload_token &tok
     }
     static constexpr unsigned NIBBLE_BITS = 4U;
     const char kind = p[TOKEN_SIZE];
+    const int flags = hex_value(p[TOKEN_SIZE + 1]);
+    if (flags < 0 || static_cast<unsigned>(flags) > (FLAG_MARKERS | FLAG_EXCEPTION))
+    {
+        return {};
+    }
     std::size_t n = 0;
     for (std::size_t i = 0; i < SIZE_DIGITS; ++i)
     {
-        const int d = hex_value(p[TOKEN_SIZE + 1 + i]);
+        const int d = hex_value(p[PAYLOAD_HEADER_SIZE - SIZE_DIGITS + i]);
         if (d < 0)
         {
             return {};
@@ -766,7 +912,151 @@ inline parsed_payload parse_payload(std::string_view p, const payload_token &tok
     {
         return {};
     }
-    return {true, fields, message};
+    return {true, fields, message, static_cast<unsigned>(flags)};
+}
+
+/** @brief One top-level field of serialized fields. */
+struct field_entry
+{
+    /** @brief The whole entry, from its comma to the end of its value. */
+    std::string_view text;
+    /** @brief The quoted key, including the quotes, or the two bytes of a key marker. */
+    std::string_view key;
+};
+
+/** @brief The offset of the first byte at or after at that is not JSON white space, or the size of the text. */
+inline std::size_t skip_space(std::string_view text, std::size_t at) noexcept
+{
+    const std::size_t found = text.find_first_not_of(" \t\n\r", at);
+    return found != std::string_view::npos ? found : text.size();
+}
+
+/** @brief The offset just past the string whose opening quote is at at, or npos when it is not closed. */
+inline std::size_t skip_string(std::string_view text, std::size_t at) noexcept
+{
+    for (std::size_t i = at + 1; i < text.size(); ++i)
+    {
+        if (text[i] == '\\')
+        {
+            ++i;
+        }
+        else if (text[i] == '"')
+        {
+            return i + 1;
+        }
+    }
+    return std::string_view::npos;
+}
+
+/**
+ * @brief The offset just past the JSON value that starts at at, including white space around it, which raw JSON may
+ * have. npos when there is no value or it is not closed.
+ *
+ * It skips strings, nesting and markers by looking at quotes and brackets only. It is not a validator, and it never
+ * reads past the end of the text.
+ */
+inline std::size_t skip_value(std::string_view text, std::size_t at) noexcept
+{
+    at = skip_space(text, at);
+    if (at >= text.size())
+    {
+        return std::string_view::npos;
+    }
+    if (text[at] == '"')
+    {
+        const std::size_t end = skip_string(text, at);
+        return end != std::string_view::npos ? skip_space(text, end) : end;
+    }
+    if (text[at] != '{' && text[at] != '[')
+    {
+        // A number or a literal ends where the next entry or the enclosing container goes on.
+        const std::size_t end = std::min(text.find_first_of(",}]", at), text.size());
+        return end != at ? end : std::string_view::npos;
+    }
+    std::size_t depth = 0;
+    for (std::size_t i = at; i < text.size(); ++i)
+    {
+        const char c = text[i];
+        if (c == '"')
+        {
+            const std::size_t end = skip_string(text, i);
+            if (end == std::string_view::npos)
+            {
+                return end;
+            }
+            i = end - 1;
+        }
+        else if (c == '{' || c == '[')
+        {
+            ++depth;
+        }
+        else if ((c == '}' || c == ']') && --depth == 0)
+        {
+            return skip_space(text, i + 1);
+        }
+    }
+    return std::string_view::npos;
+}
+
+/**
+ * @brief Reads the next top-level field of text, which starts with a comma, and removes it from text.
+ *
+ * False at the end, or when the text is not what jspdlog writes. text is then left as it was, so the caller can tell
+ * the two apart and copy the rest unchanged.
+ */
+inline bool next_field(std::string_view &text, field_entry &out) noexcept
+{
+    if (text.size() < 2 || text[0] != ',')
+    {
+        return false;
+    }
+    std::size_t key_end = 0;
+    std::size_t value_at = 0;
+    if (text[1] == MARKER)
+    {
+        if (text.size() < 1 + MARKER_SIZE)
+        {
+            return false;
+        }
+        key_end = 1 + MARKER_SIZE;
+        value_at = key_end;
+    }
+    else if (text[1] == '"')
+    {
+        key_end = skip_string(text, 1);
+        if (key_end == std::string_view::npos || key_end >= text.size() || text[key_end] != ':')
+        {
+            return false;
+        }
+        value_at = key_end + 1;
+    }
+    else
+    {
+        return false;
+    }
+    const std::size_t end = skip_value(text, value_at);
+    if (end == std::string_view::npos || (end < text.size() && text[end] != ','))
+    {
+        return false;
+    }
+    out.text = text.substr(0, end);
+    out.key = text.substr(1, key_end - 1);
+    text.remove_prefix(end);
+    return true;
+}
+
+/** @brief Whether the key of a top-level field is one of the reserved keys, which are quoted like those of the text. */
+inline bool clashes(std::string_view fields, const std::vector<std::string> &reserved) noexcept
+{
+    field_entry entry;
+    while (next_field(fields, entry))
+    {
+        if (std::find(reserved.begin(), reserved.end(), entry.key) != reserved.end())
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 /** @brief Throws std::length_error when serialized fields of this size do not fit the 4 GiB of the payload protocol. */
@@ -797,19 +1087,22 @@ inline void patch_hex_size(spdlog::memory_buf_t &out, std::size_t at, std::size_
 }
 
 /**
- * @brief Appends the start of a payload: the token, the kind, the size of the fields and the fields that write_fields
- * appends. The caller then appends the message. Used by json_logger and by the error handler, so both write the same
- * protocol.
+ * @brief Appends the start of a payload: the token, the kind, the flags, the size of the fields and the fields that
+ * write_fields appends, which returns the flags. The caller then appends the message. Used by json_logger and by the
+ * error handler, so both write the same protocol.
  */
 template <typename WriteFields>
 void write_payload(spdlog::memory_buf_t &out, const payload_token &token, char kind, const WriteFields &write_fields)
 {
     append(out, std::string_view{token.data(), token.size()});
     out.push_back(kind);
+    const std::size_t flags_at = out.size();
+    out.push_back('0');
     const std::size_t size_at = out.size();
     append(out, std::string_view{"00000000", SIZE_DIGITS});
     const std::size_t fields_at = out.size();
-    write_fields(out);
+    const unsigned flags = write_fields(out);
+    out.data()[flags_at] = static_cast<char>('0' + flags);
     patch_hex_size(out, size_at, out.size() - fields_at);
 }
 
@@ -972,9 +1265,13 @@ inline bool break_down(long long second, bool local, broken_down &out)
  * @brief An spdlog formatter that renders every message as one JSON object.
  *
  * The line holds the header fields chosen in json_options, the call site if source_key is set (as an object, or as
- * three fields with source_flat), the fields of a
- * json_logger call and the message. A payload written by a json_logger is split into fields and message. Any other
- * payload is escaped whole into the message field, so the line is valid JSON whoever logged it.
+ * three fields with source_flat), the fields of a json_logger call and the message. A payload written by a json_logger
+ * is split into fields and message, and its key markers become the exception keys of these options, so a line follows
+ * one set of options however many loggers share the sink. Any other payload is escaped whole into the message field, so
+ * the line is valid JSON whoever logged it.
+ *
+ * Debug builds check that no field of a line has one of its header keys, its source key or its message key, through
+ * JSPDLOG_ASSERT.
  *
  * Like spdlog's own formatters it keeps a timestamp cache and is called under the sink's mutex, so give each sink its
  * own instance. Use install_json_formatter to install it, or call format from a callback sink.
@@ -991,7 +1288,11 @@ inline bool break_down(long long second, bool local, broken_down &out)
 class json_formatter final : public spdlog::formatter
 {
 public:
-    /** @brief Creates a formatter for the given options. */
+    /**
+     * @brief Creates a formatter for the given options. Throws std::invalid_argument when they would write a key twice:
+     * among the header, source, message and error keys, among the call site object's keys, or among the exception
+     * object's keys.
+     */
     explicit json_formatter(json_options options = {})
         : json_formatter(std::move(options), detail::process_token())
     {
@@ -1066,13 +1367,24 @@ public:
         const detail::parsed_payload parsed = detail::parse_payload(payload, token_);
         if (parsed.ours)
         {
-            std::string_view fields = parsed.fields;
-            if (first && !fields.empty())
+            JSPDLOG_ASSERT(
+                !detail::clashes(parsed.fields, reserved_),
+                "jspdlog: a field key equals a header, source or message key"
+            );
+            if (parsed.flags == 0)
             {
-                fields.remove_prefix(1); // The first entry needs no comma.
-                first = false;
+                std::string_view fields = parsed.fields;
+                drop_first_comma_(fields, first);
+                detail::append(dest, fields);
             }
-            detail::append(dest, fields);
+            else if ((parsed.flags & detail::FLAG_EXCEPTION) == 0)
+            {
+                append_fields_marked_(dest, parsed.fields, first);
+            }
+            else
+            {
+                append_fields_with_error_(dest, parsed.fields, first);
+            }
             if (!parsed.message.empty())
             {
                 key(message_key_);
@@ -1104,6 +1416,7 @@ private:
           eol_(opts_.eol.value_or(spdlog::details::os::default_eol)),
           message_key_(quote_key_(opts_.message_key))
     {
+        detail::validate(opts_);
         const auto prepare = [](const std::optional<std::string> &key) {
             return key ? quote_key_(*key) : std::string{};
         };
@@ -1117,6 +1430,31 @@ private:
         source_file_key_ = quote_key_(opts_.source_file_key);
         source_line_key_ = quote_key_(opts_.source_line_key);
         source_function_key_ = quote_key_(opts_.source_function_key);
+        error_key_ = quote_key_(opts_.error_key);
+        error_type_key_ = quote_key_(opts_.error_type_key);
+        error_message_key_ = quote_key_(opts_.error_message_key);
+        error_cause_key_ = quote_key_(opts_.error_cause_key);
+        const auto reserve = [this](const std::string &quoted_key_colon) {
+            if (!quoted_key_colon.empty())
+            {
+                reserved_.emplace_back(quoted_key_colon, 0, quoted_key_colon.size() - 1);
+            }
+        };
+        for (const std::string *key :
+             {&timestamp_key_, &logger_key_, &level_key_, &severity_key_, &process_key_, &thread_key_, &message_key_})
+        {
+            reserve(*key);
+        }
+        if (opts_.source_key && opts_.source_flat)
+        {
+            reserve(source_file_key_);
+            reserve(source_line_key_);
+            reserve(source_function_key_);
+        }
+        else
+        {
+            reserve(source_key_);
+        }
         for (std::size_t i = 0; i < LEVEL_COUNT; ++i)
         {
             const std::string_view name = opts_.level_names
@@ -1149,6 +1487,101 @@ private:
         detail::append_json_quoted(out, key);
         out.push_back(':');
         return out;
+    }
+
+    /** @brief Removes the comma of the first entry of a line, which needs none. */
+    static void drop_first_comma_(std::string_view &fields, bool &first) noexcept
+    {
+        if (first && !fields.empty())
+        {
+            fields.remove_prefix(1);
+            first = false;
+        }
+    }
+
+    /** @brief The key of this sink for the two bytes of a key marker. Unknown bytes stay as they are. */
+    [[nodiscard]] std::string_view key_for_marker_(std::string_view marker) const noexcept
+    {
+        switch (marker[1])
+        {
+        case detail::MARK_ERROR:
+            return error_key_;
+        case detail::MARK_TYPE:
+            return error_type_key_;
+        case detail::MARK_MESSAGE:
+            return error_message_key_;
+        case detail::MARK_CAUSE:
+            return error_cause_key_;
+        default:
+            return marker;
+        }
+    }
+
+    /** @brief Appends fields with every key marker replaced by the key of this sink. */
+    void append_fields_marked_(spdlog::memory_buf_t &dest, std::string_view fields, bool &first) const
+    {
+        drop_first_comma_(fields, first);
+        detail::append_replacing_markers(dest, fields, [this](std::string_view marker) {
+            return key_for_marker_(marker);
+        });
+    }
+
+    /**
+     * @brief Appends the fields of an exception call, whose exception is the only field under the error key.
+     *
+     * The exception takes the position of the first other field with that key, such as a bound one, if there is one,
+     * and keeps its own position otherwise. Other fields with the error key are left out. Fields that are not what
+     * jspdlog writes, or that hold no exception, are appended in their order.
+     */
+    void append_fields_with_error_(spdlog::memory_buf_t &dest, std::string_view fields, bool &first) const
+    {
+        // Mostly no other field has the key, whose text then appears nowhere: the exception stays where it is.
+        if (fields.find(error_key_) == std::string_view::npos)
+        {
+            append_fields_marked_(dest, fields, first);
+            return;
+        }
+        const std::string_view error_key{error_key_.data(), error_key_.size() - 1}; // without the colon
+        detail::field_entry exception;
+        detail::field_entry replaced;
+        detail::field_entry entry;
+        std::string_view rest = fields;
+        while (detail::next_field(rest, entry))
+        {
+            if (exception.text.empty() && is_exception_(entry))
+            {
+                exception = entry;
+            }
+            else if (replaced.text.empty() && entry.key == error_key)
+            {
+                replaced = entry;
+            }
+        }
+        if (!rest.empty() || exception.text.empty())
+        {
+            append_fields_marked_(dest, fields, first);
+            return;
+        }
+        const char *const target = replaced.text.empty() ? exception.text.data() : replaced.text.data();
+        rest = fields;
+        while (detail::next_field(rest, entry))
+        {
+            if (entry.text.data() == target)
+            {
+                append_fields_marked_(dest, exception.text, first);
+            }
+            else if (entry.text.data() != exception.text.data() && entry.key != error_key)
+            {
+                append_fields_marked_(dest, entry.text, first);
+            }
+        }
+    }
+
+    /** @brief Whether a field is the exception of an exception call. */
+    static bool is_exception_(const detail::field_entry &entry) noexcept
+    {
+        return entry.key.size() == detail::MARKER_SIZE && entry.key[0] == detail::MARKER &&
+               entry.key[1] == detail::MARK_ERROR;
     }
 
     /** @brief Appends two decimal digits of a value from 0 to 99. */
@@ -1311,6 +1744,13 @@ private:
     std::string timestamp_key_, logger_key_, level_key_, severity_key_, process_key_, thread_key_, source_key_;
     /** @brief The call site keys, quoted and followed by a colon. */
     std::string source_file_key_, source_line_key_, source_function_key_;
+    /** @brief The exception keys, quoted and followed by a colon, which key markers stand for. */
+    std::string error_key_, error_type_key_, error_message_key_, error_cause_key_;
+    /**
+     * @brief The quoted keys of the line that a field must not repeat: header, source and message keys. Stored in every
+     * build, so the layout does not depend on NDEBUG.
+     */
+    std::vector<std::string> reserved_;
     /** @brief The level names as quoted JSON strings, indexed by level. */
     std::array<std::string, LEVEL_COUNT> level_texts_;
     /** @brief The severity numbers in decimal, indexed by level. */
@@ -1329,7 +1769,8 @@ private:
  * @brief Makes a logger that jspdlog does not wrap write JSON lines.
  *
  * Plain messages become {"message":"..."} with the header fields of the options. Use it on the default logger or on
- * third-party loggers. It replaces the formatter of every sink of the logger.
+ * third-party loggers. It replaces the formatter of every sink of the logger. Throws std::invalid_argument when the
+ * options would write a key twice.
  */
 inline void install_json_formatter(spdlog::logger &logger, const json_options &options = {})
 {
@@ -1346,10 +1787,11 @@ inline void install_json_formatter(spdlog::sinks::sink &sink, const json_options
  * @brief Ready-made json_options for the field names of common log ingestion schemas.
  *
  * A preset is a function that returns a filled json_options, so change any member afterwards. Each one leaves the call
- * site off: set source_key to any text, or to the key the schema names, to turn it on. Exceptions logged through the
- * exception call forms go under the key the schema uses for them. Bind schema fields that are not per call, such as
- * ecs.version, with json_logger::with. The trace context has a form per schema too: ecs_trace_fields, gcp_trace_fields
- * and datadog_trace_fields, while the keys of trace_fields are already OpenTelemetry's.
+ * site off: set source_key to any text, or to the key the schema names, to turn it on. The exception of an exception
+ * call goes under the key the schema uses for it, and every exception object has the member names of the schema. Bind
+ * schema fields that are not per call, such as ecs.version, with json_logger::with. The trace context has a form per
+ * schema too: ecs_trace_fields, gcp_trace_fields and datadog_trace_fields, while the keys of trace_fields are already
+ * OpenTelemetry's.
  *
  * @code
  * auto options = jspdlog::presets::ecs();
@@ -1661,7 +2103,8 @@ struct serializer
  *   a key twice.
  * - std::pair and std::tuple, and maps with other keys (as an array of [key, value] pairs): arrays.
  * - Exceptions (anything derived from std::exception) and std::exception_ptr: an object with the type name and the
- *   message, and the nested causes as a chain under cause. A null std::exception_ptr is null.
+ * message, and the nested causes as a chain. A null std::exception_ptr is null. In a line, the keys of the object are
+ * those of the sink's json_options. A writer that you create, and fields::to_json, write type, message and cause.
  * - Your own types, through jspdlog_serialize or serializer. They win over the exception form.
  *
  * Everything is recursive, so a std::map of std::optional of std::vector of your own type works. Wide characters,
@@ -1731,10 +2174,34 @@ private:
     friend struct detail::writer_access;
     friend class fields;
 
-    /** @brief Creates a writer that appends to spdlog's buffer. Used by json_logger through writer_access. */
+    /**
+     * @brief Creates a writer that appends to spdlog's buffer, with key markers. Used by json_logger through
+     * writer_access.
+     */
     json_writer(spdlog::memory_buf_t &out, int tag) noexcept
-        : out_(out, tag)
+        : out_(out, tag), markers_(true)
     {
+    }
+
+    /**
+     * @brief Writes the key of a member of an exception object, named by the letter of its marker. Where the text goes
+     * to a formatter, it writes the marker; elsewhere the default key.
+     */
+    void exception_key_(char letter)
+    {
+        JSPDLOG_ASSERT(depth_ > 0 && !after_key_, "jspdlog: key outside a container, or two keys in a row");
+        separate_();
+        if (markers_)
+        {
+            out_.push_back(detail::MARKER);
+            out_.push_back(letter);
+            marked_ = true;
+        }
+        else
+        {
+            detail::append(out_, detail::default_exception_key(letter));
+        }
+        after_key_ = true;
     }
 
     /** @brief Writes a comma when a value precedes this one in the same container. */
@@ -1830,6 +2297,13 @@ private:
     int depth_ = 0;
     /** @brief Whether a key was written and its value is still missing. */
     bool after_key_ = false;
+    /**
+     * @brief Whether the text goes into a fields object or to a formatter, which replace key markers. A writer that
+     * user code creates writes no markers.
+     */
+    bool markers_ = false;
+    /** @brief Whether a key marker was written. */
+    bool marked_ = false;
 };
 
 /**
@@ -1845,8 +2319,8 @@ private:
  * it has. A braced list passed to a logging call is not a fields object: it is serialized only when the line is
  * written.
  *
- * A key equal to one of the logger's header keys, to its source key or to its message key produces a duplicate key in
- * the line. Avoiding that is up to the caller; debug builds check it through JSPDLOG_ASSERT.
+ * A key equal to one of the header keys, to the source key or to the message key of a sink produces a duplicate key in
+ * its lines. Avoiding that is up to the caller; debug builds check it through JSPDLOG_ASSERT when a line is written.
  */
 class fields
 {
@@ -1897,6 +2371,8 @@ public:
         {
             return;
         }
+        // Set first: a merge that throws part way keeps the fields it has added, which may hold key markers.
+        marked_ = marked_ || other.marked_;
         for (const entry &e : other.entries_)
         {
             const std::string_view text{other.text_.data() + e.begin, e.size};
@@ -1923,23 +2399,31 @@ public:
         text_.clear();
         entries_.clear();
         keys_.clear();
+        marked_ = false;
     }
 
-    /** @brief Returns the fields as a JSON object in insertion order. An empty set gives {}. */
+    /**
+     * @brief Returns the fields as a JSON object in insertion order. An empty set gives {}. An exception object in it
+     * has the keys type, message and cause, whatever the options of a sink say.
+     */
     [[nodiscard]] std::string to_json() const
     {
-        if (text_.empty())
+        std::string object = object_();
+        if (!marked_)
         {
-            return "{}";
+            return object;
         }
-        std::string out = text_;
-        out.front() = '{';
-        out.push_back('}');
+        std::string out;
+        detail::append_replacing_markers(out, object, [](std::string_view marker) {
+            const std::string_view key = detail::default_exception_key(marker[1]);
+            return key.empty() ? marker : key;
+        });
         return out;
     }
 
 private:
     friend class json_logger;
+    friend struct detail::writer_access;
 
     /** @brief Where one field lies in text_. */
     struct entry
@@ -2041,9 +2525,30 @@ private:
         return entries_.size();
     }
 
-    /** @brief Writes a comma, the quoted key, a colon and the value to a string. A plain key is copied unscanned. */
+    /** @brief The fields as an object, with their key markers. */
+    [[nodiscard]] std::string object_() const
+    {
+        if (text_.empty())
+        {
+            return "{}";
+        }
+        std::string out = text_;
+        out.front() = '{';
+        out.push_back('}');
+        return out;
+    }
+
+#ifdef _MSC_VER
+// A serializer that always throws makes the code after the call unreachable in this function, which C4702 reports.
+#pragma warning(push)
+#pragma warning(disable : 4702)
+#endif
+    /**
+     * @brief Writes a comma, the quoted key, a colon and the value to a string, and returns whether the value holds a
+     * key marker. A plain key is copied unscanned.
+     */
     template <typename T>
-    static void write_field_(std::string &out, std::string_view key, bool plain_key, const T &value)
+    static bool write_field_(std::string &out, std::string_view key, bool plain_key, const T &value)
     {
         out.push_back(',');
         if (plain_key)
@@ -2058,9 +2563,14 @@ private:
         }
         out.push_back(':');
         json_writer w(out);
+        w.markers_ = true;
         w.value(value);
         JSPDLOG_ASSERT(w.complete_(), "jspdlog: a serializer left an object or array open, or wrote no value");
+        return w.marked_;
     }
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
     /** @brief Stores a field from a value. A key that exists keeps its position. */
     template <typename T>
@@ -2070,15 +2580,17 @@ private:
         if (i != entries_.size())
         {
             std::string text;
-            write_field_(text, key, plain_key, value);
+            const bool marked = write_field_(text, key, plain_key, value);
             replace_(i, text);
+            marked_ = marked_ || marked;
             return;
         }
         truncate_guard guard(text_);
         const std::size_t begin = text_.size();
-        write_field_(text_, key, plain_key, value);
+        const bool marked = write_field_(text_, key, plain_key, value);
         add_entry_(begin, key, plain_key);
         guard.release();
+        marked_ = marked_ || marked;
     }
 
     /** @brief Stores a field whose text is ready. A key that exists keeps its position. */
@@ -2149,6 +2661,8 @@ private:
     std::vector<entry> entries_;
     /** @brief Raw keys that needed escaping, so lookups compare raw keys. Usually empty. */
     std::string keys_;
+    /** @brief Whether text_ may hold key markers. It stays set when the field that had one is replaced. */
+    bool marked_ = false;
 };
 
 namespace detail
@@ -2297,11 +2811,24 @@ struct writer_access
     {
         w.floating_(number);
     }
-    /** @brief Writes fields as an object. */
-    static void object(json_writer &w, const fields &f) { w.scalar_(f.to_json()); }
+    /** @brief Writes fields as an object, keeping its key markers where the writer's text goes to a formatter. */
+    static void object(json_writer &w, const fields &f)
+    {
+        if (!w.markers_)
+        {
+            w.scalar_(f.to_json());
+            return;
+        }
+        w.scalar_(f.object_()); // a copy: the writer may append to the string that holds the text of f
+        w.marked_ = w.marked_ || f.marked_;
+    }
+    /** @brief Writes the key of a member of an exception object. */
+    static void exception_key(json_writer &w, char letter) { w.exception_key_(letter); }
     /** @brief Whether exactly one value was written and nothing is left open. */
     static bool complete(const json_writer &w) noexcept { return w.complete_(); }
-    /** @brief Creates a writer that appends to spdlog's buffer. */
+    /** @brief Whether a key marker was written. */
+    static bool marked(const json_writer &w) noexcept { return w.marked_; }
+    /** @brief Creates a writer that appends to spdlog's buffer, with key markers. */
     static json_writer to_buffer(spdlog::memory_buf_t &out) noexcept { return {out, 0}; }
 };
 
@@ -2583,15 +3110,6 @@ std::string_view char_array_view(const A &array) noexcept
     return std::string_view{std::begin(array), static_cast<std::size_t>(end - std::begin(array))};
 }
 
-/** @brief The keys of an exception object. The value-type form uses the defaults; the call forms use json_options. */
-struct exception_keys
-{
-    /** @brief Key of the type name. */
-    std::string_view type = "type";
-    /** @brief Key of the message. */
-    std::string_view message = "message";
-};
-
 /** @brief How many nested causes are written at most. Deeper ones are left out. */
 inline constexpr int MAX_EXCEPTION_DEPTH = 8;
 
@@ -2658,6 +3176,15 @@ inline std::string exception_type_name(const std::exception &ex)
 #endif
 }
 
+/** @brief Writes an exception that is not a std::exception, of which only that is known. */
+inline void write_unknown_exception(json_writer &w)
+{
+    w.begin_object();
+    writer_access::exception_key(w, MARK_TYPE);
+    writer_access::string(w, "unknown");
+    w.end_object();
+}
+
 /**
  * @brief Writes an exception as an object with its type and message, and its nested causes as a chain.
  *
@@ -2665,13 +3192,13 @@ inline std::string exception_type_name(const std::exception &ex)
  * cause member: std::rethrow_if_nested would call std::terminate for it.
  */
 // NOLINTNEXTLINE(misc-no-recursion): the recursion stops at MAX_EXCEPTION_DEPTH
-inline void write_exception(json_writer &w, const std::exception &ex, const exception_keys &keys, int depth = 0)
+inline void write_exception(json_writer &w, const std::exception &ex, int depth = 0)
 {
     w.begin_object();
-    w.key(keys.type);
+    writer_access::exception_key(w, MARK_TYPE);
     writer_access::string(w, exception_type_name(ex));
     const char *what = ex.what();
-    w.key(keys.message);
+    writer_access::exception_key(w, MARK_MESSAGE);
     writer_access::string(w, std::string_view{what != nullptr ? what : ""});
 #if JSPDLOG_HAS_EXCEPTIONS && JSPDLOG_HAS_RTTI
     const auto *nested = dynamic_cast<const std::nested_exception *>(&ex);
@@ -2683,16 +3210,13 @@ inline void write_exception(json_writer &w, const std::exception &ex, const exce
         }
         catch (const std::exception &cause)
         {
-            w.key("cause");
-            write_exception(w, cause, keys, depth + 1);
+            writer_access::exception_key(w, MARK_CAUSE);
+            write_exception(w, cause, depth + 1);
         }
         catch (...)
         {
-            w.key("cause");
-            w.begin_object();
-            w.key(keys.type);
-            writer_access::string(w, "unknown");
-            w.end_object();
+            writer_access::exception_key(w, MARK_CAUSE);
+            write_unknown_exception(w);
         }
     }
 #else
@@ -2702,7 +3226,7 @@ inline void write_exception(json_writer &w, const std::exception &ex, const exce
 }
 
 /** @brief Writes the exception behind a pointer like write_exception, or null for a null pointer. */
-inline void write_exception_ptr(json_writer &w, const std::exception_ptr &p, const exception_keys &keys)
+inline void write_exception_ptr(json_writer &w, const std::exception_ptr &p)
 {
     if (!p)
     {
@@ -2716,33 +3240,14 @@ inline void write_exception_ptr(json_writer &w, const std::exception_ptr &p, con
     }
     catch (const std::exception &ex)
     {
-        write_exception(w, ex, keys);
+        write_exception(w, ex);
         return;
     }
     catch (...) // NOLINT(bugprone-empty-catch): an exception of another type is written as unknown below
     {
     }
 #endif
-    w.begin_object();
-    w.key(keys.type);
-    writer_access::string(w, "unknown");
-    w.end_object();
-}
-
-/** @brief The exception of an exception call form and the keys to write it with. Lives on the caller's stack. */
-struct exception_arg
-{
-    /** @brief The exception. */
-    const std::exception *ex = nullptr;
-    /** @brief The keys of its object. */
-    exception_keys keys;
-};
-
-/** @brief Writes the exception_arg behind a pointer. It has the type of a per-call reference's writer function. */
-inline void write_exception_arg(json_writer &w, const void *p)
-{
-    const auto &arg = *static_cast<const exception_arg *>(p);
-    write_exception(w, *arg.ex, arg.keys);
+    write_unknown_exception(w);
 }
 
 /**
@@ -2840,11 +3345,11 @@ void write_value(json_writer &w, const T &v)
     }
     else if constexpr (std::is_base_of_v<std::exception, value_type>)
     {
-        write_exception(w, v, exception_keys{});
+        write_exception(w, v);
     }
     else if constexpr (std::is_same_v<value_type, std::exception_ptr>)
     {
-        write_exception_ptr(w, v, exception_keys{});
+        write_exception_ptr(w, v);
     }
     else if constexpr (std::is_convertible_v<const value_type &, std::string_view>)
     {
@@ -2931,62 +3436,6 @@ void json_writer::value(const T &v)
 
 namespace detail
 {
-
-/**
- * @brief The keys a logger writes itself, to find field keys that would duplicate them.
- *
- * It is stored in every build, so the layout of json_logger does not depend on NDEBUG.
- */
-class reserved_keys
-{
-public:
-    /** @brief Creates an empty list. */
-    reserved_keys() = default;
-
-    /** @brief Collects the enabled header keys, the call site keys and the message key. */
-    explicit reserved_keys(const json_options &options)
-    {
-        const auto add = [this](const std::optional<std::string> &key) {
-            if (key)
-            {
-                keys_.push_back(*key);
-            }
-        };
-        add(options.timestamp_key);
-        add(options.logger_key);
-        add(options.level_key);
-        add(options.severity_key);
-        add(options.process_key);
-        add(options.thread_key);
-        if (options.source_key && options.source_flat)
-        {
-            keys_.push_back(options.source_file_key);
-            keys_.push_back(options.source_line_key);
-            keys_.push_back(options.source_function_key);
-        }
-        else
-        {
-            add(options.source_key);
-        }
-        keys_.push_back(options.message_key);
-    }
-
-    /** @brief Whether any key of the fields is one of the reserved keys. Only top-level keys are compared. */
-    [[nodiscard]] bool clashes_with(const fields &f) const noexcept
-    {
-        return std::any_of(keys_.begin(), keys_.end(), [&f](const std::string &key) { return f.contains(key); });
-    }
-
-    /** @brief Whether the key is one of the reserved keys. */
-    [[nodiscard]] bool is_reserved(std::string_view key) const noexcept
-    {
-        return std::any_of(keys_.begin(), keys_.end(), [key](const std::string &reserved) { return reserved == key; });
-    }
-
-private:
-    /** @brief The reserved keys. */
-    std::vector<std::string> keys_;
-};
 
 /**
  * @brief A call site, filled in by default arguments at the caller.
@@ -3181,6 +3630,13 @@ public:
     /** @brief The key of a reference. */
     [[nodiscard]] std::string_view key(std::size_t i) const noexcept { return refs_[i].key; }
 
+    /** @brief What writing the fields of one line found out. */
+    struct write_state
+    {
+        /** @brief Whether a key marker was written. */
+        bool marked = false;
+    };
+
     /**
      * @brief One key and value of a braced list, or the exception of an exception call.
      *
@@ -3189,30 +3645,35 @@ public:
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init,hicpp-member-init)
     struct ref
     {
-        /** @brief The key, viewed in place. */
+        /** @brief The key, viewed in place. Empty for the exception, whose key only the formatter knows. */
         std::string_view key;
         /** @brief The value, which the braced list owns. */
         const void *value;
         /** @brief Writes the whole field, with the type of the value restored: see write_item. */
-        void (*write)(spdlog::memory_buf_t &, const ref &);
+        void (*write)(spdlog::memory_buf_t &, const ref &, write_state &);
     };
 
     /** @brief The reference at index i. */
     [[nodiscard]] const ref &at(std::size_t i) const noexcept { return refs_[i]; }
 
     /**
-     * @brief Appends a reference as a field: a comma, the quoted key, a colon and the serialized value. This runs the
-     * serializer of the value, so it throws what the serializer throws.
+     * @brief Appends a reference as a field: a comma, the key and the serialized value. This runs the serializer of the
+     * value, so it throws what the serializer throws.
      */
-    static void append_ref(spdlog::memory_buf_t &out, const ref &r) { r.write(out, r); }
+    static void append_ref(spdlog::memory_buf_t &out, const ref &r, write_state &state) { r.write(out, r, state); }
 
+#ifdef _MSC_VER
+// A lazy value that always throws makes the code after the call unreachable in these functions, which C4702 reports.
+#pragma warning(push)
+#pragma warning(disable : 4702)
+#endif
     /**
      * @brief The function a reference stores to write its field. Value writes the value from its pointer; Plain says
      * that the key needs no escaping, so it is copied between quotes without a scan. Whether the key is plain is part
      * of the function, so a reference needs no flag, which keeps a braced list small and cheap to build.
      */
     template <void (*Value)(json_writer &, const void *), bool Plain>
-    static void write_item(spdlog::memory_buf_t &out, const ref &r)
+    static void write_item(spdlog::memory_buf_t &out, const ref &r, write_state &state)
     {
         out.push_back(',');
         if constexpr (Plain)
@@ -3231,14 +3692,10 @@ public:
         JSPDLOG_ASSERT(
             writer_access::complete(w), "jspdlog: a serializer left an object or array open, or wrote no value"
         );
+        state.marked = state.marked || writer_access::marked(w);
     }
 
 private:
-#ifdef _MSC_VER
-// A lazy value that always throws makes the code after the call unreachable in this function, which C4702 reports.
-#pragma warning(push)
-#pragma warning(disable : 4702)
-#endif
     /**
      * @brief Serializes the value behind a pointer of type V, or runs it first when it is a lazy value and writes what
      * it returns.
@@ -3291,6 +3748,20 @@ private:
     /** @brief The number of entries of refs_ in use. */
     std::size_t size_ = 0;
 };
+
+/**
+ * @brief Writes the exception of an exception call as a field: a comma, the marker of the error key and the exception
+ * object. The value of the reference is the std::exception.
+ */
+inline void write_exception_field(spdlog::memory_buf_t &out, const call_fields::ref &r, call_fields::write_state &state)
+{
+    out.push_back(',');
+    out.push_back(MARKER);
+    out.push_back(MARK_ERROR);
+    json_writer w = writer_access::to_buffer(out);
+    write_exception(w, *static_cast<const std::exception *>(r.value));
+    state.marked = true;
+}
 
 } // namespace detail
 
@@ -3362,12 +3833,12 @@ using format_here_t = basic_format_here<typename detail::type_identity<Args>::ty
  * logger.info({"plan", [&] { return explain(q); }}, "planned");  // a lazy value
  * @endcode
  *
- * Each level also has six call forms that take a std::exception first, with the same endings: no message, a message
- * or a format string, and each with fields too. They write the exception as the first per-call field, under
- * json_options::error_key, as an object with its type name and message, and its nested causes under cause. The
- * exception is written only when the line is, so a call at a disabled level computes nothing. A per-call field with
- * the error key is a mistake that debug builds report through JSPDLOG_ASSERT; a bound field with that key is replaced
- * by the exception.
+ * Each level also has six call forms that take a std::exception first, with the same endings: no message, a message or
+ * a format string, and each with fields too. They write the exception under json_options::error_key, as an object with
+ * its type name and message, and its nested causes under json_options::error_cause_key. It is the only field with that
+ * key. If there are other fields with the key, bound or of the call, it takes the position of the first of them and
+ * they are all left out. Otherwise it comes after the bound fields and before the new fields of the call. The exception
+ * is written only when the line is, so a call at a disabled level computes nothing.
  *
  * @code
  * try { connect(); }
@@ -3394,39 +3865,40 @@ using format_here_t = basic_format_here<typename detail::type_identity<Args>::ty
  * message. A key that appears again, in an inner logger or in a call, replaces the value and stays where it first
  * appeared.
  *
- * The constructors and adopt install a json_formatter on every sink of the spdlog::logger. A sink shared with another
- * json_logger works; the options of the logger created last apply to both. A sink added to the spdlog::logger later, or
- * shared with a plain spdlog logger, needs install_json_formatter to get JSON lines. Like spdlog, the logging calls do
- * not throw: an exception from a user formatter goes to the spdlog::logger's error handler and the line is dropped.
+ * The options belong to the sinks. The constructors and adopt install a json_formatter with the given options on every
+ * sink of the spdlog::logger, replacing what was there, and throw std::invalid_argument when the options would write a
+ * key twice. So on a sink shared with another json_logger the options of the logger created last apply to both, to
+ * every part of their lines. attach wraps a logger without installing anything, for sinks that were set up with
+ * install_json_formatter. A sink added to the spdlog::logger later, or shared with a plain spdlog logger, needs
+ * install_json_formatter to get JSON lines. Like spdlog, the logging calls do not throw: an exception from a user
+ * formatter goes to the spdlog::logger's error handler and the line is dropped.
  *
  * A serializer that throws, or a lazy value that does, fails while the line is written: the exception goes to the
  * error handler and the line is dropped.
  *
- * A json_logger and the formatter it installs agree on the payload token, so they work together even when the logger
- * is used from another module than the one that installed the formatter. Mixing a formatter installed by one module
- * with a json_logger of another module on one sink is not supported on platforms where each module has its own token,
- * such as Windows DLLs: the line stays valid JSON, but the fields appear inside the message.
- *
- * Debug builds check that no field key equals a header key, the source key or the message key of this logger, through
- * JSPDLOG_ASSERT. The keys of the options this logger was created with are used, even when a shared sink writes with
- * the options of another logger.
+ * A json_logger and the formatter it installs agree on the payload token, so they work together even when the logger is
+ * used from another module than the one that installed the formatter. Mixing a formatter installed by one module with a
+ * json_logger of another module on one sink, which includes attach in another module than the one that installed the
+ * formatter, is not supported on platforms where each module has its own token, such as Windows DLLs: the line stays
+ * valid JSON, but the fields appear inside the message.
  */
 class json_logger
 {
 public:
-    /** @brief Creates a logger writing to one sink. Throws std::invalid_argument if the sink is null. */
+    /** @brief Creates a logger writing to one sink. Throws std::invalid_argument if the sink is null or the options
+     * would write a key twice. */
     json_logger(std::string name, spdlog::sink_ptr sink, const json_options &options = {})
         : json_logger(make_logger_(std::move(name), std::move(sink)), options)
     {
     }
 
-    /** @brief Creates a logger writing to several sinks. Throws std::invalid_argument if any sink is null. */
+    /** @brief Creates a logger writing to several sinks. Throws like the constructor for one sink. */
     json_logger(std::string name, spdlog::sinks_init_list sinks, const json_options &options = {})
         : json_logger(std::move(name), sinks.begin(), sinks.end(), options)
     {
     }
 
-    /** @brief Creates a logger writing to a range of sinks. Throws std::invalid_argument if any sink is null. */
+    /** @brief Creates a logger writing to a range of sinks. Throws like the constructor for one sink. */
     template <
         typename It,
         std::enable_if_t<std::is_constructible_v<spdlog::sink_ptr, typename std::iterator_traits<It>::reference>, int> =
@@ -3441,7 +3913,7 @@ public:
      *
      * The formatter of the logger's sinks is replaced by a json_formatter, which affects everyone using that
      * spdlog::logger or those sinks. Its level and error handler stay as they are. Throws std::invalid_argument if the
-     * logger is null.
+     * logger is null or the options would write a key twice.
      */
     [[nodiscard]] static json_logger adopt(std::shared_ptr<spdlog::logger> logger, const json_options &options = {})
     {
@@ -3453,17 +3925,43 @@ public:
     }
 
     /**
+     * @brief Wraps an spdlog::logger whose sinks already have a json_formatter, without touching them.
+     *
+     * Use it when sinks are set up once with install_json_formatter and shared by several loggers, each sink with its
+     * own options. A sink without a json_formatter writes the payload protocol, as after set_pattern. Throws
+     * std::invalid_argument if the logger is null.
+     *
+     * @code
+     * jspdlog::install_json_formatter(*file, jspdlog::presets::ecs());
+     * jspdlog::install_json_formatter(*console, jspdlog::presets::gcp());
+     * auto db = jspdlog::json_logger::attach(
+     *     std::make_shared<spdlog::logger>("db", spdlog::sinks_init_list{file, console})
+     * );
+     * @endcode
+     */
+    [[nodiscard]] static json_logger attach(std::shared_ptr<spdlog::logger> logger)
+    {
+        if (!logger)
+        {
+            throw std::invalid_argument("jspdlog: attach() requires a non-null logger");
+        }
+        return {std::move(logger), attach_tag{}};
+    }
+
+    /**
      * @brief Returns a child logger that adds f to every line it writes.
      *
      * The child shares this logger's spdlog::logger and keeps this logger's bound fields. Where both have a key, the
      * value from f wins and the key keeps its position. This logger is not changed, and the child's fields are
-     * immutable, so any number of threads can log through the child, this logger and their copies at once.
+     * immutable, so any number of threads can log through the child, this logger and their copies at once. With an
+     * empty f the child is a copy of this logger and shares its fields.
      */
     [[nodiscard]] json_logger with(const fields &f) const
     {
-        JSPDLOG_ASSERT(
-            !context_->reserved.clashes_with(f), "jspdlog: a field key equals a header, source or message key"
-        );
+        if (f.empty())
+        {
+            return *this;
+        }
         auto ctx = std::make_shared<context_data>(*context_);
         ctx->values.merge(f);
         json_logger child = *this;
@@ -3523,8 +4021,8 @@ public:
     }
 
     /**
-     * @brief Writes an exception under json_options::error_key, with fields if given and without a message. The fields
-     * have a default and are not a separate overload, so a braced list cannot be taken for the call site.
+     * @brief Writes an exception under the error key of the sink, with fields if given and without a message. The
+     * fields have a default and are not a separate overload, so a braced list cannot be taken for the call site.
      */
     template <typename E, detail::if_exception<E> = 0>
     void log(
@@ -3658,41 +4156,39 @@ public:
 private:
     friend struct detail::logger_access;
 
-    /** @brief What a logger and its copies share: the bound fields and what is derived from them. Immutable. */
+    /** @brief What a logger and its copies share. Immutable. */
     struct context_data
     {
         /** @brief The bound fields. */
         fields values;
-        /** @brief The token that starts every payload, the same as in the formatter this logger installed. */
+        /** @brief The token of the payloads, the same as in the formatter this logger installed. */
         detail::payload_token token{};
-        /** @brief The keys the logger writes itself, for the debug check. */
-        detail::reserved_keys reserved;
-        /** @brief Where an exception of an exception call form goes: its key and the keys inside its object. */
-        struct error_keys_data
-        {
-            /** @brief Key of the exception object. */
-            std::string key;
-            /** @brief Key of the type name inside it. */
-            std::string type;
-            /** @brief Key of the message inside it. */
-            std::string message;
-        } errors;
     };
+
+    /** @brief Selects the constructor that leaves the formatters of the sinks as they are. */
+    struct attach_tag
+    {
+        explicit attach_tag() = default;
+    };
+
+    /** @brief Wraps a logger that is known not to be null. */
+    json_logger(std::shared_ptr<spdlog::logger> logger, attach_tag /*tag*/)
+        : logger_(std::move(logger)), context_(make_context_())
+    {
+    }
 
     /** @brief Installs a json_formatter on a logger that is known not to be null. */
     json_logger(std::shared_ptr<spdlog::logger> logger, const json_options &options)
-        : logger_(std::move(logger)), context_(make_context_(options))
+        : json_logger(std::move(logger), attach_tag{})
     {
         logger_->set_formatter(std::unique_ptr<spdlog::formatter>(new json_formatter(options, context_->token)));
     }
 
     /** @brief Creates the empty context of a root logger. */
-    static std::shared_ptr<const context_data> make_context_(const json_options &options)
+    static std::shared_ptr<const context_data> make_context_()
     {
         auto ctx = std::make_shared<context_data>();
         ctx->token = detail::process_token();
-        ctx->reserved = detail::reserved_keys(options);
-        ctx->errors = {options.error_key, options.error_type_key, options.error_message_key};
         return ctx;
     }
 
@@ -3798,63 +4294,59 @@ private:
     }
 
     /**
-     * @brief Appends the bound fields and the per-call fields, serializing each per-call value that is written.
+     * @brief Appends the bound fields, the exception of an exception call and the per-call fields, serializing each
+     * per-call value that is written.
      *
-     * The per-call items are, in order, an optional leading reference (the exception of an exception call) and then
-     * the entries of a fields object or the references of a braced list. A per-call item with the key of a bound field
-     * replaces its value at the bound field's position, and a key that appears twice among the items takes the last
-     * value at the first position. Only the last value of a repeated key is serialized, so an earlier one is never run.
-     * The cost is quadratic in the number of items, at most call_fields::CAPACITY plus one.
+     * The per-call items are the entries of a fields object or the references of a braced list. A per-call item with
+     * the key of a bound field replaces its value at the bound field's position, and a key that appears twice among the
+     * items takes the last value at the first position. Only the last value of a repeated key is serialized, so an
+     * earlier one is never run. The exception goes before the first per-call item with a new key. Its key is a marker,
+     * so the formatter decides which fields have the same one. The cost is quadratic in the number of items, which a
+     * braced list limits to call_fields::CAPACITY.
      */
     void append_props_(
-        spdlog::memory_buf_t &out, const detail::call_fields &props, const detail::call_fields::ref *leading
+        spdlog::memory_buf_t &out,
+        const detail::call_fields &props,
+        const detail::call_fields::ref *exception,
+        detail::call_fields::write_state &state
     ) const
     {
         const context_data &ctx = *context_;
         const fields *named = props.named();
-        if (leading == nullptr && (named != nullptr ? named->empty() : props.size() == 0))
+        // A marked field that a per-call one replaces still counts: the formatter then only looks for markers in vain.
+        state.marked = ctx.values.marked_ || (named != nullptr && named->marked_);
+        const std::size_t count = named != nullptr ? named->entries_.size() : props.size();
+        // Inside the deferred writer, so a serializer that throws reaches spdlog's error handler.
+        const auto append_exception = [&] {
+            if (exception != nullptr)
+            {
+                detail::call_fields::append_ref(out, *exception, state);
+            }
+        };
+        if (count == 0)
         {
             detail::append(out, ctx.values.text_);
+            append_exception();
             return;
         }
-        const std::size_t first = leading != nullptr ? 1 : 0;
-        const std::size_t count = first + (named != nullptr ? named->entries_.size() : props.size());
-        const auto key_of = [&](std::size_t i) -> std::string_view {
-            if (i < first)
-            {
-                return leading->key;
-            }
-            return named != nullptr ? named->key_of_(named->entries_[i - first]) : props.key(i - first);
-        };
-        // Inside the deferred writer, so a handler that throws reaches spdlog's error handler.
-        for (std::size_t i = 0; i < count; ++i)
-        {
-            JSPDLOG_ASSERT(
-                !ctx.reserved.is_reserved(key_of(i)), "jspdlog: a field key equals a header, source or message key"
-            );
-            JSPDLOG_ASSERT(
-                leading == nullptr || i < first || key_of(i) != leading->key,
-                "jspdlog: a field key equals the error key of an exception call"
-            );
-        }
-        if (leading == nullptr && named != nullptr && ctx.values.empty())
+        if (named != nullptr && ctx.values.empty())
         {
             // A fields object has distinct keys, so with nothing bound its text is the whole list.
+            append_exception();
             detail::append(out, named->text_);
             return;
         }
+        const auto key_of = [&](std::size_t i) -> std::string_view {
+            return named != nullptr ? named->key_of_(named->entries_[i]) : props.key(i);
+        };
         const auto append_item = [&](std::size_t i) {
-            if (i < first)
+            if (named != nullptr)
             {
-                detail::call_fields::append_ref(out, *leading);
-            }
-            else if (named != nullptr)
-            {
-                detail::append(out, named->text_of_(i - first));
+                detail::append(out, named->text_of_(i));
             }
             else
             {
-                detail::call_fields::append_ref(out, props.at(i - first));
+                detail::call_fields::append_ref(out, props.at(i), state);
             }
         };
         const auto last_with_key = [&](std::string_view k) {
@@ -3889,6 +4381,7 @@ private:
                 append_item(over);
             }
         }
+        append_exception();
         for (std::size_t i = 0; i < count; ++i)
         {
             if (!ctx.values.contains(key_of(i)) && !repeats_earlier(i))
@@ -3899,15 +4392,12 @@ private:
     }
 
     /**
-     * @brief Logs a payload: the token, the kind, the size of the fields, the bound and per-call fields and then what
-     * write_message appends. spdlog runs the serialization while it formats the line, inside its error handling, so
-     * the values of a braced list are serialized here and only when the line is written.
+     * @brief Logs a payload: the token, the kind, the flags, the size of the fields, the bound and per-call fields and
+     * then what write_message appends. spdlog runs the serialization while it formats the line, inside its error
+     * handling, so the values of a braced list are serialized here and only when the line is written.
      *
-     * The fields are an already escaped list, each entry starting with a comma. The exception of an exception call
-     * comes first among the per-call fields. A per-call field with the key of a bound field replaces its value at the
-     * bound field's position, and a key that appears twice in one braced list takes the last value at the first
-     * position, as in a fields object. The message is appended as a quoted JSON
-     * string, so it is escaped once however many sinks the logger has.
+     * The fields are an already escaped list, each entry starting with a comma, in the order append_props_ gives. The
+     * message is appended as a quoted JSON string, so it is escaped once however many sinks the logger has.
      */
     template <typename WriteMessage>
     void emit_(
@@ -3924,13 +4414,10 @@ private:
             detail::write_payload(out, ctx.token, kind, [&](spdlog::memory_buf_t &fields_out) {
                 // The exception is held by reference and written here, when the line is, so a disabled level computes
                 // nothing and an exception from writing it reaches the error handler.
-                const detail::exception_arg arg{ex, {ctx.errors.type, ctx.errors.message}};
-                const detail::call_fields::ref leading{
-                    ctx.errors.key,
-                    &arg,
-                    &detail::call_fields::write_item<&detail::write_exception_arg, false>,
-                };
-                append_props_(fields_out, props, ex != nullptr ? &leading : nullptr);
+                const detail::call_fields::ref exception{{}, ex, &detail::write_exception_field};
+                detail::call_fields::write_state state;
+                append_props_(fields_out, props, ex != nullptr ? &exception : nullptr, state);
+                return (state.marked ? detail::FLAG_MARKERS : 0U) | (ex != nullptr ? detail::FLAG_EXCEPTION : 0U);
             });
             write_message(out);
         };
@@ -4234,6 +4721,7 @@ public:
                 append(out, std::string_view{",\"dropped\":"});
                 append_int(out, earlier);
             }
+            return 0U; // no flags: the report has no key markers
         });
         append_json_quoted(payload, what);
         const spdlog::details::log_msg msg(
@@ -4290,7 +4778,8 @@ private:
  *
  * Reports closer together than min_interval are not written; the next one carries their number as dropped. The state
  * lives in the returned handler and its copies, which share it, so there is no global state. A thread-pool worker or
- * async_sink thread may call the handler, and a mutex of its own serializes them.
+ * async_sink thread may call the handler, and a mutex of its own serializes them. Making the handler throws
+ * std::invalid_argument when the options of the report would write a key twice.
  *
  * @code
  * logger.spdlog_logger()->set_error_handler(jspdlog::make_error_handler(logger.name()));

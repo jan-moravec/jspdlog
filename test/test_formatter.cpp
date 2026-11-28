@@ -12,6 +12,7 @@
 #include <chrono>
 #include <limits>
 #include <regex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -75,18 +76,23 @@ TEST_CASE("formatter: payloads that imitate jspdlog are escaped", "[formatter]")
     const auto &token = jspdlog::detail::process_token();
     const std::string t(token.data(), token.size());
     const std::vector<std::string> fakes = {
-        t.substr(0, 31),                                              // token prefix only
-        t + "M",                                                      // header cut short
-        t + R"(Mzzzzzzzz,"a":1"m")",                                  // size not hex
-        t + R"(MFFFFFFFF,"a":1"m")",                                  // size not lowercase hex
-        t + "M00000010,\"a\":1",                                      // size past the end
-        t + "M00000006,\"a\":1",                                      // message kind without a message
-        t + "F00000001,\"a\":1",                                      // F with trailing bytes
-        t + "X00000006,\"a\":1",                                      // unknown kind
-        t + "M00000000x",                                             // message not quoted
-        t + "M00000000\"x",                                           // message without a closing quote
-        t + "F00000004\"a\":",                                        // fields without a leading comma
-        std::string("jspdlog:") + std::string(24, 'A') + "F00000000", // wrong token
+        t.substr(0, 31),                                               // token prefix only
+        t + "M",                                                       // header cut short
+        t + "M0",                                                      // header cut short after the flags
+        t + R"(M0zzzzzzzz,"a":1"m")",                                  // size not hex
+        t + R"(M0FFFFFFFF,"a":1"m")",                                  // size not lowercase hex
+        t + R"(M400000006,"a":1"m")",                                  // flags past the known bits
+        t + R"(Ma00000006,"a":1"m")",                                  // flags past the known bits, as a letter
+        t + R"(MA00000006,"a":1"m")",                                  // flags not lowercase hex
+        t + R"(Mx00000006,"a":1"m")",                                  // flags not hex
+        t + "M000000010,\"a\":1",                                      // size past the end
+        t + "M000000006,\"a\":1",                                      // message kind without a message
+        t + "F000000001,\"a\":1",                                      // F with trailing bytes
+        t + "X000000006,\"a\":1",                                      // unknown kind
+        t + "M000000000x",                                             // message not quoted
+        t + "M000000000\"x",                                           // message without a closing quote
+        t + "F000000004\"a\":",                                        // fields without a leading comma
+        std::string("jspdlog:") + std::string(24, 'A') + "F000000000", // wrong token
     };
     for (const std::string &fake : fakes)
     {
@@ -383,7 +389,7 @@ TEST_CASE("formatter: clone keeps the options and the token", "[formatter]")
     const auto copy = formatter.clone();
     const auto &token = jspdlog::detail::process_token();
     std::string payload(token.data(), token.size());
-    payload += R"(M00000006,"k":1"m")";
+    payload += R"(M000000006,"k":1"m")";
     const spdlog::details::log_msg msg("name", jspdlog::level::info, payload);
     spdlog::memory_buf_t buf;
     copy->format(msg, buf);
@@ -394,8 +400,213 @@ TEST_CASE("formatter: a payload with fields but no message", "[formatter]")
 {
     jspdlog::json_formatter formatter(no_header_options());
     const auto &token = jspdlog::detail::process_token();
-    const std::string payload = std::string(token.data(), token.size()) + "F00000006,\"k\":1";
+    const std::string payload = std::string(token.data(), token.size()) + "F000000006,\"k\":1";
     CHECK(format_payload(formatter, payload) == "{\"k\":1}\n");
+}
+
+namespace
+{
+
+// A payload of this process with the given flags digit and fields, and no message.
+std::string payload_of(char flags, const std::string &fields)
+{
+    static constexpr char HEX_DIGITS[] = "0123456789abcdef";
+    const auto &token = jspdlog::detail::process_token();
+    std::string payload(token.data(), token.size());
+    payload += 'F';
+    payload += flags;
+    for (int shift = 28; shift >= 0; shift -= 4)
+    {
+        payload += HEX_DIGITS[(fields.size() >> static_cast<unsigned>(shift)) & 0xFU];
+    }
+    return payload + fields;
+}
+
+jspdlog::json_options renamed_exception_keys()
+{
+    jspdlog::json_options opts = no_header_options();
+    opts.error_key = "E";
+    opts.error_type_key = "T\"";
+    opts.error_message_key = "M";
+    opts.error_cause_key = "C";
+    return opts;
+}
+
+} // namespace
+
+TEST_CASE("formatter: key markers become the exception keys of the sink", "[formatter]")
+{
+    jspdlog::json_formatter formatter(renamed_exception_keys());
+    const std::string fields = ",\x01"
+                               "E{\x01"
+                               "T1,\x01"
+                               "M2,\x01"
+                               "C{\x01"
+                               "T3}}";
+    // MSVC 19.44 mis-stringifies raw strings with backslashes inside Catch2 macros.
+    const std::string expected = R"({"E":{"T\"":1,"M":2,"C":{"T\"":3}}})"
+                                 "\n";
+    CHECK(format_payload(formatter, payload_of('1', fields)) == expected);
+    CHECK(format_payload(formatter, payload_of('3', fields)) == expected);
+}
+
+TEST_CASE("formatter: markers are not replaced in a payload without the flag", "[formatter]")
+{
+    jspdlog::json_formatter formatter(renamed_exception_keys());
+    const std::string fields = ",\"a\":{\x01"
+                               "T1}";
+    CHECK(format_payload(formatter, payload_of('0', fields)) == "{" + fields.substr(1) + "}\n");
+}
+
+TEST_CASE("formatter: a damaged payload with the real token does not break the formatter", "[formatter]")
+{
+    // Only corrupted memory or a fuzzer gives these. The line need not be valid JSON, but every byte is accounted for.
+    jspdlog::json_formatter formatter(renamed_exception_keys());
+    SECTION("a marker cut short at the end of the fields")
+    {
+        const std::string fields = ",\"a\":1,\x01";
+        for (const char flags : {'1', '2', '3'})
+        {
+            CHECK(format_payload(formatter, payload_of(flags, fields)) == "{\"a\":1,\x01}\n");
+        }
+    }
+    SECTION("an unknown marker letter")
+    {
+        const std::string fields = ",\x01Z1,\x01"
+                                   "E2";
+        CHECK(format_payload(formatter, payload_of('1', fields)) == "{\x01Z1,\"E\":2}\n");
+        CHECK(format_payload(formatter, payload_of('3', fields)) == "{\x01Z1,\"E\":2}\n");
+    }
+    SECTION("fields that end inside a key or a value")
+    {
+        for (const std::string fields :
+             {",", ",\"", ",\"a", ",\"a\"", ",\"a\":", R"(,"a":"b)", R"(,"a":"b\)", R"(,"a":[{"b":1)", ",\x01"})
+        {
+            for (const char flags : {'0', '1', '2', '3'})
+            {
+                CHECK(format_payload(formatter, payload_of(flags, fields)) == "{" + fields.substr(1) + "}\n");
+            }
+        }
+    }
+    SECTION("damaged fields next to the error key keep their order")
+    {
+        // The error key appears, so the fields are walked. The walk cannot finish, and nothing moves.
+        for (const std::string tail : {",", ",x", ",x:1", ",\x01", ",\"a\"", ",\"a\":", ",\"a\":[1"})
+        {
+            std::string fields = ",\x01"
+                                 "E2,\"E\":1";
+            fields.append(tail);
+            std::string expected = R"({"E":2,"E":1)";
+            expected.append(tail).append("}\n");
+            CHECK(format_payload(formatter, payload_of('3', fields)) == expected);
+        }
+    }
+    SECTION("another marker where a key stands")
+    {
+        const std::string fields = ",\x01"
+                                   "T1,\"E\":0,\x01"
+                                   "E2";
+        // MSVC 19.44 mis-stringifies raw strings with backslashes inside Catch2 macros.
+        const std::string expected = R"({"T\"":1,"E":2})"
+                                     "\n";
+        CHECK(format_payload(formatter, payload_of('3', fields)) == expected);
+    }
+    SECTION("an exception flag without an exception")
+    {
+        const std::string fields = R"(,"E":1,"E":2)";
+        CHECK(format_payload(formatter, payload_of('3', fields)) == "{\"E\":1,\"E\":2}\n");
+    }
+    SECTION("no fields")
+    {
+        CHECK(format_payload(formatter, payload_of('3', "")) == "{}\n");
+    }
+}
+
+TEST_CASE("formatter: the exception is the only field under the error key", "[formatter]")
+{
+    jspdlog::json_formatter formatter(renamed_exception_keys());
+    const std::string error = ",\x01"
+                              "E9";
+    const auto line = [&](const std::string &fields) { return format_payload(formatter, payload_of('3', fields)); };
+
+    CHECK(line(",\"a\":1" + error + ",\"b\":2") == "{\"a\":1,\"E\":9,\"b\":2}\n");
+    // It moves to the first other field with the key, whether that comes before or after it.
+    CHECK(line(",\"E\":1,\"a\":2" + error) == "{\"E\":9,\"a\":2}\n");
+    CHECK(line(error + ",\"a\":2,\"E\":1,\"b\":3") == "{\"a\":2,\"E\":9,\"b\":3}\n");
+    CHECK(line(",\"E\":1,\"E\":2" + error + ",\"E\":3,\"z\":4") == "{\"E\":9,\"z\":4}\n");
+    // Only top-level keys count, whatever the values hold, including raw JSON with white space.
+    const std::string raw = R"(,"a": [ 1, "]", {"E": 2} ] ,"b":",\"E\":3" ,"c": true )";
+    std::string field_after = raw;
+    field_after.append(error).append(R"(,"E":0)");
+    std::string field_before = raw;
+    field_before.append(R"(,"E":0)").append(error);
+    std::string expected = "{";
+    expected.append(raw, 1).append(",\"E\":9}\n");
+    CHECK(line(field_after) == expected);
+    CHECK(line(field_before) == expected);
+    // With the key only inside values, the exception stays where it is.
+    std::string nested_only = raw;
+    nested_only.append(error);
+    CHECK(line(nested_only) == expected);
+}
+
+TEST_CASE("formatter: the field scanner reads whole fields and stops at anything else", "[formatter]")
+{
+    jspdlog::detail::field_entry entry;
+    SECTION("what jspdlog writes, raw JSON with white space included")
+    {
+        std::string fields = R"(,"a":1,"b":",}","c": {"d":[1,"]"]} ,)";
+        fields.append(
+            "\x01"
+            "E{}"
+        );
+        std::string_view rest = fields;
+        std::vector<std::string> keys;
+        while (jspdlog::detail::next_field(rest, entry))
+        {
+            keys.emplace_back(entry.key);
+        }
+        CHECK(rest.empty());
+        const std::vector<std::string> expected{
+            R"("a")",
+            R"("b")",
+            R"("c")",
+            "\x01"
+            "E",
+        };
+        CHECK(keys == expected);
+    }
+    SECTION("anything else leaves the text as it was")
+    {
+        for (const std::string_view bad : {
+                 "",
+                 ",",
+                 R"("a":1)",
+                 ",a:1",
+                 ",\x01",
+                 R"(,"a)",
+                 R"(,"a")",
+                 R"(,"a"1)",
+                 R"(,"a":)",
+                 R"(,"a":,)",
+                 R"(,"a":   )",
+                 R"(,"a":"b)",
+                 R"(,"a":"b"c)",
+                 R"(,"a":1})",
+                 R"(,"a":[1)",
+                 R"(,"a":{"b":")",
+             })
+        {
+            std::string_view rest = bad;
+            INFO(std::string{bad});
+            CHECK_FALSE(jspdlog::detail::next_field(rest, entry));
+            CHECK(std::string{rest} == std::string{bad});
+        }
+    }
+    SECTION("only a sink knows the key of the exception")
+    {
+        CHECK(jspdlog::detail::default_exception_key(jspdlog::detail::MARK_ERROR).empty());
+    }
 }
 
 namespace
@@ -710,6 +921,155 @@ TEST_CASE("formatter: the ends of the clock give a valid line", "[formatter]")
             CHECK(test_support::is_single_json_object(line));
         }
     }
+}
+
+TEST_CASE("formatter: options that would write a key twice are rejected", "[formatter]")
+{
+    jspdlog::json_options o;
+    const auto rejected = [](const jspdlog::json_options &options) {
+        CHECK_THROWS_AS(jspdlog::json_formatter(options), std::invalid_argument);
+    };
+
+    SECTION("two header keys")
+    {
+        o.level_key = "logger";
+        rejected(o);
+    }
+    SECTION("a header key and the message key")
+    {
+        o.message_key = "timestamp";
+        rejected(o);
+    }
+    SECTION("a header key and the error key")
+    {
+        o.error_key = "level";
+        rejected(o);
+    }
+    SECTION("the message key and the error key")
+    {
+        o.error_key = "message";
+        rejected(o);
+    }
+    SECTION("the severity key and the source key")
+    {
+        o.severity_key = "source";
+        o.source_key = "source";
+        rejected(o);
+    }
+    SECTION("a flat call site key and a header key")
+    {
+        o.source_key = "unused";
+        o.source_flat = true;
+        o.source_line_key = "thread";
+        rejected(o);
+    }
+    SECTION("two flat call site keys")
+    {
+        o.source_key = "unused";
+        o.source_flat = true;
+        o.source_function_key = "file";
+        rejected(o);
+    }
+    SECTION("two keys of the call site object")
+    {
+        o.source_key = "source";
+        o.source_function_key = "line";
+        rejected(o);
+    }
+    SECTION("the type and message keys of an exception")
+    {
+        o.error_type_key = "message";
+        rejected(o);
+    }
+    SECTION("the type and cause keys of an exception")
+    {
+        o.error_type_key = "cause";
+        rejected(o);
+    }
+    SECTION("the message and cause keys of an exception")
+    {
+        o.error_cause_key = "message";
+        rejected(o);
+    }
+}
+
+TEST_CASE("formatter: keys in different objects, and keys that are off, may be equal", "[formatter]")
+{
+    jspdlog::json_options o;
+    SECTION("the defaults")
+    {
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+    }
+    SECTION("a header key that is off")
+    {
+        o.level_key = std::nullopt;
+        o.message_key = "level";
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+    }
+    SECTION("the call site object and the line")
+    {
+        o.source_key = "source";
+        o.source_file_key = "level";
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+    }
+    SECTION("the text of source_key is not used in flat mode")
+    {
+        o.source_key = "level";
+        o.source_flat = true;
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+    }
+    SECTION("the call site is off")
+    {
+        o.source_file_key = "line";
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+        o.source_flat = true;
+        o.source_line_key = "level";
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+    }
+    SECTION("the exception object and the line")
+    {
+        o.error_type_key = "level";
+        o.error_cause_key = "logger";
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+    }
+    SECTION("level names and severity numbers")
+    {
+        o.level_names = {{"x", "x", "x", "x", "x", "x", "x"}};
+        o.severity_numbers = {1, 1, 1, 1, 1, 1, 1};
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+    }
+}
+
+TEST_CASE("formatter: everything that creates a formatter checks the options", "[formatter]")
+{
+    jspdlog::json_options o;
+    o.level_key = "logger";
+    std::string what;
+    try
+    {
+        const jspdlog::json_formatter formatter(o);
+    }
+    catch (const std::invalid_argument &ex)
+    {
+        what = ex.what();
+    }
+    CHECK(what == "jspdlog: json_options key \"logger\" is used twice");
+
+    const auto sink = std::make_shared<test_support::capture_sink>();
+    CHECK_THROWS_AS(jspdlog::json_logger("t", sink, o), std::invalid_argument);
+    CHECK_THROWS_AS(jspdlog::json_logger("t", {sink, sink}, o), std::invalid_argument);
+
+    // A rejected call leaves the formatter that was installed.
+    const auto logger = test_support::make_plain_logger("t", sink);
+    CHECK_THROWS_AS(jspdlog::json_logger::adopt(logger, o), std::invalid_argument);
+    CHECK_THROWS_AS(jspdlog::install_json_formatter(*logger, o), std::invalid_argument);
+    CHECK_THROWS_AS(jspdlog::install_json_formatter(*sink, o), std::invalid_argument);
+    logger->info("x");
+    CHECK(sink->last() == R"({"logger":"t","level":"info","message":"x"})");
+
+    jspdlog::error_report_options report;
+    report.format = o;
+    CHECK_THROWS_AS(jspdlog::make_error_handler("t", report), std::invalid_argument);
 }
 
 #ifdef _MSC_VER // 100 ns ticks reach about 29000 years either side of 1970. Nanosecond clocks end in 2262.

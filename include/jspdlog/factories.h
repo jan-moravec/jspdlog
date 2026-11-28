@@ -5,7 +5,9 @@
  * Each factory creates what the logger needs and returns an ordinary json_logger. Nothing is registered with spdlog and
  * no default logger or global thread pool is used, so everything lives exactly as long as the logger and its copies.
  * make_async_logger gives its logger a worker thread of its own, an spdlog thread pool of one thread with spdlog v1 and
- * an async_sink with spdlog v2. The last copy of that logger writes what is queued and stops the thread.
+ * an async_sink with spdlog v2. The last copy of that logger writes what is queued and stops the thread. Like the
+ * constructors of json_logger, every factory throws std::invalid_argument when its json_options would write a key
+ * twice.
  *
  * @code
  * #include <jspdlog/factories.h>

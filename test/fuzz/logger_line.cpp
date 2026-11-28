@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <set>
+#include <stdexcept>
 
 namespace
 {
@@ -123,6 +124,43 @@ jspdlog::json_options base_options(std::uint8_t choice)
     }
 }
 
+// Logs an exception with a nested cause and checks that its members are named as the options say.
+void check_exception(const fuzz::harness &h, const jspdlog::json_options &options, std::string_view eol, bool utf8)
+{
+    h.sink->lines.clear();
+    try
+    {
+        try
+        {
+            throw std::runtime_error("inner");
+        }
+        catch (...)
+        {
+            std::throw_with_nested(std::runtime_error("outer"));
+        }
+    }
+    catch (const std::runtime_error &ex)
+    {
+        h.logger.error(ex);
+    }
+    FUZZ_CHECK(h.sink->lines.size() == 1);
+    const std::string &line = h.sink->lines.front();
+    if (!utf8)
+    {
+        fuzz::check_shape(line, eol);
+        return;
+    }
+    const ojson parsed = fuzz::parse_line(line, eol);
+    const ojson &error = parsed.at(fuzz::written_text(options.error_key));
+    const std::string type = fuzz::written_text(options.error_type_key);
+    const std::string message = fuzz::written_text(options.error_message_key);
+    const std::string cause = fuzz::written_text(options.error_cause_key);
+    FUZZ_CHECK((fuzz::keys_of(error) == std::vector<std::string>{type, message, cause}));
+    FUZZ_CHECK(error.at(message) == ojson("outer"));
+    FUZZ_CHECK((fuzz::keys_of(error.at(cause)) == std::vector<std::string>{type, message}));
+    FUZZ_CHECK(error.at(cause).at(message) == ojson("inner"));
+}
+
 } // namespace
 
 // NOLINTNEXTLINE(readability-identifier-naming): libFuzzer requires this name
@@ -135,9 +173,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     const auto eol_choice = static_cast<std::uint8_t>(r.byte() % 3U);
     const std::string name = r.string(16);
 
-    // Two equal keys would write a duplicate key, which is the caller's problem, so make them distinct as written: two
-    // different invalid keys can be replaced by the same text.
-    std::set<std::string> used;
+    // The formatter rejects two equal keys, and two different invalid keys can be written as the same text, which the
+    // check does not see. So make the keys of the line distinct as written.
+    std::set<std::string> used{options.error_key};
     if (options.source_flat)
     {
         used.insert(options.source_file_key);
@@ -162,6 +200,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     const header_key thread = next_key((flags & 0x10U) != 0);
     const header_key source = next_key((flags & 0x20U) != 0);
     const header_key message_key = next_key(true);
+    options.error_cause_key = r.string(8);
     const bool utc = (flags & 0x40U) != 0;
     const std::string_view eol = eol_for(eol_choice);
     const bool timed = (flags & 0x80U) != 0;
@@ -182,6 +221,15 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     options.time_type = utc ? spdlog::pattern_time_type::utc : spdlog::pattern_time_type::local;
     options.eol = std::string{eol};
     options.severity_key.reset(); // a preset's severity field is not one of the fuzzed keys
+    // The keys that are not made distinct above, such as those of an exception, can still be rejected.
+    try
+    {
+        jspdlog::detail::validate(options);
+    }
+    catch (const std::invalid_argument &)
+    {
+        return 0;
+    }
     if (timed && timestamp.enabled)
     {
         check_time(options, timestamp.key, eol, seconds);
@@ -202,6 +250,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     if (!utf8)
     {
         fuzz::check_shape(line, eol);
+        check_exception(h, options, eol, false);
         return 0;
     }
 
@@ -277,5 +326,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
         FUZZ_CHECK(src.at(line_key).is_number_integer());
     }
     FUZZ_CHECK(parsed.at(fuzz::written_text(message_key.key)) == ojson(fuzz::written_text(message)));
+    check_exception(h, options, eol, fuzz::parseable(options.error_cause_key));
     return 0;
 }

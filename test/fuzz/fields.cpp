@@ -1,10 +1,13 @@
 // Target 2: fields. A byte-coded sequence of operations runs on jspdlog::fields and on a reference model, then the
 // result is compared as a set, as bound context and as a log line. The model is the specification of the semantics:
 // keys keep the position of their first insertion, a repeated key replaces the value, and a merge lets the right-hand
-// side win.
+// side win. Some values are exceptions, whose keys the formatter takes from its options, so the lines are written with
+// renamed exception keys and renamed back before they are compared. A last line is logged with an exception first.
 #include "fuzz_support.h"
 
 #include <cmath>
+#include <exception>
+#include <stdexcept>
 
 namespace
 {
@@ -14,6 +17,59 @@ using fuzz::ojson;
 // Keys the logger writes itself in this target. A fuzzed field key must not equal one (duplicate keys are the caller's
 // problem), so a clash gets underscores appended.
 const std::vector<std::string> RESERVED_KEYS = {"logger", "level", "message"};
+
+// The names of the members of an exception object in the lines of this target. They are longer than any fuzzed key.
+constexpr const char *TYPE_KEY = "renamed_type_key";
+constexpr const char *MESSAGE_KEY = "renamed_message_key";
+constexpr const char *CAUSE_KEY = "renamed_cause_key";
+// The error key of the exception call, a letter of the tiny alphabet, so that fields often have it too.
+constexpr const char *ERROR_KEY = "a";
+
+// The line with the members of every exception object named as by default.
+ojson restore_keys(const ojson &value)
+{
+    if (value.is_array())
+    {
+        ojson array = ojson::array();
+        for (const auto &element : value)
+        {
+            array.push_back(restore_keys(element));
+        }
+        return array;
+    }
+    if (!value.is_object())
+    {
+        return value;
+    }
+    ojson object = ojson::object();
+    for (const auto &item : value.items())
+    {
+        std::string key = item.key();
+        if (key == TYPE_KEY)
+        {
+            key = "type";
+        }
+        else if (key == MESSAGE_KEY)
+        {
+            key = "message";
+        }
+        else if (key == CAUSE_KEY)
+        {
+            key = "cause";
+        }
+        object[key] = restore_keys(item.value());
+    }
+    return object;
+}
+
+// The object that a std::runtime_error is written as. what() ends the message at its first null character.
+ojson exception_model(const std::string &message)
+{
+    ojson object = ojson::object();
+    object["type"] = "std::runtime_error";
+    object["message"] = fuzz::written_text(message.substr(0, message.find('\0')));
+    return object;
+}
 
 // The four one-letter keys of the tiny alphabet as checked keys, which skip the escape scan.
 bool is_checked_letter(const std::string &k)
@@ -120,7 +176,7 @@ private:
 
     void apply_(built &out, unsigned depth)
     {
-        const unsigned op = static_cast<unsigned>(r_.byte()) % 6U;
+        const unsigned op = static_cast<unsigned>(r_.byte()) % 7U;
         switch (op)
         {
         case 0:
@@ -225,6 +281,33 @@ private:
             out.m.put(k, nested.m.to_json());
             break;
         }
+        case 5:
+        {
+            // An exception with a nested cause.
+            const std::string k = key_(depth == 0);
+            const std::string outer = r_.string(16);
+            const std::string inner = r_.string(8);
+            all_utf8 = all_utf8 && fuzz::parseable(outer) && fuzz::parseable(inner);
+            try
+            {
+                try
+                {
+                    throw std::runtime_error(inner);
+                }
+                catch (...)
+                {
+                    std::throw_with_nested(std::runtime_error(outer));
+                }
+            }
+            catch (const std::runtime_error &ex)
+            {
+                out.f.insert(k, ex);
+            }
+            ojson object = exception_model(outer);
+            object["cause"] = exception_model(inner);
+            out.m.put(k, std::move(object));
+            break;
+        }
         default:
         {
             const built other = build(depth, 3);
@@ -282,56 +365,90 @@ void check_braced_list(fuzz::reader &r, const jspdlog::json_logger &logger, std:
     const std::optional<std::int64_t> maybe = (r.byte() & 1U) != 0 ? std::optional<std::int64_t>{number} : std::nullopt;
     const bool with_message = (r.byte() & 1U) != 0;
 
+    const std::string k4 = next_key();
+    const std::runtime_error failure(text);
+
     jspdlog::fields object;
     object.insert(k0, number);
     object.insert(k1, text);
     object.insert(k2, real);
     object.insert(k3, maybe);
+    object.insert(k4, failure);
 
     lines.clear();
     if (with_message)
     {
-        logger.info({k0, number, k1, text, k2, real, k3, maybe}, "m {}", 1);
+        logger.info({k0, number, k1, text, k2, real, k3, maybe, k4, failure}, "m {}", 1);
         logger.info(object, "m {}", 1);
     }
     else
     {
-        logger.info({k0, number, k1, text, k2, real, k3, maybe});
+        logger.info({k0, number, k1, text, k2, real, k3, maybe, k4, failure});
         logger.info(object);
     }
     // The same list with lazy values, which run only when the line is written.
     const auto lazy_number = [number] { return number; };
     const auto lazy_text = [&text]() -> const std::string & { return text; };
+    const auto lazy_failure = [&failure]() -> const std::runtime_error & { return failure; };
     if (with_message)
     {
-        logger.info({k0, lazy_number, k1, lazy_text, k2, real, k3, maybe}, "m {}", 1);
+        logger.info({k0, lazy_number, k1, lazy_text, k2, real, k3, maybe, k4, lazy_failure}, "m {}", 1);
     }
     else
     {
-        logger.info({k0, lazy_number, k1, lazy_text, k2, real, k3, maybe});
+        logger.info({k0, lazy_number, k1, lazy_text, k2, real, k3, maybe, k4, lazy_failure});
     }
     // And with checked keys, where the keys are letters of the tiny alphabet.
-    const bool letters =
-        is_checked_letter(k0) && is_checked_letter(k1) && is_checked_letter(k2) && is_checked_letter(k3);
+    const bool letters = is_checked_letter(k0) && is_checked_letter(k1) && is_checked_letter(k2) &&
+                         is_checked_letter(k3) && is_checked_letter(k4);
     if (letters)
     {
         const jspdlog::key c0 = checked_key(k0[0]);
         const jspdlog::key c1 = checked_key(k1[0]);
         const jspdlog::key c2 = checked_key(k2[0]);
         const jspdlog::key c3 = checked_key(k3[0]);
+        const jspdlog::key c4 = checked_key(k4[0]);
         if (with_message)
         {
-            logger.info({c0, number, c1, text, c2, real, c3, maybe}, "m {}", 1);
+            logger.info({c0, number, c1, text, c2, real, c3, maybe, c4, failure}, "m {}", 1);
         }
         else
         {
-            logger.info({c0, number, c1, text, c2, real, c3, maybe});
+            logger.info({c0, number, c1, text, c2, real, c3, maybe, c4, failure});
         }
     }
     FUZZ_CHECK(lines.size() == (letters ? 4U : 3U));
     FUZZ_CHECK(lines[0] == lines[1]);
     FUZZ_CHECK(lines[0] == lines[2]);
     FUZZ_CHECK(!letters || lines[0] == lines[3]);
+}
+
+// The line of an exception call: the exception is the only field under the error key. It takes the position of the
+// first other field with that key, and is otherwise the first field of the call.
+ojson exception_line(const model &bound, const model &call, const ojson &exception)
+{
+    model merged = bound;
+    const std::size_t at = merged.items.size();
+    merged.merge(call);
+    const auto found = std::find_if(merged.items.begin(), merged.items.end(), [](const auto &item) {
+        return item.first == ERROR_KEY;
+    });
+    if (found != merged.items.end())
+    {
+        found->second = exception;
+    }
+    else
+    {
+        merged.items.insert(merged.items.begin() + static_cast<std::ptrdiff_t>(at), {ERROR_KEY, exception});
+    }
+    ojson object = ojson::object();
+    object["logger"] = "t";
+    object["level"] = "error";
+    for (const auto &item : merged.items)
+    {
+        object[fuzz::written_text(item.first)] = item.second;
+    }
+    return object;
 }
 
 } // namespace
@@ -362,7 +479,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     }
 
     // 2. Bound context: with() merges, and the original logger does not change.
-    const fuzz::harness h("t", fuzz::deterministic_options());
+    jspdlog::json_options options = fuzz::deterministic_options();
+    options.error_key = ERROR_KEY;
+    options.error_type_key = TYPE_KEY;
+    options.error_message_key = MESSAGE_KEY;
+    options.error_cause_key = CAUSE_KEY;
+    const fuzz::harness h("t", options);
     const jspdlog::json_logger child = h.logger.with(a.f);
     const jspdlog::json_logger grandchild = child.with(c.f);
     FUZZ_CHECK(h.logger.context().empty());
@@ -402,7 +524,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     {
         expected["message"] = fuzz::written_text(message);
     }
-    const ojson parsed = fuzz::parse_line(text, "\n");
+    const ojson parsed = restore_keys(fuzz::parse_line(text, "\n"));
     FUZZ_CHECK(parsed.dump() == expected.dump());
 
     // Per-call fields do not stick: the next call on the same logger writes only the bound ones.
@@ -416,6 +538,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
         bound_only[fuzz::written_text(item.first)] = item.second;
     }
     bound_only["message"] = "bound only";
-    FUZZ_CHECK(fuzz::parse_line(h.sink->last(), "\n").dump() == bound_only.dump());
+    FUZZ_CHECK(restore_keys(fuzz::parse_line(h.sink->last(), "\n")).dump() == bound_only.dump());
+
+    // An exception call with the same fields.
+    grandchild.error(std::runtime_error(message), d.f, "failed");
+    ojson failed = exception_line(bound, d.m, exception_model(message));
+    failed["message"] = "failed";
+    FUZZ_CHECK(restore_keys(fuzz::parse_line(h.sink->last(), "\n")).dump() == failed.dump());
     return 0;
 }

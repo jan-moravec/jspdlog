@@ -6,6 +6,36 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+The sink owns the schema: `json_options` are applied by the `json_formatter` of each sink and by nothing else, so a
+line follows one set of options. Some behavior changes.
+
+### Changed
+
+- **Breaking:** options that would write a key twice throw `std::invalid_argument` when a formatter is created: by the
+  `json_logger` constructors, `adopt`, `install_json_formatter`, the factories and `make_error_handler`. Checked are the
+  keys of the line (header, source, message and error keys), the members of the call site object and those of an
+  exception object. Such options always produced duplicate keys.
+- **Breaking:** an exception that is a field value uses the `error_type_key`, `error_message_key` and
+  `error_cause_key` of the sink that writes the line, as the exception of an exception call does. `fields::to_json` and
+  a `json_writer` that you create keep `type`, `message` and `cause`.
+- **Breaking:** in an exception call the exception is the only field under the error key. It takes the position of the
+  first other field with that key, if there is one, and the others are left out. A per-call field with the key no longer
+  replaces the exception, and no longer triggers an assertion.
+- **Breaking:** the assertion for a field key that equals a header, source or message key fires when a line is written,
+  with the keys of the sink that writes it, and no longer in `with` or by the options of the logger. A
+  `JSPDLOG_ASSERT` of your own that evaluates its condition in every build now walks the fields of every line.
+- **Breaking** for code that builds payloads by hand: the payload protocol, which is internal, has a flags digit and
+  markers for the keys that only the formatter knows.
+- Every part of a line on a sink shared by several loggers follows the options of its formatter, exception keys
+  included. They used to come from the logger that logged.
+- `with` copies only the bound fields, and with an empty set it returns a logger that shares them.
+
+### Added
+
+- `json_options::error_cause_key`, the key of the nested cause inside an exception object.
+- `json_logger::attach` wraps an `spdlog::logger` whose sinks already have a `json_formatter`, without replacing it, so
+  sinks set up once with `install_json_formatter` keep their own options.
+
 ## [0.6.1] - 2026-11-27
 
 Fixes for defects found in a review of 0.6.0. No API changes.

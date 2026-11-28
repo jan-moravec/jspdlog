@@ -170,6 +170,24 @@ TEST_CASE("presets: otel", "[presets]")
 #endif
 }
 
+TEST_CASE("presets: no preset uses a key twice, with the call site off or on", "[presets]")
+{
+    for (auto options : {
+             jspdlog::json_options{},
+             jspdlog::presets::ecs(),
+             jspdlog::presets::gcp(),
+             jspdlog::presets::datadog(),
+             jspdlog::presets::otel(),
+         })
+    {
+        CHECK_NOTHROW(jspdlog::detail::validate(options));
+        options.source_key = "source";
+        CHECK_NOTHROW(jspdlog::detail::validate(options));
+        options.severity_key = "severity_value";
+        CHECK_NOTHROW(jspdlog::detail::validate(options));
+    }
+}
+
 TEST_CASE("presets: the names of the levels", "[presets]")
 {
     // The same level written under each preset's names: trace, debug, info, warn, error, critical.
@@ -225,6 +243,27 @@ TEST_CASE("presets: an exception call is written under the key of the schema", "
         R"({"severity_text":"ERROR","severity_number":17,"exception":{"type":"std::runtime_error","message":"boom"},)"
         R"("k":1,"body":"m"})"
     );
+}
+
+TEST_CASE("presets: an exception that is a field value has the member names of the schema", "[presets]")
+{
+    auto options = jspdlog::presets::datadog();
+    options.timestamp_key = std::nullopt;
+    options.thread_key = std::nullopt;
+    options.logger_key = std::nullopt;
+    const auto sink = std::make_shared<test_support::capture_sink>();
+    const jspdlog::json_logger logger("t", sink, options);
+    const std::runtime_error ex("boom");
+    const std::string expected = R"({"status":"info","e":{"kind":"std::runtime_error","message":"boom"}})";
+
+    logger.info({"e", ex});
+    CHECK(sink->last() == expected);
+    const jspdlog::fields held{"e", ex};
+    logger.info(held);
+    CHECK(sink->last() == expected);
+    logger.with({"e", ex}).info(jspdlog::fields{});
+    CHECK(sink->last() == expected);
+    CHECK(held.to_json() == R"({"e":{"type":"std::runtime_error","message":"boom"}})");
 }
 
 TEST_CASE("presets: a logger with a preset, bound schema fields and the call site", "[presets]")
