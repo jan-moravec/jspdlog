@@ -3837,6 +3837,157 @@ private:
 template <typename... Args>
 using message_t = basic_message<typename detail::type_identity<Args>::type...>;
 
+namespace detail
+{
+
+/** @brief An empty set of fields, shared by the call forms without fields. */
+inline const call_fields &empty_call_fields()
+{
+    static const call_fields EMPTY{};
+    return EMPTY;
+}
+
+/**
+ * @brief The call forms of a logger: trace, debug, info, warn, error and critical, and log with the level as the first
+ * argument.
+ *
+ * Each of them takes a message with its format arguments; fields; fields and a message; an exception, with fields if
+ * given; an exception and a message; or an exception, fields and a message. A single argument of another type is
+ * deleted. json_logger documents what they write.
+ *
+ * Derived provides dispatch_, which takes the level, the exception or null, the fields, the call site, the payload kind
+ * and a function that appends the message, and decides whether anything is written.
+ */
+template <typename Derived>
+class call_api
+{
+public:
+    /** @brief Writes a message: a format string with its arguments, or a string as it is. */
+    template <typename... Args>
+    void log(level lvl, message_t<Args...> m, Args &&...args) const
+    {
+        log_message_(lvl, nullptr, empty_call_fields(), m, std::forward<Args>(args)...);
+    }
+
+    /** @brief Writes a line with fields only, without a message. */
+    void log(level lvl, const call_fields &f, site where = site()) const { log_fields_(lvl, nullptr, f, where); }
+
+    /** @brief Writes fields and a message. */
+    template <typename... Args>
+    void log(level lvl, const call_fields &f, message_t<Args...> m, Args &&...args) const
+    {
+        log_message_(lvl, nullptr, f, m, std::forward<Args>(args)...);
+    }
+
+    /**
+     * @brief Writes an exception under the error key of the sink, with fields if given and without a message. The
+     * fields have a default and are not a separate overload, so a braced list cannot be taken for the call site.
+     */
+    template <typename E, if_exception<E> = 0>
+    void log(level lvl, const E &ex, const call_fields &f = empty_call_fields(), site where = site()) const
+    {
+        log_fields_(lvl, &ex, f, where);
+    }
+
+    /** @brief Writes an exception and a message. */
+    template <typename E, if_exception<E> = 0, typename... Args>
+    void log(level lvl, const E &ex, message_t<Args...> m, Args &&...args) const
+    {
+        log_message_(lvl, &ex, empty_call_fields(), m, std::forward<Args>(args)...);
+    }
+
+    /** @brief Writes an exception, fields and a message. */
+    template <typename E, if_exception<E> = 0, typename... Args>
+    void log(level lvl, const E &ex, const call_fields &f, message_t<Args...> m, Args &&...args) const
+    {
+        log_message_(lvl, &ex, f, m, std::forward<Args>(args)...);
+    }
+
+    /** @brief Rejects a single argument that is not a string. Put typed values in fields. */
+    template <typename T, std::enable_if_t<is_rejected_message_v<T>, int> = 0>
+    void log(level lvl, const T &) const = delete;
+
+// Defines the call forms for one level. Undefined right after use.
+#define JSPDLOG_DETAIL_LEVEL_FUNCTIONS(name, lvl)                                                                      \
+    template <typename... Args>                                                                                        \
+    void name(message_t<Args...> m, Args &&...args) const                                                              \
+    {                                                                                                                  \
+        log_message_(lvl, nullptr, empty_call_fields(), m, std::forward<Args>(args)...);                               \
+    }                                                                                                                  \
+    void name(const call_fields &f, site where = site()) const                                                         \
+    {                                                                                                                  \
+        log_fields_(lvl, nullptr, f, where);                                                                           \
+    }                                                                                                                  \
+    template <typename... Args>                                                                                        \
+    void name(const call_fields &f, message_t<Args...> m, Args &&...args) const                                        \
+    {                                                                                                                  \
+        log_message_(lvl, nullptr, f, m, std::forward<Args>(args)...);                                                 \
+    }                                                                                                                  \
+    template <typename E, if_exception<E> = 0>                                                                         \
+    void name(const E &ex, const call_fields &f = empty_call_fields(), site where = site()) const                      \
+    {                                                                                                                  \
+        log_fields_(lvl, &ex, f, where);                                                                               \
+    }                                                                                                                  \
+    template <typename E, if_exception<E> = 0, typename... Args>                                                       \
+    void name(const E &ex, message_t<Args...> m, Args &&...args) const                                                 \
+    {                                                                                                                  \
+        log_message_(lvl, &ex, empty_call_fields(), m, std::forward<Args>(args)...);                                   \
+    }                                                                                                                  \
+    template <typename E, if_exception<E> = 0, typename... Args>                                                       \
+    void name(const E &ex, const call_fields &f, message_t<Args...> m, Args &&...args) const                           \
+    {                                                                                                                  \
+        log_message_(lvl, &ex, f, m, std::forward<Args>(args)...);                                                     \
+    }                                                                                                                  \
+    template <typename T, std::enable_if_t<is_rejected_message_v<T>, int> = 0>                                         \
+    void name(const T &) const = delete;
+
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(trace, level::trace)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(debug, level::debug)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(info, level::info)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(warn, level::warn)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(error, level::err)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(critical, level::critical)
+#undef JSPDLOG_DETAIL_LEVEL_FUNCTIONS
+
+private:
+    friend Derived;
+    /** @brief Only Derived makes one. */
+    call_api() = default;
+
+    /** @brief The logger these forms belong to. */
+    [[nodiscard]] const Derived &self_() const noexcept { return static_cast<const Derived &>(*this); }
+
+    /** @brief Writes a line with fields only. */
+    void log_fields_(level lvl, const std::exception *ex, const call_fields &f, site where) const
+    {
+        self_().dispatch_(lvl, ex, f, where, KIND_FIELDS, [](spdlog::memory_buf_t & /*out*/) {});
+    }
+
+    /** @brief Writes fields and a message: a plain one as it is, a format string with its arguments. */
+    template <typename... Args>
+    void log_message_(
+        level lvl, const std::exception *ex, const call_fields &f, const basic_message<Args...> &m, Args &&...args
+    ) const
+    {
+        self_().dispatch_(lvl, ex, f, m.where(), KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
+            if (m.is_plain())
+            {
+                append_json_quoted(out, m.plain());
+                return;
+            }
+            spdlog::memory_buf_t msg;
+#if JSPDLOG_STD_FORMAT
+            std::vformat_to(std::back_inserter(msg), format_text(m.format()), std::make_format_args(args...));
+#else
+            spdlog::fmt_lib::format_to(std::back_inserter(msg), m.format(), std::forward<Args>(args)...);
+#endif
+            append_json_quoted(out, std::string_view{msg.data(), msg.size()});
+        });
+    }
+};
+
+} // namespace detail
+
 /**
  * @brief A logger that writes one JSON object per line.
  *
@@ -3859,11 +4010,11 @@ using message_t = basic_message<typename detail::type_identity<Args>::type...>;
  * @endcode
  *
  * Each level also has three call forms that take a std::exception first, followed by optional fields, by a message, or
- * by fields and a message. They write the exception under json_options::error_key, as an object with
- * its type name and message, and its nested causes under json_options::error_cause_key. It is the only field with that
- * key. If there are other fields with the key, bound or of the call, it takes the position of the first of them and
- * they are all left out. Otherwise it comes after the bound fields and before the new fields of the call. The exception
- * is written only when the line is, so a call at a disabled level computes nothing.
+ * by fields and a message. They write the exception under json_options::error_key, as an object with its type name and
+ * message, and its nested causes under json_options::error_cause_key. It is the only field with that key. If there are
+ * other fields with the key, bound or of the call, it takes the position of the first of them and they are all left out.
+ * Otherwise it comes after the bound fields and before the new fields of the call. The exception is written only when
+ * the line is, so a call at a disabled level computes nothing.
  *
  * @code
  * try { connect(); }
@@ -3908,7 +4059,7 @@ using message_t = basic_message<typename detail::type_identity<Args>::type...>;
  * formatter, is not supported on platforms where each module has its own token, such as Windows DLLs: the line stays
  * valid JSON, but the fields appear inside the message.
  */
-class json_logger
+class json_logger : public detail::call_api<json_logger>
 {
 public:
     /** @brief Creates a logger writing to one sink. Throws std::invalid_argument if the sink is null or the options
@@ -3998,99 +4149,6 @@ public:
     /** @brief The fields bound to this logger by with. */
     [[nodiscard]] const fields &context() const noexcept { return context_->values; }
 
-    /** @brief Writes a message: a format string with its arguments, or a string as it is. */
-    template <typename... Args>
-    void log(level lvl, message_t<Args...> m, Args &&...args) const
-    {
-        log_message_(lvl, nullptr, empty_call_fields_(), m, std::forward<Args>(args)...);
-    }
-
-    /** @brief Writes a line with fields only, without a message. */
-    void log(level lvl, const detail::call_fields &f, detail::site where = detail::site()) const
-    {
-        log_fields_(lvl, nullptr, f, where);
-    }
-
-    /** @brief Writes fields and a message. */
-    template <typename... Args>
-    void log(level lvl, const detail::call_fields &f, message_t<Args...> m, Args &&...args) const
-    {
-        log_message_(lvl, nullptr, f, m, std::forward<Args>(args)...);
-    }
-
-    /**
-     * @brief Writes an exception under the error key of the sink, with fields if given and without a message. The
-     * fields have a default and are not a separate overload, so a braced list cannot be taken for the call site.
-     */
-    template <typename E, detail::if_exception<E> = 0>
-    void log(
-        level lvl, const E &ex, const detail::call_fields &f = empty_call_fields_(), detail::site where = detail::site()
-    ) const
-    {
-        log_fields_(lvl, &ex, f, where);
-    }
-
-    /** @brief Writes an exception and a message. */
-    template <typename E, detail::if_exception<E> = 0, typename... Args>
-    void log(level lvl, const E &ex, message_t<Args...> m, Args &&...args) const
-    {
-        log_message_(lvl, &ex, empty_call_fields_(), m, std::forward<Args>(args)...);
-    }
-
-    /** @brief Writes an exception, fields and a message. */
-    template <typename E, detail::if_exception<E> = 0, typename... Args>
-    void log(level lvl, const E &ex, const detail::call_fields &f, message_t<Args...> m, Args &&...args) const
-    {
-        log_message_(lvl, &ex, f, m, std::forward<Args>(args)...);
-    }
-
-    /** @brief Rejects a single argument that is not a string. Put typed values in fields. */
-    template <typename T, std::enable_if_t<detail::is_rejected_message_v<T>, int> = 0>
-    void log(level lvl, const T &) const = delete;
-
-// Defines the call forms for one level. Undefined right after use.
-#define JSPDLOG_DETAIL_LEVEL_FUNCTIONS(name, lvl)                                                                      \
-    template <typename... Args>                                                                                        \
-    void name(message_t<Args...> m, Args &&...args) const                                                              \
-    {                                                                                                                  \
-        log_message_(lvl, nullptr, empty_call_fields_(), m, std::forward<Args>(args)...);                              \
-    }                                                                                                                  \
-    void name(const detail::call_fields &f, detail::site where = detail::site()) const                                 \
-    {                                                                                                                  \
-        log_fields_(lvl, nullptr, f, where);                                                                           \
-    }                                                                                                                  \
-    template <typename... Args>                                                                                        \
-    void name(const detail::call_fields &f, message_t<Args...> m, Args &&...args) const                                \
-    {                                                                                                                  \
-        log_message_(lvl, nullptr, f, m, std::forward<Args>(args)...);                                                 \
-    }                                                                                                                  \
-    template <typename E, detail::if_exception<E> = 0>                                                                 \
-    void name(const E &ex, const detail::call_fields &f = empty_call_fields_(), detail::site where = detail::site())   \
-        const                                                                                                          \
-    {                                                                                                                  \
-        log_fields_(lvl, &ex, f, where);                                                                               \
-    }                                                                                                                  \
-    template <typename E, detail::if_exception<E> = 0, typename... Args>                                               \
-    void name(const E &ex, message_t<Args...> m, Args &&...args) const                                                 \
-    {                                                                                                                  \
-        log_message_(lvl, &ex, empty_call_fields_(), m, std::forward<Args>(args)...);                                  \
-    }                                                                                                                  \
-    template <typename E, detail::if_exception<E> = 0, typename... Args>                                               \
-    void name(const E &ex, const detail::call_fields &f, message_t<Args...> m, Args &&...args) const                   \
-    {                                                                                                                  \
-        log_message_(lvl, &ex, f, m, std::forward<Args>(args)...);                                                     \
-    }                                                                                                                  \
-    template <typename T, std::enable_if_t<detail::is_rejected_message_v<T>, int> = 0>                                 \
-    void name(const T &) const = delete;
-
-    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(trace, level::trace)
-    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(debug, level::debug)
-    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(info, level::info)
-    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(warn, level::warn)
-    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(error, level::err)
-    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(critical, level::critical)
-#undef JSPDLOG_DETAIL_LEVEL_FUNCTIONS
-
     /** @brief The logger name, as given at construction or taken from the adopted spdlog::logger. */
     [[nodiscard]] const std::string &name() const noexcept { return logger_->name(); }
 
@@ -4131,6 +4189,7 @@ public:
     [[nodiscard]] const std::shared_ptr<spdlog::logger> &spdlog_logger() const noexcept { return logger_; }
 
 private:
+    friend class detail::call_api<json_logger>;
     friend struct detail::logger_access;
 
     /** @brief What a logger and its copies share. Immutable. */
@@ -4200,19 +4259,6 @@ private:
         return std::make_shared<spdlog::logger>(std::move(name), first, last);
     }
 
-    /** @brief An empty set of fields, shared by the call forms without fields. */
-    static const detail::call_fields &empty_call_fields_()
-    {
-        static const detail::call_fields EMPTY{};
-        return EMPTY;
-    }
-
-    /** @brief Appends the message as a quoted JSON string. The formatter adds the key. */
-    static void append_message_(spdlog::memory_buf_t &out, const spdlog::memory_buf_t &msg)
-    {
-        detail::append_json_quoted(out, std::string_view{msg.data(), msg.size()});
-    }
-
     /**
      * @brief Whether a call at this level does any work: the level lets it through, or the spdlog v1 backtrace stores
      * it for dump_backtrace. spdlog then decides on its own whether to write the line, store it or both.
@@ -4226,43 +4272,20 @@ private:
 #endif
     }
 
-    /** @brief Writes a line with fields only. */
-    void log_fields_(level lvl, const std::exception *ex, const detail::call_fields &f, detail::site where) const
-    {
-        if (processes_(lvl))
-        {
-            emit_(lvl, ex, f, where, detail::KIND_FIELDS, [](spdlog::memory_buf_t & /*out*/) {});
-        }
-    }
-
-    /** @brief Writes fields and a message: a plain one as it is, a format string with its arguments. */
-    template <typename... Args>
-    void log_message_(
+    /** @brief What every call form ends in: writes the line when the level lets it through. */
+    template <typename WriteMessage>
+    void dispatch_(
         level lvl,
         const std::exception *ex,
         const detail::call_fields &f,
-        const basic_message<Args...> &m,
-        Args &&...args
+        detail::site where,
+        char kind,
+        const WriteMessage &write_message
     ) const
     {
         if (processes_(lvl))
         {
-            emit_(lvl, ex, f, m.where(), detail::KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
-                if (m.is_plain())
-                {
-                    detail::append_json_quoted(out, m.plain());
-                    return;
-                }
-                spdlog::memory_buf_t msg;
-#if JSPDLOG_STD_FORMAT
-                std::vformat_to(
-                    std::back_inserter(msg), detail::format_text(m.format()), std::make_format_args(args...)
-                );
-#else
-                spdlog::fmt_lib::format_to(std::back_inserter(msg), m.format(), std::forward<Args>(args)...);
-#endif
-                append_message_(out, msg);
-            });
+            emit_(lvl, ex, f, where, kind, write_message);
         }
     }
 
