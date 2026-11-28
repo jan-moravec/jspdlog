@@ -74,7 +74,7 @@ TEST_CASE("json_logger: runtime strings are messages, typed values are not", "[j
 
 TEST_CASE("json_logger: a literal without arguments is the message as it is", "[json_logger]")
 {
-    fixture f;
+    const fixture f;
     std::vector<std::string> errors;
     f.logger.spdlog_logger()->set_error_handler([&errors](const std::string &what) { errors.push_back(what); });
     f.logger.info("{} and {{}}");
@@ -181,7 +181,7 @@ TEST_CASE("json_logger: a default-constructed logger is a null logger", "[json_l
 
 TEST_CASE("json_logger: a moved-from logger is a null logger", "[json_logger]")
 {
-    fixture f;
+    const fixture f;
     auto source = f.logger.with({"a", 1});
     CHECK(source);
 
@@ -212,7 +212,7 @@ TEST_CASE("json_logger: a member that is set later", "[json_logger]")
     {
         jspdlog::json_logger log;
     };
-    fixture f;
+    const fixture f;
     service s;
     s.log.info("dropped");
     CHECK(f.sink->lines.empty());
