@@ -81,7 +81,7 @@ Pick one:
 
   ```cmake
   include(FetchContent)
-  FetchContent_Declare(jspdlog GIT_REPOSITORY https://github.com/jan-moravec/jspdlog.git GIT_TAG v0.6.1)
+  FetchContent_Declare(jspdlog GIT_REPOSITORY https://github.com/jan-moravec/jspdlog.git GIT_TAG v0.7.0)
   FetchContent_MakeAvailable(jspdlog)
   target_link_libraries(my_app PRIVATE jspdlog::jspdlog)
   ```
@@ -149,36 +149,58 @@ that their output is valid JSON lines.
 
 ### Logging calls
 
-Each level (`trace`, `debug`, `info`, `warn`, `error`, `critical`) takes five forms, and `log(level, ...)` takes the
-same forms with the level as data:
+Each level (`trace`, `debug`, `info`, `warn`, `error`, `critical`) takes a message, fields or both, and
+`log(level, ...)` takes the same with the level as data. Each of these also takes an exception first, see
+[Exceptions](#exceptions).
 
 ```cpp
-logger.info("loaded {} items", n);    // formatted message, checked at compile time
+logger.info("loaded {} items", n);    // a format string with arguments, checked at compile time
 logger.info(text);                    // a std::string, std::string_view or const char* as the message
 logger.info({"items", n});            // fields only, no message
-logger.info({"items", n}, "loaded");  // fields and a formatted message
-logger.info({"items", n}, text);      // fields and a runtime string as the message
+logger.info({"items", n}, "loaded");  // fields and a message
+logger.info({"items", n}, text);
 logger.log(jspdlog::level::warn, "disk {}% full", pct);
 ```
 
-The message is always a JSON string. A string literal is a format string, checked at compile time; a `std::string`,
-`std::string_view` or `const char*` variable, or a writable `char` buffer, is written as it is, without interpreting
-braces. A single argument that
-is not a string, such as `info(42)`, does not compile: values that should keep their type belong in fields,
-`info({"value", 42})` writes `"value":42`. Other string types (`std::pmr::string`, `QString`, a `fmt::memory_buffer`)
-are converted by the caller, for example `info(fmt::to_string(buf))`. `fmt::runtime(s)` works with arguments.
+The message is always a JSON string. With arguments, it is a format string, checked at compile time where the compiler
+can; `fmt::runtime(s)` passes one that is only known at run time. Without arguments, a string is written as it is,
+without interpreting braces, as in spdlog: a literal, a `std::string`, a `std::string_view`, a `const char*` or a
+`char` buffer. A single argument that is not a string, such as `info(42)`, does not compile: values that should keep
+their type belong in fields, `info({"value", 42})` writes `"value":42`. Other string types (`std::pmr::string`,
+`QString`, a `fmt::memory_buffer`) are converted by the caller, for example `info(fmt::to_string(buf))`.
 
 A braced list is not built into a `fields` object. It is kept as references and serialized only when the line is
 written, so a call at a disabled level serializes nothing (see [Expensive values](#expensive-values)).
 
-Every call also records its file, line and function. They are written when `json_options::source_key` is set, as
-`"source":{"file":"main.cpp","line":12,"function":"handle"}`. The function is the short name your compiler gives, so it
-can differ between compilers. No macro is needed: [08_source_location.cpp](example/08_source_location.cpp). With
-`source_flat` the three values are fields of the line instead of an object, as ECS and OpenTelemetry want them;
-`source_file_key`, `source_line_key` and `source_function_key` rename them in both layouts (see
-[Schema presets](#schema-presets)).
-
 Example: [01_console.cpp](example/01_console.cpp).
+
+### Call site
+
+Every call records its file, line and function. They are written when `json_options::source_key` is set, as
+`"source":{"file":"main.cpp","line":12,"function":"handle"}`. The function is the short name your compiler gives, so it
+can differ between compilers. No macro is needed. With `source_flat` the three values are fields of the line instead of
+an object, as ECS and OpenTelemetry want them; `source_file_key`, `source_line_key` and `source_function_key` rename
+them in both layouts (see [Schema presets](#schema-presets)).
+
+#### Logging for your caller
+
+A function that logs on behalf of its caller would record its own line. Give it a `jspdlog::call_site` parameter that
+defaults to `{}`, which records the place of the call, and pass it on with `at()`:
+
+```cpp
+void audit(const jspdlog::json_logger &log, std::string_view what, jspdlog::call_site where = {})
+{
+    log.at(where).info({"what", what}, "audit");  // the line of audit's caller
+}
+```
+
+`at(where)` takes every call form, including `log(level, ...)` and the exception forms. Use it in the same expression:
+it refers to the logger. A call site from elsewhere, such as another logging framework, comes from
+`call_site::of(file, line, function)`, `call_site::of(spdlog::source_loc)` or, in C++20,
+`call_site::of(std::source_location)`. The file and function are pointers, which must stay valid until the line is
+written: string literals and the compiler's names do, also with an asynchronous logger.
+
+Example: [08_source_location.cpp](example/08_source_location.cpp).
 
 ### Factories
 
@@ -429,15 +451,27 @@ call, for one that is a field value, also deep inside containers, `fields` objec
 your serializer writes into the writer it is given. Text with no sink has the default keys: `fields::to_json()` and a
 `json_writer` that you create yourself.
 
-Every level and `log(level, ...)` also take the exception as the first argument, with the same endings as the other
-forms. The exception then goes under `json_options::error_key` (default `error`):
+Every level and `log(level, ...)` also take the exception as the first argument, followed by nothing or fields, a
+message, or fields and a message. The exception then goes under `json_options::error_key` (default `error`):
 
 ```cpp
 logger.error(ex);                                  // no message
+logger.error(ex, {"host", host});                  // fields only
 logger.error(ex, "connect failed");                // a message, or a format string with arguments
 logger.error(ex, {"host", host}, "connect failed"); // fields and a message
 JSPDLOG_ERROR(logger, ex, {"host", host}, "connect failed");
 ```
+
+The first argument can also be a `std::exception_ptr`, which a `catch (...)` handler gets from
+`std::current_exception()`:
+
+```cpp
+try { run(); }
+catch (...) { logger.error(std::current_exception(), {"job", id}, "job failed"); }
+```
+
+A null pointer is written as `"error":null`, and an exception that is not a `std::exception` as `{"type":"unknown"}`.
+Example: [14_exception_ptr.cpp](example/14_exception_ptr.cpp).
 
 The exception is held by reference and written only when the line is, so a call at a disabled level computes nothing,
 not even the type name. It is the only field under the error key. If there are other fields with that key, bound or of
@@ -474,6 +508,25 @@ shared. The bound fields are immutable and shared too, which makes logging throu
 threads safe. `context()` returns them. The logging calls are `const`, so pass loggers as `const jspdlog::json_logger &`.
 
 Example: [03_fields.cpp](example/03_fields.cpp).
+
+#### Null logger
+
+A default-constructed `json_logger` writes nothing, so a class can declare one as a member and set it later. Every call
+is dropped before its arguments are looked at: nothing is formatted or serialized, no lazy value runs, and the
+`JSPDLOG_*` macros evaluate nothing. A moved-from logger is a null logger too.
+
+```cpp
+struct database
+{
+    jspdlog::json_logger log;  // writes nothing until assigned
+};
+database db;
+db.log = logger.with({"component", "db"});
+if (db.log) { /* it writes somewhere */ }
+```
+
+`should_log` is false, `log_level` is `off`, `set_level`, `flush` and `flush_on` do nothing, `name()` and `context()`
+are empty, `with()` returns another null logger and `spdlog_logger()` is null.
 
 ### Arrays and objects from a JSON library
 
@@ -997,6 +1050,9 @@ using level = /* spdlog::level (v2) or spdlog::level::level_enum (v1) */;
 
 class json_logger {
 public:
+    // A null logger, which writes nothing; a moved-from logger is one too.
+    json_logger() noexcept = default;
+
     // Throw std::invalid_argument on a null sink, and on options that write a key twice.
     json_logger(std::string name, spdlog::sink_ptr sink, const json_options &options = {});
     json_logger(std::string name, spdlog::sinks_init_list sinks, const json_options &options = {});
@@ -1007,28 +1063,28 @@ public:
     // Wraps a logger whose sinks already have a json_formatter, without touching them. Throws on a null logger.
     static json_logger attach(std::shared_ptr<spdlog::logger> logger);
 
-    // trace, debug, info, warn, error, critical: five forms each, all const. log(level, ...) takes the same forms.
-    // Each also takes the call site as a trailing default argument, which you never write.
-    void info(format_here_t<Args...> fmt, Args &&...args) const;   // a string literal, or fmt::runtime(...)
-    void info(const S &msg) const;                                  // S: std::string, std::string_view, const char*, char[N]
+    // trace, debug, info, warn, error, critical: the same forms each, all const. log(level, ...) takes them too.
+    void info(message_t<Args...> m, Args &&...args) const;
     void info(Fields f) const;
-    void info(Fields f, format_here_t<Args...> fmt, Args &&...args) const;
-    void info(Fields f, const S &msg) const;
+    void info(Fields f, message_t<Args...> m, Args &&...args) const;
+    void info(const E &ex) const;  // E: anything derived from std::exception, or std::exception_ptr
+    void info(const E &ex, Fields f) const;
+    void info(const E &ex, message_t<Args...> m, Args &&...args) const;
+    void info(const E &ex, Fields f, message_t<Args...> m, Args &&...args) const;
+    // message_t: with args, a format string (a literal, or fmt::runtime(text)); without, a string written as it is.
+    // It also records the call site. The forms that end without a message take it as a last default argument, which
+    // you never write.
     // Fields: a braced list {"key", value, ...} of at most 16 pairs, serialized when the line is written and with
     // callables allowed as values, or a jspdlog::fields object.
 
-    // Each level and log(level, ...) also take an exception first, with the same five endings and a sixth, none:
-    void info(const E &ex) const;                           // E: anything derived from std::exception
-    void info(const E &ex, format_here_t<Args...> fmt, Args &&...args) const;
-    void info(const E &ex, const S &msg) const;
-    void info(const E &ex, Fields f) const;
-    void info(const E &ex, Fields f, format_here_t<Args...> fmt, Args &&...args) const;
-    void info(const E &ex, Fields f, const S &msg) const;
+    located_logger at(const call_site &where) const noexcept;  // the same forms with another call site, for one call
 
     json_logger with(const fields &f) const;  // new values win on collisions; keys keep their position
     const fields &context() const noexcept;
 
-    // Pass through to the shared spdlog::logger.
+    explicit operator bool() const noexcept;  // false for a null logger
+
+    // Pass through to the shared spdlog::logger. A null logger does nothing and has an empty name and level off.
     const std::string &name() const noexcept;
     level log_level() const noexcept;
     void set_level(level lvl);
@@ -1037,6 +1093,20 @@ public:
     void flush_on(level lvl);
     const std::shared_ptr<spdlog::logger> &spdlog_logger() const noexcept;
 };
+
+// The place of a logging call. Default-constructed, it records where it is made.
+class call_site {
+public:
+    constexpr call_site(/* leave defaulted */) noexcept;
+    static constexpr call_site of(const char *file, int line, const char *function) noexcept;
+    static call_site of(const spdlog::source_loc &loc) noexcept;
+    static call_site of(const std::source_location &loc) noexcept;  // C++20
+    constexpr const char *file() const noexcept;
+    constexpr int line() const noexcept;
+    constexpr const char *function() const noexcept;
+};
+
+class located_logger;  // made by json_logger::at: the call forms of json_logger, nothing else
 
 struct json_options {  // applied by the json_formatter of a sink
     std::optional<std::string> timestamp_key = "timestamp";  // nullopt removes the field

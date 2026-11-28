@@ -11,6 +11,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 using test_support::fixture;
@@ -70,6 +72,24 @@ TEST_CASE("json_logger: runtime strings are messages, typed values are not", "[j
 #endif
 }
 
+TEST_CASE("json_logger: a literal without arguments is the message as it is", "[json_logger]")
+{
+    const fixture f;
+    std::vector<std::string> errors;
+    f.logger.spdlog_logger()->set_error_handler([&errors](const std::string &what) { errors.push_back(what); });
+    f.logger.info("{} and {{}}");
+    CHECK(f.last() == R"({"logger":"t","level":"info","message":"{} and {{}}"})");
+    f.logger.info({"k", 1}, "x {}");
+    CHECK(f.last() == R"({"logger":"t","level":"info","k":1,"message":"x {}"})");
+    f.logger.error(std::runtime_error("boom"), "100% {");
+    CHECK(f.last().find(R"("message":"100% {"})") != std::string::npos);
+    // A const array that is not a literal is the same.
+    const char constant[] = "{{";
+    f.logger.info(constant);
+    CHECK(f.last() == R"({"logger":"t","level":"info","message":"{{"})");
+    CHECK(errors.empty());
+}
+
 TEST_CASE("json_logger: a writable char buffer is a runtime string", "[json_logger]")
 {
     fixture f;
@@ -108,6 +128,102 @@ TEST_CASE("json_logger: logging through a const reference", "[json_logger]")
     CHECK(f.last() == R"({"logger":"t","level":"info","k":1,"message":"const ref"})");
     logger.log(jspdlog::level::warn, std::string{"value"});
     CHECK(f.last() == R"({"logger":"t","level":"warning","message":"value"})");
+}
+
+static_assert(std::is_nothrow_default_constructible_v<jspdlog::json_logger>);
+static_assert(std::is_nothrow_move_constructible_v<jspdlog::json_logger>);
+static_assert(!std::is_convertible_v<jspdlog::json_logger, bool>, "the conversion to bool is explicit");
+
+namespace
+{
+
+// Every member of a null logger does nothing, and says that there is nothing.
+void check_null_logger(jspdlog::json_logger &logger)
+{
+    CHECK_FALSE(logger);
+    CHECK_FALSE(logger.should_log(jspdlog::level::critical));
+    CHECK_FALSE(logger.should_log(jspdlog::level::off));
+    CHECK(logger.log_level() == jspdlog::level::off);
+    logger.set_level(jspdlog::level::trace);
+    CHECK(logger.log_level() == jspdlog::level::off);
+    logger.flush();
+    logger.flush_on(jspdlog::level::info);
+    CHECK(logger.name().empty());
+    CHECK(logger.context().empty());
+    CHECK(logger.spdlog_logger() == nullptr);
+    const auto child = logger.with({"a", 1});
+    CHECK_FALSE(child);
+    CHECK(child.context().empty());
+
+    int runs = 0;
+    const auto count = [&runs] { return ++runs; };
+    logger.critical("x");
+    logger.critical("{}", test_support::throws_when_formatted{});
+    logger.critical({"n", count});
+    logger.critical({"n", count}, "x");
+    logger.critical(std::runtime_error("boom"));
+    logger.critical(std::exception_ptr{}, {"n", count}, "x");
+    logger.log(jspdlog::level::critical, {"n", count}, "x");
+    logger.at({}).critical({"n", count}, "x");
+    child.at({}).log(jspdlog::level::critical, "x");
+    JSPDLOG_CRITICAL(logger, {"n", count}, "{}", count());
+    JSPDLOG_LOG(logger, jspdlog::level::critical, "{}", count());
+    CHECK(runs == 0);
+}
+
+} // namespace
+
+TEST_CASE("json_logger: a default-constructed logger is a null logger", "[json_logger]")
+{
+    jspdlog::json_logger logger;
+    check_null_logger(logger);
+}
+
+TEST_CASE("json_logger: a moved-from logger is a null logger", "[json_logger]")
+{
+    const fixture f;
+    auto source = f.logger.with({"a", 1});
+    CHECK(source);
+
+    SECTION("after a move construction")
+    {
+        const jspdlog::json_logger target = std::move(source);
+        // NOLINTNEXTLINE(bugprone-use-after-move,hicpp-invalid-access-moved): the moved-from state is the point
+        check_null_logger(source);
+        CHECK(target);
+        target.info("moved");
+    }
+    SECTION("after a move assignment")
+    {
+        jspdlog::json_logger target;
+        target = std::move(source);
+        // NOLINTNEXTLINE(bugprone-use-after-move,hicpp-invalid-access-moved): the moved-from state is the point
+        check_null_logger(source);
+        CHECK(target);
+        target.info("moved");
+    }
+    CHECK(f.sink->lines.size() == 1);
+    CHECK(f.last() == R"({"logger":"t","level":"info","a":1,"message":"moved"})");
+}
+
+TEST_CASE("json_logger: a member that is set later", "[json_logger]")
+{
+    struct service
+    {
+        jspdlog::json_logger log;
+    };
+    const fixture f;
+    service s;
+    s.log.info("dropped");
+    CHECK(f.sink->lines.empty());
+    s.log = f.logger.with({"service", "db"});
+    REQUIRE(s.log);
+    s.log.info("written");
+    CHECK(f.last() == R"({"logger":"t","level":"info","service":"db","message":"written"})");
+    s.log = {};
+    CHECK_FALSE(s.log);
+    s.log.info("dropped");
+    CHECK(f.sink->lines.size() == 1);
 }
 
 TEST_CASE("version macros match the CMake project version", "[version]")

@@ -14,7 +14,7 @@ required_conan_version = ">=2.0"
 
 class JspdlogConan(ConanFile):
     name = "jspdlog"
-    version = "0.6.1"
+    version = "0.7.0"
     license = "MIT"
     url = "https://github.com/jan-moravec/jspdlog"
     homepage = "https://github.com/jan-moravec/jspdlog"

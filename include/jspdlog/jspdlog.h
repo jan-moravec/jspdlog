@@ -40,9 +40,9 @@
 /** @brief Major version of jspdlog. */
 #define JSPDLOG_VERSION_MAJOR 0
 /** @brief Minor version of jspdlog. */
-#define JSPDLOG_VERSION_MINOR 6
+#define JSPDLOG_VERSION_MINOR 7
 /** @brief Patch version of jspdlog. */
-#define JSPDLOG_VERSION_PATCH 1
+#define JSPDLOG_VERSION_PATCH 0
 /** @brief The version as one number, major * 10000 + minor * 100 + patch, for #if comparisons. */
 #define JSPDLOG_VERSION ((JSPDLOG_VERSION_MAJOR * 10000) + (JSPDLOG_VERSION_MINOR * 100) + JSPDLOG_VERSION_PATCH)
 
@@ -101,6 +101,10 @@
 #include <optional>
 #include <random>
 #include <ratio>
+#if __has_include(<source_location>) &&                                                                                \
+    (__cplusplus >= 202002L || (defined(_MSVC_LANG) && _MSVC_LANG >= 202002L))
+#include <source_location>
+#endif
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -1139,13 +1143,13 @@ struct fmt::formatter<jspdlog::detail::deferred_payload<Write>>
     constexpr auto parse(fmt::format_parse_context &ctx) -> decltype(ctx.begin()) { return ctx.begin(); }
 #endif
 
-    /** @brief Runs the write function and copies its output. */
+    /** @brief Runs the write function and copies its output, in bulk where the library's output allows it. */
     template <typename Context>
     auto format(const jspdlog::detail::deferred_payload<Write> &payload, Context &ctx) const -> decltype(ctx.out())
     {
         spdlog::memory_buf_t buf;
         (*payload.write)(buf);
-        return std::copy(buf.begin(), buf.end(), ctx.out());
+        return spdlog::fmt_lib::format_to(ctx.out(), "{}", spdlog::fmt_lib::string_view{buf.data(), buf.size()});
     }
 };
 
@@ -1153,6 +1157,7 @@ namespace jspdlog
 {
 
 class json_logger;
+class located_logger;
 
 namespace detail
 {
@@ -3438,27 +3443,89 @@ namespace detail
 {
 
 /**
- * @brief A call site, filled in by default arguments at the caller.
- *
- * The builtins are default arguments of a constructor that is not a template. GCC evaluates a builtin in the default
- * argument of a function template where the template is written instead of where it is called, which a constructor
- * default argument avoids.
+ * @brief The first parameter of the call_site constructor. Its constructor is explicit, so no string converts to a
+ * call_site, which would make a braced list of two strings ambiguous between fields and a message.
  */
-struct site
+struct site_tag
 {
-    /** @brief Captures the place where the site is default-constructed, which is the call of a logging function. */
-    explicit constexpr site(
-        const char *f = __builtin_FILE(), int l = __builtin_LINE(), const char *fn = __builtin_FUNCTION()
+    /** @brief The only constructor. */
+    explicit site_tag() = default;
+};
+
+/** @brief The line number of an spdlog::source_loc or a std::source_location, whose types differ, as an int. */
+template <typename Line>
+constexpr int to_line(Line line) noexcept
+{
+    return static_cast<int>(line);
+}
+
+} // namespace detail
+
+/**
+ * @brief The place of a logging call: file, line and function.
+ *
+ * A default-constructed call_site records where it is constructed, so a function that logs for its caller takes one as
+ * a defaulted parameter and passes it on with json_logger::at:
+ *
+ * @code
+ * void audit(const jspdlog::json_logger &log, std::string_view what, jspdlog::call_site where = {})
+ * {
+ *     log.at(where).info({"what", what}, "audit"); // the line of audit's caller
+ * }
+ * @endcode
+ *
+ * The file and function are pointers, not copies: they must outlive the logging call, which string literals and the
+ * compiler's names do. With an asynchronous logger they must live as long as the queued line, which spdlog does not
+ * copy them into.
+ */
+class call_site
+{
+public:
+    // The builtins are default arguments of a constructor that is not a template. GCC evaluates a builtin in the
+    // default argument of a function template where the template is written instead of where it is called, which a
+    // constructor default argument avoids.
+    /** @brief Records the place where it is constructed. Leave every argument at its default. */
+    // Implicit on purpose: a parameter declared as call_site where = {} must work.
+    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
+    constexpr call_site(
+        detail::site_tag /*tag*/ = detail::site_tag{},
+        const char *file = __builtin_FILE(),
+        int line = __builtin_LINE(),
+        const char *function = __builtin_FUNCTION()
     ) noexcept
-        : file_(f), line_(l), function_(fn)
+        : file_(file), line_(line), function_(function)
     {
     }
+
+    /**
+     * @brief A call site given explicitly, for example by another logging framework. A null file or a line of 0 or less
+     * stands for no call site, which a json_formatter leaves out of the line. A null function is written as an empty
+     * string.
+     */
+    [[nodiscard]] static constexpr call_site of(const char *file, int line, const char *function) noexcept
+    {
+        return {detail::site_tag{}, file, line, function};
+    }
+
+    /** @brief The call site of an spdlog::source_loc. */
+    [[nodiscard]] static call_site of(const spdlog::source_loc &loc) noexcept
+    {
+        return of(loc.filename, detail::to_line(loc.line), loc.funcname);
+    }
+
+#ifdef __cpp_lib_source_location
+    /** @brief The call site of a std::source_location, from C++20 on. */
+    [[nodiscard]] static call_site of(const std::source_location &loc) noexcept
+    {
+        return of(loc.file_name(), detail::to_line(loc.line()), loc.function_name());
+    }
+#endif
 
     /** @brief The source file, as the compiler spells it. */
     [[nodiscard]] constexpr const char *file() const noexcept { return file_; }
     /** @brief The line of the call. */
     [[nodiscard]] constexpr int line() const noexcept { return line_; }
-    /** @brief The short name of the calling function, which depends on the compiler. */
+    /** @brief The name of the calling function, which depends on the compiler or on where the call site came from. */
     [[nodiscard]] constexpr const char *function() const noexcept { return function_; }
 
 private:
@@ -3469,6 +3536,12 @@ private:
     /** @brief The name of the calling function. */
     const char *function_;
 };
+
+namespace detail
+{
+
+/** @brief The name the logging internals use for a call_site. */
+using site = call_site;
 
 /** @brief std::type_identity for C++17, used to keep a parameter out of template argument deduction. */
 template <typename T>
@@ -3514,24 +3587,34 @@ std::string_view format_text(const F &f) noexcept
 #endif
 
 /**
- * @brief Whether a type is a writable char array, such as a buffer filled at run time. String literals are const
- * arrays, so they stay format strings.
+ * @brief Whether a type is a char array: a string literal or a buffer filled at run time. A reference parameter deduces
+ * both as an array of char, so the two cannot be told apart.
  */
 template <typename S>
 inline constexpr bool is_char_buffer_v = std::is_array_v<S> && std::is_same_v<std::remove_extent_t<S>, char>;
 
 /**
- * @brief Whether a type is a string a call may pass as a message: a std::string, std::string_view, C string or
- * writable char array.
+ * @brief Whether a type is a string a call may pass as a message: a std::string, std::string_view, C string or char
+ * array, string literals included.
  */
 template <typename S>
 inline constexpr bool is_runtime_string_v =
     std::is_same_v<S, std::string> || std::is_same_v<S, std::string_view> || std::is_same_v<S, const char *> ||
     std::is_same_v<S, char *> || is_char_buffer_v<S>;
 
-/** @brief Enables an overload for runtime strings only. String literals go to the format-string overloads. */
-template <typename S>
-using if_runtime_string = std::enable_if_t<is_runtime_string_v<S>, int>;
+/** @brief Whether a message is a format string: with arguments, anything {fmt} or std::format may accept as one. */
+template <typename S, std::size_t ArgCount>
+inline constexpr bool is_format_source_v =
+    ArgCount != 0 && std::is_convertible_v<const S &, spdlog::fmt_lib::string_view>;
+
+/** @brief Whether a message is taken as it is: a string without arguments. */
+template <typename S, std::size_t ArgCount>
+inline constexpr bool is_plain_message_v = ArgCount == 0 && is_runtime_string_v<S>;
+
+/** @brief Whether a call form takes the type as its exception: a std::exception or a std::exception_ptr. */
+template <typename E>
+inline constexpr bool is_exception_arg_v =
+    std::is_base_of_v<std::exception, E> || std::is_same_v<E, std::exception_ptr>;
 
 /**
  * @brief Enables an overload for exceptions only. The exception parameter is a template, not a const std::exception
@@ -3539,19 +3622,19 @@ using if_runtime_string = std::enable_if_t<is_runtime_string_v<S>, int>;
  * and an int, so a braced list such as {"k", 1} would convert to one.
  */
 template <typename E>
-using if_exception = std::enable_if_t<std::is_base_of_v<std::exception, E>, int>;
+using if_exception = std::enable_if_t<is_exception_arg_v<E>, int>;
 
 /**
  * @brief Whether a single argument is neither a string, a format string nor a fields object, so it cannot be a message.
  *
  * A fields object is excluded because a call form with fields converts it to the per-call parameter, and a template
- * that matches the type exactly would win over that conversion. An exception is excluded for the same reason against
- * the exception call forms, which take a const std::exception reference.
+ * that matches the type exactly would win over that conversion. An exception is excluded because the exception call
+ * forms take it.
  */
 template <typename T>
 inline constexpr bool is_rejected_message_v =
     !is_runtime_string_v<T> && !std::is_array_v<T> && !std::is_same_v<T, runtime_format_string> &&
-    !std::is_same_v<T, fields> && !std::is_base_of_v<std::exception, T>;
+    !std::is_same_v<T, fields> && !is_exception_arg_v<T>;
 
 /**
  * @brief Views a runtime string as a std::string_view. A null C string is an empty message, and a char array ends at
@@ -3750,8 +3833,39 @@ private:
 };
 
 /**
+ * @brief The exception of an exception call: a pointer to a std::exception, or a pointer to a std::exception_ptr,
+ * which may hold nothing. Both are null for a call without an exception.
+ */
+// NOLINTBEGIN(misc-non-private-member-variables-in-classes): plain data that lives for one logging call
+struct exception_ref
+{
+    /** @brief The std::exception of the call, or null. */
+    const std::exception *ex = nullptr;
+    /** @brief The std::exception_ptr of the call, or null. */
+    const std::exception_ptr *ptr = nullptr;
+
+    /** @brief Whether the call has an exception argument, even a std::exception_ptr that holds nothing. */
+    [[nodiscard]] bool present() const noexcept { return ex != nullptr || ptr != nullptr; }
+};
+// NOLINTEND(misc-non-private-member-variables-in-classes)
+
+/** @brief Refers to the exception argument of a call, which must outlive the call. */
+template <typename E>
+exception_ref make_exception_ref(const E &ex) noexcept
+{
+    if constexpr (std::is_same_v<E, std::exception_ptr>)
+    {
+        return {nullptr, std::addressof(ex)};
+    }
+    else
+    {
+        return {std::addressof(ex), nullptr};
+    }
+}
+
+/**
  * @brief Writes the exception of an exception call as a field: a comma, the marker of the error key and the exception
- * object. The value of the reference is the std::exception.
+ * object, or null for a std::exception_ptr that holds nothing. The value of the reference is the exception_ref.
  */
 inline void write_exception_field(spdlog::memory_buf_t &out, const call_fields::ref &r, call_fields::write_state &state)
 {
@@ -3759,90 +3873,283 @@ inline void write_exception_field(spdlog::memory_buf_t &out, const call_fields::
     out.push_back(MARKER);
     out.push_back(MARK_ERROR);
     json_writer w = writer_access::to_buffer(out);
-    write_exception(w, *static_cast<const std::exception *>(r.value));
+    const exception_ref &exception = *static_cast<const exception_ref *>(r.value);
+    if (exception.ex != nullptr)
+    {
+        write_exception(w, *exception.ex);
+    }
+    else
+    {
+        write_exception_ptr(w, *exception.ptr);
+    }
     state.marked = true;
 }
 
 } // namespace detail
 
 /**
- * @brief A format string together with the place where it was written.
+ * @brief The message of a logging call, with the place where the call was written.
  *
- * Logging functions take it instead of a plain format string, so the call site is captured by default arguments and
- * no macro is needed. The format string is checked at compile time where {fmt} can do so. Wrapping it in fmt::runtime
- * is accepted and checked at run time.
+ * With arguments, the message is a format string for them: a string literal, which is checked at compile time where
+ * {fmt} or std::format can, any other compile-time format string they accept, or fmt::runtime(text), which is checked
+ * at run time. Without arguments, a string literal, std::string, std::string_view, C string or char array is the
+ * message as it is, not a format string, as in spdlog: braces stay as they are. A char array ends at its first null
+ * character.
+ *
+ * Logging functions take it by value, so the call site is captured by default arguments and no macro is needed.
  */
 template <typename... Args>
-class basic_format_here
+class basic_message
 {
 public:
-    /** @brief Converts a string literal, capturing the call site of the logging function. */
-    template <typename S, std::enable_if_t<std::is_convertible_v<const S &, spdlog::fmt_lib::string_view>, int> = 0>
-    // Implicit on purpose: a string literal or fmt::runtime must convert at the call.
+    /** @brief Converts the format string of a call with arguments, capturing the call site of the logging function. */
+    template <typename S, std::enable_if_t<detail::is_format_source_v<S, sizeof...(Args)>, int> = 0>
+    // Implicit on purpose: a message must convert at the call.
     // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
-    JSPDLOG_FORMAT_CONSTEVAL basic_format_here(const S &s, detail::site w = detail::site())
-        : fmt_(s), where_(w)
+    JSPDLOG_FORMAT_CONSTEVAL basic_message(const S &s, detail::site where = detail::site())
+        : fmt_(s), where_(where)
+    {
+    }
+
+    /** @brief Converts a message that is taken as it is, capturing the call site of the logging function. */
+    template <typename S, std::enable_if_t<detail::is_plain_message_v<S, sizeof...(Args)>, int> = 0>
+    // Implicit on purpose: a message must convert at the call.
+    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
+    basic_message(const S &s, detail::site where = detail::site())
+        : fmt_(empty_format_()), plain_(detail::message_view(s)), is_plain_(true), where_(where)
     {
     }
 
 #if JSPDLOG_HAS_RUNTIME_FORMAT
     /** @brief Converts fmt::runtime(...), capturing the call site of the logging function. */
-    // Implicit on purpose: a string literal or fmt::runtime must convert at the call.
+    // Implicit on purpose: a message must convert at the call.
     // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
-    basic_format_here(detail::runtime_format_string r, detail::site w = detail::site())
-        : fmt_(r), where_(w)
+    basic_message(detail::runtime_format_string r, detail::site where = detail::site())
+        : fmt_(r), where_(where)
     {
     }
 #endif
 
-    /** @brief The format string. */
+    /** @brief Whether the message is taken as it is. Then plain gives it, and else format does. */
+    [[nodiscard]] bool is_plain() const noexcept { return is_plain_; }
+    /** @brief The text of a plain message, viewed in the caller's string. */
+    [[nodiscard]] std::string_view plain() const noexcept { return plain_; }
+    /** @brief The format string, which is empty for a plain message. */
     [[nodiscard]] spdlog::format_string_t<Args...> format() const noexcept { return fmt_; }
     /** @brief The call site. */
     [[nodiscard]] detail::site where() const noexcept { return where_; }
 
 private:
+    /**
+     * @brief The empty format string of a plain message. It is copied from a variable, because GCC 13 rejects a
+     * consteval constructor called in the member initializer of a constructor that runs at run time.
+     */
+    static const spdlog::format_string_t<Args...> &empty_format_()
+    {
+        static const spdlog::format_string_t<Args...> EMPTY("");
+        return EMPTY;
+    }
+
     /** @brief The format string. */
     spdlog::format_string_t<Args...> fmt_;
+    /** @brief The text of a plain message. */
+    std::string_view plain_;
+    /** @brief Whether the message is plain_ and not fmt_. */
+    bool is_plain_ = false;
     /** @brief The call site. */
     detail::site where_;
 };
 
-/** @brief The format-string parameter of a logging function, whose arguments are deduced from the other parameters. */
+/** @brief The message parameter of a logging function, whose arguments are deduced from the other parameters. */
 template <typename... Args>
-using format_here_t = basic_format_here<typename detail::type_identity<Args>::type...>;
+using message_t = basic_message<typename detail::type_identity<Args>::type...>;
+
+namespace detail
+{
+
+/** @brief An empty set of fields, shared by the call forms without fields. */
+inline const call_fields &empty_call_fields()
+{
+    static const call_fields EMPTY{};
+    return EMPTY;
+}
+
+/**
+ * @brief The call forms of a logger: trace, debug, info, warn, error and critical, and log with the level as the first
+ * argument.
+ *
+ * Each of them takes a message with its format arguments; fields; fields and a message; an exception, with fields if
+ * given; an exception and a message; or an exception, fields and a message. A single argument of another type is
+ * deleted. json_logger documents what they write.
+ *
+ * Derived provides dispatch_, which takes the level, the exception_ref, the fields, the call site, the payload kind and
+ * a function that appends the message, and decides whether anything is written.
+ */
+template <typename Derived>
+class call_api
+{
+public:
+    /** @brief Writes a message: a format string with its arguments, or a string as it is. */
+    template <typename... Args>
+    void log(level lvl, message_t<Args...> m, Args &&...args) const
+    {
+        log_message_(lvl, {}, empty_call_fields(), m, std::forward<Args>(args)...);
+    }
+
+    /** @brief Writes a line with fields only, without a message. */
+    void log(level lvl, const call_fields &f, site where = site()) const { log_fields_(lvl, {}, f, where); }
+
+    /** @brief Writes fields and a message. */
+    template <typename... Args>
+    void log(level lvl, const call_fields &f, message_t<Args...> m, Args &&...args) const
+    {
+        log_message_(lvl, {}, f, m, std::forward<Args>(args)...);
+    }
+
+    /**
+     * @brief Writes an exception under the error key of the sink, with fields if given and without a message. The
+     * fields have a default and are not a separate overload, so a braced list cannot be taken for the call site.
+     */
+    template <typename E, if_exception<E> = 0>
+    void log(level lvl, const E &ex, const call_fields &f = empty_call_fields(), site where = site()) const
+    {
+        log_fields_(lvl, make_exception_ref(ex), f, where);
+    }
+
+    /** @brief Writes an exception and a message. */
+    template <typename E, if_exception<E> = 0, typename... Args>
+    void log(level lvl, const E &ex, message_t<Args...> m, Args &&...args) const
+    {
+        log_message_(lvl, make_exception_ref(ex), empty_call_fields(), m, std::forward<Args>(args)...);
+    }
+
+    /** @brief Writes an exception, fields and a message. */
+    template <typename E, if_exception<E> = 0, typename... Args>
+    void log(level lvl, const E &ex, const call_fields &f, message_t<Args...> m, Args &&...args) const
+    {
+        log_message_(lvl, make_exception_ref(ex), f, m, std::forward<Args>(args)...);
+    }
+
+    /** @brief Rejects a single argument that is not a string. Put typed values in fields. */
+    template <typename T, std::enable_if_t<is_rejected_message_v<T>, int> = 0>
+    void log(level lvl, const T &) const = delete;
+
+// Defines the call forms for one level. Undefined right after use.
+#define JSPDLOG_DETAIL_LEVEL_FUNCTIONS(name, lvl)                                                                      \
+    template <typename... Args>                                                                                        \
+    void name(message_t<Args...> m, Args &&...args) const                                                              \
+    {                                                                                                                  \
+        log_message_(lvl, {}, empty_call_fields(), m, std::forward<Args>(args)...);                                    \
+    }                                                                                                                  \
+    void name(const call_fields &f, site where = site()) const                                                         \
+    {                                                                                                                  \
+        log_fields_(lvl, {}, f, where);                                                                                \
+    }                                                                                                                  \
+    template <typename... Args>                                                                                        \
+    void name(const call_fields &f, message_t<Args...> m, Args &&...args) const                                        \
+    {                                                                                                                  \
+        log_message_(lvl, {}, f, m, std::forward<Args>(args)...);                                                      \
+    }                                                                                                                  \
+    template <typename E, if_exception<E> = 0>                                                                         \
+    void name(const E &ex, const call_fields &f = empty_call_fields(), site where = site()) const                      \
+    {                                                                                                                  \
+        log_fields_(lvl, make_exception_ref(ex), f, where);                                                            \
+    }                                                                                                                  \
+    template <typename E, if_exception<E> = 0, typename... Args>                                                       \
+    void name(const E &ex, message_t<Args...> m, Args &&...args) const                                                 \
+    {                                                                                                                  \
+        log_message_(lvl, make_exception_ref(ex), empty_call_fields(), m, std::forward<Args>(args)...);                \
+    }                                                                                                                  \
+    template <typename E, if_exception<E> = 0, typename... Args>                                                       \
+    void name(const E &ex, const call_fields &f, message_t<Args...> m, Args &&...args) const                           \
+    {                                                                                                                  \
+        log_message_(lvl, make_exception_ref(ex), f, m, std::forward<Args>(args)...);                                  \
+    }                                                                                                                  \
+    template <typename T, std::enable_if_t<is_rejected_message_v<T>, int> = 0>                                         \
+    void name(const T &) const = delete;
+
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(trace, level::trace)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(debug, level::debug)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(info, level::info)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(warn, level::warn)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(error, level::err)
+    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(critical, level::critical)
+#undef JSPDLOG_DETAIL_LEVEL_FUNCTIONS
+
+private:
+    friend Derived;
+    /** @brief Only Derived makes one. */
+    call_api() = default;
+
+    /** @brief The logger these forms belong to. */
+    [[nodiscard]] const Derived &self_() const noexcept { return static_cast<const Derived &>(*this); }
+
+    /** @brief Writes a line with fields only. */
+    void log_fields_(level lvl, exception_ref ex, const call_fields &f, site where) const
+    {
+        self_().dispatch_(lvl, ex, f, where, KIND_FIELDS, [](spdlog::memory_buf_t & /*out*/) {});
+    }
+
+    /** @brief Writes fields and a message: a plain one as it is, a format string with its arguments. */
+    template <typename... Args>
+    void log_message_(
+        level lvl, exception_ref ex, const call_fields &f, const basic_message<Args...> &m, Args &&...args
+    ) const
+    {
+        self_().dispatch_(lvl, ex, f, m.where(), KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
+            if (m.is_plain())
+            {
+                append_json_quoted(out, m.plain());
+                return;
+            }
+            spdlog::memory_buf_t msg;
+#if JSPDLOG_STD_FORMAT
+            std::vformat_to(std::back_inserter(msg), format_text(m.format()), std::make_format_args(args...));
+#else
+            spdlog::fmt_lib::format_to(std::back_inserter(msg), m.format(), std::forward<Args>(args)...);
+#endif
+            append_json_quoted(out, std::string_view{msg.data(), msg.size()});
+        });
+    }
+};
+
+} // namespace detail
 
 /**
  * @brief A logger that writes one JSON object per line.
  *
  * Copies share the underlying spdlog::logger, so its level, sinks and error handler apply to every copy. They also
  * share the bound fields, which are immutable: with returns a child that adds fields to every line it writes, which is
- * how inner code adds context without affecting its caller. Copying a json_logger copies two pointers.
+ * how inner code adds context without affecting its caller. Copying a json_logger copies two pointers. A
+ * default-constructed or moved-from json_logger is a null logger, which writes nothing.
  *
  * The logging calls are const and only read the json_logger, so inner code can take a const reference, and several
  * threads can log through one json_logger, its copies and its children at once. Whether their lines are written safely
  * is up to the sinks, as in spdlog: use the _mt sinks when logging from several threads.
  *
- * Each level has five call forms, also available through log with the level as the first argument:
+ * Each level has three call forms, also available through log with the level as the first argument. A message is what
+ * basic_message takes: a format string with its arguments, or a string that is written as it is.
  *
  * @code
- * logger.info("loaded {} items", n);    // formatted message
- * logger.info(text);                    // a runtime string as the message
+ * logger.info("loaded {} items", n);    // a message
  * logger.info({"items", n});            // fields only, no message
- * logger.info({"items", n}, "loaded");  // fields and a formatted message
- * logger.info({"items", n}, text);      // fields and a runtime string as the message
+ * logger.info({"items", n}, "loaded");  // fields and a message
  * logger.info({"plan", [&] { return explain(q); }}, "planned");  // a lazy value
  * @endcode
  *
- * Each level also has six call forms that take a std::exception first, with the same endings: no message, a message or
- * a format string, and each with fields too. They write the exception under json_options::error_key, as an object with
- * its type name and message, and its nested causes under json_options::error_cause_key. It is the only field with that
- * key. If there are other fields with the key, bound or of the call, it takes the position of the first of them and
- * they are all left out. Otherwise it comes after the bound fields and before the new fields of the call. The exception
- * is written only when the line is, so a call at a disabled level computes nothing.
+ * Each level also has three call forms that take an exception first, a std::exception or a std::exception_ptr,
+ * followed by optional fields, by a message, or by fields and a message. They write the exception under
+ * json_options::error_key, as an object with its type name and message, and its nested causes under
+ * json_options::error_cause_key. A std::exception_ptr to something else is written with the type unknown and no
+ * message, and one that holds nothing is written as null. It is the only field with that key. If there are other fields
+ * with the key, bound or of the call, it takes the position of the first of them and they are all left out. Otherwise
+ * it comes after the bound fields and before the new fields of the call. The exception is written only when the line
+ * is, so a call at a disabled level computes nothing.
  *
  * @code
  * try { connect(); }
  * catch (const std::exception &ex) { logger.error(ex, {"host", host}, "connect failed"); }
+ * catch (...) { logger.error(std::current_exception(), {"host", host}, "connect failed"); }
  * @endcode
  *
  * A braced list is kept as references and serialized only when the line is written, so a call at a disabled level
@@ -3855,11 +4162,13 @@ using format_here_t = basic_format_here<typename detail::type_identity<Args>::ty
  * it for dump_backtrace, so its values are serialized and its arguments run.
  *
  * The message is always a JSON string, and a single argument that is not a string is rejected at compile time: put
- * values that should keep their type in fields. A string literal is a format string checked at compile time; a
- * std::string, std::string_view, C string or writable char array is taken as it is. Convert other string types first.
+ * values that should keep their type in fields. With arguments, a string literal is a format string checked at compile
+ * time. Without them, a literal, std::string, std::string_view, C string or char array is taken as it is. Convert other
+ * string types first.
  *
  * Every call records its file, line and function, and the formatter writes them when json_options::source_key is set.
- * The function is the short name the compiler gives, which differs between compilers.
+ * The function is the short name the compiler gives, which differs between compilers. A function that logs for its
+ * caller records the caller's place with at.
  *
  * Lines list the header fields, the bound fields of outer and inner loggers, the fields of the call and then the
  * message. A key that appears again, in an inner logger or in a call, replaces the value and stays where it first
@@ -3882,9 +4191,18 @@ using format_here_t = basic_format_here<typename detail::type_identity<Args>::ty
  * formatter, is not supported on platforms where each module has its own token, such as Windows DLLs: the line stays
  * valid JSON, but the fields appear inside the message.
  */
-class json_logger
+class json_logger : public detail::call_api<json_logger>
 {
 public:
+    /**
+     * @brief A null logger, which writes nothing.
+     *
+     * Every logging call is dropped before its arguments are looked at, should_log is false, log_level is off,
+     * set_level, flush and flush_on do nothing, name and context are empty, with returns another null logger and
+     * spdlog_logger is null. Use it for a member that is set later. A moved-from logger is a null logger too.
+     */
+    json_logger() noexcept = default;
+
     /** @brief Creates a logger writing to one sink. Throws std::invalid_argument if the sink is null or the options
      * would write a key twice. */
     json_logger(std::string name, spdlog::sink_ptr sink, const json_options &options = {})
@@ -3954,15 +4272,15 @@ public:
      * The child shares this logger's spdlog::logger and keeps this logger's bound fields. Where both have a key, the
      * value from f wins and the key keeps its position. This logger is not changed, and the child's fields are
      * immutable, so any number of threads can log through the child, this logger and their copies at once. With an
-     * empty f the child is a copy of this logger and shares its fields.
+     * empty f the child is a copy of this logger and shares its fields. The child of a null logger is a null logger.
      */
     [[nodiscard]] json_logger with(const fields &f) const
     {
-        if (f.empty())
+        if (logger_ == nullptr || f.empty())
         {
             return *this;
         }
-        auto ctx = std::make_shared<context_data>(*context_);
+        auto ctx = std::make_shared<context_data>(ctx_());
         ctx->values.merge(f);
         json_logger child = *this;
         child.context_ = std::move(ctx);
@@ -3970,156 +4288,34 @@ public:
     }
 
     /** @brief The fields bound to this logger by with. */
-    [[nodiscard]] const fields &context() const noexcept { return context_->values; }
-
-    /** @brief Writes a line with fields only, without a message. */
-    void log(level lvl, const detail::call_fields &f, detail::site where = detail::site()) const
-    {
-        log_fields_(lvl, nullptr, f, where);
-    }
-
-    /** @brief Writes a formatted message. The format string is checked at compile time. */
-    template <typename... Args>
-    void log(level lvl, format_here_t<Args...> fmt, Args &&...args) const
-    {
-        log_fmt_(lvl, nullptr, empty_call_fields_(), fmt, std::forward<Args>(args)...);
-    }
-
-    /** @brief Writes a runtime string as the message. */
-    template <typename S, detail::if_runtime_string<S> = 0>
-    void log(level lvl, const S &msg, detail::site where = detail::site()) const
-    {
-        log_str_(lvl, nullptr, empty_call_fields_(), detail::message_view(msg), where);
-    }
-
-    /** @brief Writes fields and a formatted message. */
-    template <typename... Args>
-    void log(level lvl, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const
-    {
-        log_fmt_(lvl, nullptr, f, fmt, std::forward<Args>(args)...);
-    }
-
-    /** @brief Writes fields and a runtime string as the message. */
-    template <typename S, detail::if_runtime_string<S> = 0>
-    void log(level lvl, const detail::call_fields &f, const S &msg, detail::site where = detail::site()) const
-    {
-        log_str_(lvl, nullptr, f, detail::message_view(msg), where);
-    }
-
-    /** @brief Writes an exception and a formatted message. */
-    template <typename E, detail::if_exception<E> = 0, typename... Args>
-    void log(level lvl, const E &ex, format_here_t<Args...> fmt, Args &&...args) const
-    {
-        log_fmt_(lvl, &ex, empty_call_fields_(), fmt, std::forward<Args>(args)...);
-    }
-
-    /** @brief Writes an exception and a runtime string as the message. */
-    template <typename E, typename S, detail::if_exception<E> = 0, detail::if_runtime_string<S> = 0>
-    void log(level lvl, const E &ex, const S &msg, detail::site where = detail::site()) const
-    {
-        log_str_(lvl, &ex, empty_call_fields_(), detail::message_view(msg), where);
-    }
+    [[nodiscard]] const fields &context() const noexcept { return ctx_().values; }
 
     /**
-     * @brief Writes an exception under the error key of the sink, with fields if given and without a message. The
-     * fields have a default and are not a separate overload, so a braced list cannot be taken for the call site.
+     * @brief The same logger with a fixed call site, for one call: logger.at(where).info(...).
+     *
+     * Every call form works, and where replaces the call site of the expression. The result holds a reference to this
+     * logger, so use it in the same expression. A function that logs for its caller takes a call_site parameter that
+     * defaults to {} and passes it on here.
      */
-    template <typename E, detail::if_exception<E> = 0>
-    void log(
-        level lvl, const E &ex, const detail::call_fields &f = empty_call_fields_(), detail::site where = detail::site()
-    ) const
-    {
-        log_fields_(lvl, &ex, f, where);
-    }
+    [[nodiscard]] located_logger at(const call_site &where) const noexcept;
 
-    /** @brief Writes an exception, fields and a formatted message. */
-    template <typename E, detail::if_exception<E> = 0, typename... Args>
-    void log(level lvl, const E &ex, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const
-    {
-        log_fmt_(lvl, &ex, f, fmt, std::forward<Args>(args)...);
-    }
-
-    /** @brief Writes an exception, fields and a runtime string as the message. */
-    template <typename E, typename S, detail::if_exception<E> = 0, detail::if_runtime_string<S> = 0>
-    void
-    log(level lvl, const E &ex, const detail::call_fields &f, const S &msg, detail::site where = detail::site()) const
-    {
-        log_str_(lvl, &ex, f, detail::message_view(msg), where);
-    }
-
-    /** @brief Rejects a single argument that is not a string. Put typed values in fields. */
-    template <typename T, std::enable_if_t<detail::is_rejected_message_v<T>, int> = 0>
-    void log(level lvl, const T &) const = delete;
-
-// Defines the call forms for one level. Undefined right after use.
-#define JSPDLOG_DETAIL_LEVEL_FUNCTIONS(name, lvl)                                                                      \
-    template <typename... Args>                                                                                        \
-    void name(format_here_t<Args...> fmt, Args &&...args) const                                                        \
-    {                                                                                                                  \
-        log_fmt_(lvl, nullptr, empty_call_fields_(), fmt, std::forward<Args>(args)...);                                \
-    }                                                                                                                  \
-    template <typename S, detail::if_runtime_string<S> = 0>                                                            \
-    void name(const S &msg, detail::site where = detail::site()) const                                                 \
-    {                                                                                                                  \
-        log_str_(lvl, nullptr, empty_call_fields_(), detail::message_view(msg), where);                                \
-    }                                                                                                                  \
-    void name(const detail::call_fields &f, detail::site where = detail::site()) const                                 \
-    {                                                                                                                  \
-        log_fields_(lvl, nullptr, f, where);                                                                           \
-    }                                                                                                                  \
-    template <typename... Args>                                                                                        \
-    void name(const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const                          \
-    {                                                                                                                  \
-        log_fmt_(lvl, nullptr, f, fmt, std::forward<Args>(args)...);                                                   \
-    }                                                                                                                  \
-    template <typename S, detail::if_runtime_string<S> = 0>                                                            \
-    void name(const detail::call_fields &f, const S &msg, detail::site where = detail::site()) const                   \
-    {                                                                                                                  \
-        log_str_(lvl, nullptr, f, detail::message_view(msg), where);                                                   \
-    }                                                                                                                  \
-    template <typename E, detail::if_exception<E> = 0, typename... Args>                                               \
-    void name(const E &ex, format_here_t<Args...> fmt, Args &&...args) const                                           \
-    {                                                                                                                  \
-        log_fmt_(lvl, &ex, empty_call_fields_(), fmt, std::forward<Args>(args)...);                                    \
-    }                                                                                                                  \
-    template <typename E, typename S, detail::if_exception<E> = 0, detail::if_runtime_string<S> = 0>                   \
-    void name(const E &ex, const S &msg, detail::site where = detail::site()) const                                    \
-    {                                                                                                                  \
-        log_str_(lvl, &ex, empty_call_fields_(), detail::message_view(msg), where);                                    \
-    }                                                                                                                  \
-    template <typename E, detail::if_exception<E> = 0>                                                                 \
-    void name(const E &ex, const detail::call_fields &f = empty_call_fields_(), detail::site where = detail::site())   \
-        const                                                                                                          \
-    {                                                                                                                  \
-        log_fields_(lvl, &ex, f, where);                                                                               \
-    }                                                                                                                  \
-    template <typename E, detail::if_exception<E> = 0, typename... Args>                                               \
-    void name(const E &ex, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args) const             \
-    {                                                                                                                  \
-        log_fmt_(lvl, &ex, f, fmt, std::forward<Args>(args)...);                                                       \
-    }                                                                                                                  \
-    template <typename E, typename S, detail::if_exception<E> = 0, detail::if_runtime_string<S> = 0>                   \
-    void name(const E &ex, const detail::call_fields &f, const S &msg, detail::site where = detail::site()) const      \
-    {                                                                                                                  \
-        log_str_(lvl, &ex, f, detail::message_view(msg), where);                                                       \
-    }                                                                                                                  \
-    template <typename T, std::enable_if_t<detail::is_rejected_message_v<T>, int> = 0>                                 \
-    void name(const T &) const = delete;
-
-    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(trace, level::trace)
-    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(debug, level::debug)
-    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(info, level::info)
-    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(warn, level::warn)
-    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(error, level::err)
-    JSPDLOG_DETAIL_LEVEL_FUNCTIONS(critical, level::critical)
-#undef JSPDLOG_DETAIL_LEVEL_FUNCTIONS
+    /** @brief Whether the logger writes anywhere, that is, whether it is not a null logger. */
+    explicit operator bool() const noexcept { return logger_ != nullptr; }
 
     /** @brief The logger name, as given at construction or taken from the adopted spdlog::logger. */
-    [[nodiscard]] const std::string &name() const noexcept { return logger_->name(); }
+    [[nodiscard]] const std::string &name() const noexcept
+    {
+        static const std::string NONE;
+        return logger_ != nullptr ? logger_->name() : NONE;
+    }
 
     /** @brief The level below which calls are dropped. Shared by every copy. */
     [[nodiscard]] level log_level() const noexcept
     {
+        if (logger_ == nullptr)
+        {
+            return level::off;
+        }
 #if JSPDLOG_SPDLOG_V2
         return logger_->log_level();
 #else
@@ -4128,24 +4324,44 @@ public:
     }
 
     /** @brief Sets the level below which calls are dropped, for every copy. */
-    void set_level(level lvl) { logger_->set_level(lvl); }
+    void set_level(level lvl)
+    {
+        if (logger_ != nullptr)
+        {
+            logger_->set_level(lvl);
+        }
+    }
     /**
      * @brief Whether a call at this level would be written. Use it to skip building expensive fields or arguments.
      *
      * With spdlog v1's backtrace enabled, a call at a level that should_log rejects is still stored for dump_backtrace;
      * guard with should_log only what the backtrace may miss.
      */
-    [[nodiscard]] bool should_log(level lvl) const noexcept { return logger_->should_log(lvl); }
+    [[nodiscard]] bool should_log(level lvl) const noexcept { return logger_ != nullptr && logger_->should_log(lvl); }
     /**
      * @brief Flushes every sink. On an asynchronous logger it only queues the request behind the waiting lines and
      * returns at once.
      */
-    void flush() { logger_->flush(); }
+    void flush()
+    {
+        if (logger_ != nullptr)
+        {
+            logger_->flush();
+        }
+    }
+
     /** @brief Flushes automatically after every line at this level or above. */
-    void flush_on(level lvl) { logger_->flush_on(lvl); }
+    void flush_on(level lvl)
+    {
+        if (logger_ != nullptr)
+        {
+            logger_->flush_on(lvl);
+        }
+    }
 
     /**
-     * @brief The underlying spdlog::logger, for settings jspdlog does not wrap, such as the error handler.
+     * @brief The underlying spdlog::logger, for settings jspdlog does not wrap, such as the error handler. Null for a
+     * null logger.
      *
      * Logging through it directly is safe: the message is escaped into the message field. Setting a pattern or
      * formatter on it or on its sinks replaces the json_formatter, and the lines then show the payload protocol. Call
@@ -4154,6 +4370,8 @@ public:
     [[nodiscard]] const std::shared_ptr<spdlog::logger> &spdlog_logger() const noexcept { return logger_; }
 
 private:
+    friend class detail::call_api<json_logger>;
+    friend class located_logger;
     friend struct detail::logger_access;
 
     /** @brief What a logger and its copies share. Immutable. */
@@ -4182,6 +4400,13 @@ private:
         : json_logger(std::move(logger), attach_tag{})
     {
         logger_->set_formatter(std::unique_ptr<spdlog::formatter>(new json_formatter(options, context_->token)));
+    }
+
+    /** @brief The context, or an empty one for a null logger. Immutable, so sharing it is safe. */
+    [[nodiscard]] const context_data &ctx_() const noexcept
+    {
+        static const context_data NONE{};
+        return context_ != nullptr ? *context_ : NONE;
     }
 
     /** @brief Creates the empty context of a root logger. */
@@ -4223,19 +4448,6 @@ private:
         return std::make_shared<spdlog::logger>(std::move(name), first, last);
     }
 
-    /** @brief An empty set of fields, shared by the call forms without fields. */
-    static const detail::call_fields &empty_call_fields_()
-    {
-        static const detail::call_fields EMPTY{};
-        return EMPTY;
-    }
-
-    /** @brief Appends the message as a quoted JSON string. The formatter adds the key. */
-    static void append_message_(spdlog::memory_buf_t &out, const spdlog::memory_buf_t &msg)
-    {
-        detail::append_json_quoted(out, std::string_view{msg.data(), msg.size()});
-    }
-
     /**
      * @brief Whether a call at this level does any work: the level lets it through, or the spdlog v1 backtrace stores
      * it for dump_backtrace. spdlog then decides on its own whether to write the line, store it or both.
@@ -4243,53 +4455,26 @@ private:
     [[nodiscard]] bool processes_(level lvl) const noexcept
     {
 #if JSPDLOG_SPDLOG_V2
-        return logger_->should_log(lvl);
+        return should_log(lvl);
 #else
-        return logger_->should_log(lvl) || logger_->should_backtrace();
+        return logger_ != nullptr && (logger_->should_log(lvl) || logger_->should_backtrace());
 #endif
     }
 
-    /** @brief Writes a line with fields only. */
-    void log_fields_(level lvl, const std::exception *ex, const detail::call_fields &f, detail::site where) const
-    {
-        if (processes_(lvl))
-        {
-            emit_(lvl, ex, f, where, detail::KIND_FIELDS, [](spdlog::memory_buf_t & /*out*/) {});
-        }
-    }
-
-    /** @brief Writes fields and a message formatted from a format string and its arguments. */
-    template <typename... Args>
-    void log_fmt_(
-        level lvl, const std::exception *ex, const detail::call_fields &f, format_here_t<Args...> fmt, Args &&...args
+    /** @brief What every call form ends in: writes the line when the level lets it through. */
+    template <typename WriteMessage>
+    void dispatch_(
+        level lvl,
+        detail::exception_ref ex,
+        const detail::call_fields &f,
+        detail::site where,
+        char kind,
+        const WriteMessage &write_message
     ) const
     {
         if (processes_(lvl))
         {
-            emit_(lvl, ex, f, fmt.where(), detail::KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
-                spdlog::memory_buf_t msg;
-#if JSPDLOG_STD_FORMAT
-                std::vformat_to(
-                    std::back_inserter(msg), detail::format_text(fmt.format()), std::make_format_args(args...)
-                );
-#else
-                spdlog::fmt_lib::format_to(std::back_inserter(msg), fmt.format(), std::forward<Args>(args)...);
-#endif
-                append_message_(out, msg);
-            });
-        }
-    }
-
-    /** @brief Writes fields and a message taken as it is. */
-    void log_str_(
-        level lvl, const std::exception *ex, const detail::call_fields &f, std::string_view msg, detail::site where
-    ) const
-    {
-        if (processes_(lvl))
-        {
-            emit_(lvl, ex, f, where, detail::KIND_MESSAGE, [msg](spdlog::memory_buf_t &out) {
-                detail::append_json_quoted(out, msg);
-            });
+            emit_(lvl, ex, f, where, kind, write_message);
         }
     }
 
@@ -4311,7 +4496,7 @@ private:
         detail::call_fields::write_state &state
     ) const
     {
-        const context_data &ctx = *context_;
+        const context_data &ctx = ctx_();
         const fields *named = props.named();
         // A marked field that a per-call one replaces still counts: the formatter then only looks for markers in vain.
         state.marked = ctx.values.marked_ || (named != nullptr && named->marked_);
@@ -4402,40 +4587,84 @@ private:
     template <typename WriteMessage>
     void emit_(
         level lvl,
-        const std::exception *ex,
+        detail::exception_ref ex,
         const detail::call_fields &props,
         detail::site where,
         char kind,
         const WriteMessage &write_message
     ) const
     {
-        const context_data &ctx = *context_;
+        const context_data &ctx = ctx_();
         const auto write = [&](spdlog::memory_buf_t &out) {
             detail::write_payload(out, ctx.token, kind, [&](spdlog::memory_buf_t &fields_out) {
                 // The exception is held by reference and written here, when the line is, so a disabled level computes
                 // nothing and an exception from writing it reaches the error handler.
-                const detail::call_fields::ref exception{{}, ex, &detail::write_exception_field};
+                const detail::call_fields::ref exception{{}, &ex, &detail::write_exception_field};
                 detail::call_fields::write_state state;
-                append_props_(fields_out, props, ex != nullptr ? &exception : nullptr, state);
-                return (state.marked ? detail::FLAG_MARKERS : 0U) | (ex != nullptr ? detail::FLAG_EXCEPTION : 0U);
+                append_props_(fields_out, props, ex.present() ? &exception : nullptr, state);
+                return (state.marked ? detail::FLAG_MARKERS : 0U) | (ex.present() ? detail::FLAG_EXCEPTION : 0U);
             });
             write_message(out);
         };
-        // The line type is int in spdlog v1 and unsigned in v2.
+        // The line type is int in spdlog v1 and unsigned in v2. The constructor of v2 reads the file name, and v2 would
+        // turn a negative line into a large one, so a call site without a file or a positive line is passed as no
+        // source location.
         using line_type = decltype(spdlog::source_loc{}.line);
-        logger_->log(
-            spdlog::source_loc{where.file(), static_cast<line_type>(where.line()), where.function()},
-            lvl,
-            "{}",
-            detail::deferred_payload<decltype(write)>{&write}
-        );
+        const spdlog::source_loc source =
+            where.file() != nullptr && where.line() > 0
+                ? spdlog::source_loc{where.file(), static_cast<line_type>(where.line()), where.function()}
+                : spdlog::source_loc{};
+        logger_->log(source, lvl, "{}", detail::deferred_payload<decltype(write)>{&write});
     }
 
-    /** @brief The spdlog::logger shared by every copy. */
+    /** @brief The spdlog::logger shared by every copy, or null for a null logger. */
     std::shared_ptr<spdlog::logger> logger_;
-    /** @brief The bound fields and what is derived from them, shared by every copy and never null. */
+    /** @brief The bound fields and what is derived from them, shared by every copy, or null for a null logger. */
     std::shared_ptr<const context_data> context_;
 };
+
+/**
+ * @brief A json_logger with a fixed call site, made by json_logger::at.
+ *
+ * It has the call forms of json_logger and nothing else: each writes what the same call on the logger writes, with the
+ * given call site. It refers to the logger, which must outlive it, so use it in the expression that makes it.
+ */
+class located_logger : public detail::call_api<located_logger>
+{
+private:
+    friend class detail::call_api<located_logger>;
+    friend class json_logger;
+
+    /** @brief Refers to a logger. */
+    located_logger(const json_logger &logger, const call_site &where) noexcept
+        : logger_(logger), where_(where)
+    {
+    }
+
+    /** @brief Hands a call to the logger with the fixed call site in place of the one of the expression. */
+    template <typename WriteMessage>
+    void dispatch_(
+        level lvl,
+        detail::exception_ref ex,
+        const detail::call_fields &f,
+        detail::site /*where*/,
+        char kind,
+        const WriteMessage &write_message
+    ) const
+    {
+        logger_.dispatch_(lvl, ex, f, where_, kind, write_message);
+    }
+
+    /** @brief The logger that writes. */
+    const json_logger &logger_; // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members): used within a statement
+    /** @brief The call site of the lines. */
+    call_site where_;
+};
+
+inline located_logger json_logger::at(const call_site &where) const noexcept
+{
+    return {*this, where};
+}
 
 /** @brief Implementation details. Not part of the public API. */
 namespace detail

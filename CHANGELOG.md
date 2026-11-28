@@ -6,11 +6,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-28
+
 The sink owns the schema: `json_options` are applied by the `json_formatter` of each sink and by nothing else, so a
-line follows one set of options. Some behavior changes.
+line follows one set of options. The call API is smaller and does more: one message type, a public call site for
+wrapper functions, `std::exception_ptr` as an exception and a null logger. Some behavior changes and two names change.
+
+### Added
+
+- `jspdlog::call_site`, the file, line and function of a call, and `json_logger::at`, which takes every call form and
+  records the given place, so a function that logs for its caller can record the caller's line. A call site also comes
+  from `call_site::of`, given a file, line and function, an `spdlog::source_loc` or, in C++20, a
+  `std::source_location`.
+- Every exception call form takes a `std::exception_ptr`, such as `std::current_exception()` in `catch (...)`.
+- A default-constructed `json_logger` is a null logger, which writes nothing, and `explicit operator bool` tells it
+  apart. A moved-from logger is a null logger too; using one dereferenced a null pointer.
+- `json_options::error_cause_key`, the key of the nested cause inside an exception object.
+- `json_logger::attach` wraps an `spdlog::logger` whose sinks already have a `json_formatter`, without replacing it, so
+  sinks set up once with `install_json_formatter` keep their own options.
 
 ### Changed
 
+- **Breaking:** `basic_format_here` is `basic_message` and `format_here_t` is `message_t`, without aliases. One message
+  type takes format strings and runtime strings, so each level has seven overloads instead of eleven. Logging calls
+  need no change: with arguments a string is a format string, and without them, a literal included, it is written as
+  it is.
+- **Breaking** for code that names internals: `detail::site` is the public `call_site`, whose constructor takes a tag
+  before the file, line and function.
 - **Breaking:** options that would write a key twice throw `std::invalid_argument` when a formatter is created: by the
   `json_logger` constructors, `adopt`, `install_json_formatter`, the factories and `make_error_handler`. Checked are the
   keys of the line (header, source, message and error keys), the members of the call site object and those of an
@@ -28,13 +50,12 @@ line follows one set of options. Some behavior changes.
   markers for the keys that only the formatter knows.
 - Every part of a line on a sink shared by several loggers follows the options of its formatter, exception keys
   included. They used to come from the logger that logged.
+
+### Performance
+
 - `with` copies only the bound fields, and with an empty set it returns a logger that shares them.
-
-### Added
-
-- `json_options::error_cause_key`, the key of the nested cause inside an exception object.
-- `json_logger::attach` wraps an `spdlog::logger` whose sinks already have a `json_formatter`, without replacing it, so
-  sinks set up once with `install_json_formatter` keep their own options.
+- A line is copied into spdlog's buffer in bulk instead of byte by byte. In the benchmark a line costs up to 40 percent
+  less with MSVC and GCC, most for long messages.
 
 ## [0.6.1] - 2026-11-27
 
@@ -227,4 +248,5 @@ First release. jspdlog is a single-header library that writes one JSON object pe
 [0.5.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.5.0
 [0.6.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.6.0
 [0.6.1]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.6.1
-[unreleased]: https://github.com/jan-moravec/jspdlog/compare/v0.6.1...HEAD
+[0.7.0]: https://github.com/jan-moravec/jspdlog/releases/tag/v0.7.0
+[unreleased]: https://github.com/jan-moravec/jspdlog/compare/v0.7.0...HEAD
