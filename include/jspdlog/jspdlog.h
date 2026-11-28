@@ -3913,7 +3913,7 @@ public:
     // Implicit on purpose: a message must convert at the call.
     // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
     basic_message(const S &s, detail::site where = detail::site())
-        : fmt_(""), plain_(detail::message_view(s)), is_plain_(true), where_(where)
+        : fmt_(empty_format_()), plain_(detail::message_view(s)), is_plain_(true), where_(where)
     {
     }
 
@@ -3937,6 +3937,16 @@ public:
     [[nodiscard]] detail::site where() const noexcept { return where_; }
 
 private:
+    /**
+     * @brief The empty format string of a plain message. It is copied from a variable, because GCC 13 rejects a
+     * consteval constructor called in the member initializer of a constructor that runs at run time.
+     */
+    static const spdlog::format_string_t<Args...> &empty_format_()
+    {
+        static const spdlog::format_string_t<Args...> EMPTY("");
+        return EMPTY;
+    }
+
     /** @brief The format string. */
     spdlog::format_string_t<Args...> fmt_;
     /** @brief The text of a plain message. */
