@@ -3610,25 +3610,30 @@ inline constexpr bool is_format_source_v =
 template <typename S, std::size_t ArgCount>
 inline constexpr bool is_plain_message_v = ArgCount == 0 && is_runtime_string_v<S>;
 
+/** @brief Whether a call form takes the type as its exception: a std::exception or a std::exception_ptr. */
+template <typename E>
+inline constexpr bool is_exception_arg_v =
+    std::is_base_of_v<std::exception, E> || std::is_same_v<E, std::exception_ptr>;
+
 /**
  * @brief Enables an overload for exceptions only. The exception parameter is a template, not a const std::exception
  * reference, because the standard library of MSVC gives std::exception a constructor that takes a const char pointer
  * and an int, so a braced list such as {"k", 1} would convert to one.
  */
 template <typename E>
-using if_exception = std::enable_if_t<std::is_base_of_v<std::exception, E>, int>;
+using if_exception = std::enable_if_t<is_exception_arg_v<E>, int>;
 
 /**
  * @brief Whether a single argument is neither a string, a format string nor a fields object, so it cannot be a message.
  *
  * A fields object is excluded because a call form with fields converts it to the per-call parameter, and a template
- * that matches the type exactly would win over that conversion. An exception is excluded for the same reason against
- * the exception call forms, which take a const std::exception reference.
+ * that matches the type exactly would win over that conversion. An exception is excluded because the exception call
+ * forms take it.
  */
 template <typename T>
 inline constexpr bool is_rejected_message_v =
     !is_runtime_string_v<T> && !std::is_array_v<T> && !std::is_same_v<T, runtime_format_string> &&
-    !std::is_same_v<T, fields> && !std::is_base_of_v<std::exception, T>;
+    !std::is_same_v<T, fields> && !is_exception_arg_v<T>;
 
 /**
  * @brief Views a runtime string as a std::string_view. A null C string is an empty message, and a char array ends at
@@ -3827,8 +3832,37 @@ private:
 };
 
 /**
+ * @brief The exception of an exception call: a reference to a std::exception, or a pointer to a std::exception_ptr,
+ * which may hold nothing. Both are null for a call without an exception.
+ */
+struct exception_ref
+{
+    /** @brief The std::exception of the call, or null. */
+    const std::exception *ex = nullptr;
+    /** @brief The std::exception_ptr of the call, or null. */
+    const std::exception_ptr *ptr = nullptr;
+
+    /** @brief Whether the call has an exception argument, even a std::exception_ptr that holds nothing. */
+    [[nodiscard]] bool present() const noexcept { return ex != nullptr || ptr != nullptr; }
+};
+
+/** @brief Refers to the exception argument of a call, which must outlive the call. */
+template <typename E>
+exception_ref make_exception_ref(const E &ex) noexcept
+{
+    if constexpr (std::is_same_v<E, std::exception_ptr>)
+    {
+        return {nullptr, std::addressof(ex)};
+    }
+    else
+    {
+        return {std::addressof(ex), nullptr};
+    }
+}
+
+/**
  * @brief Writes the exception of an exception call as a field: a comma, the marker of the error key and the exception
- * object. The value of the reference is the std::exception.
+ * object, or null for a std::exception_ptr that holds nothing. The value of the reference is the exception_ref.
  */
 inline void write_exception_field(spdlog::memory_buf_t &out, const call_fields::ref &r, call_fields::write_state &state)
 {
@@ -3836,7 +3870,15 @@ inline void write_exception_field(spdlog::memory_buf_t &out, const call_fields::
     out.push_back(MARKER);
     out.push_back(MARK_ERROR);
     json_writer w = writer_access::to_buffer(out);
-    write_exception(w, *static_cast<const std::exception *>(r.value));
+    const exception_ref &exception = *static_cast<const exception_ref *>(r.value);
+    if (exception.ex != nullptr)
+    {
+        write_exception(w, *exception.ex);
+    }
+    else
+    {
+        write_exception_ptr(w, *exception.ptr);
+    }
     state.marked = true;
 }
 
@@ -3927,8 +3969,8 @@ inline const call_fields &empty_call_fields()
  * given; an exception and a message; or an exception, fields and a message. A single argument of another type is
  * deleted. json_logger documents what they write.
  *
- * Derived provides dispatch_, which takes the level, the exception or null, the fields, the call site, the payload kind
- * and a function that appends the message, and decides whether anything is written.
+ * Derived provides dispatch_, which takes the level, the exception_ref, the fields, the call site, the payload kind and
+ * a function that appends the message, and decides whether anything is written.
  */
 template <typename Derived>
 class call_api
@@ -3938,17 +3980,17 @@ public:
     template <typename... Args>
     void log(level lvl, message_t<Args...> m, Args &&...args) const
     {
-        log_message_(lvl, nullptr, empty_call_fields(), m, std::forward<Args>(args)...);
+        log_message_(lvl, {}, empty_call_fields(), m, std::forward<Args>(args)...);
     }
 
     /** @brief Writes a line with fields only, without a message. */
-    void log(level lvl, const call_fields &f, site where = site()) const { log_fields_(lvl, nullptr, f, where); }
+    void log(level lvl, const call_fields &f, site where = site()) const { log_fields_(lvl, {}, f, where); }
 
     /** @brief Writes fields and a message. */
     template <typename... Args>
     void log(level lvl, const call_fields &f, message_t<Args...> m, Args &&...args) const
     {
-        log_message_(lvl, nullptr, f, m, std::forward<Args>(args)...);
+        log_message_(lvl, {}, f, m, std::forward<Args>(args)...);
     }
 
     /**
@@ -3958,21 +4000,21 @@ public:
     template <typename E, if_exception<E> = 0>
     void log(level lvl, const E &ex, const call_fields &f = empty_call_fields(), site where = site()) const
     {
-        log_fields_(lvl, &ex, f, where);
+        log_fields_(lvl, make_exception_ref(ex), f, where);
     }
 
     /** @brief Writes an exception and a message. */
     template <typename E, if_exception<E> = 0, typename... Args>
     void log(level lvl, const E &ex, message_t<Args...> m, Args &&...args) const
     {
-        log_message_(lvl, &ex, empty_call_fields(), m, std::forward<Args>(args)...);
+        log_message_(lvl, make_exception_ref(ex), empty_call_fields(), m, std::forward<Args>(args)...);
     }
 
     /** @brief Writes an exception, fields and a message. */
     template <typename E, if_exception<E> = 0, typename... Args>
     void log(level lvl, const E &ex, const call_fields &f, message_t<Args...> m, Args &&...args) const
     {
-        log_message_(lvl, &ex, f, m, std::forward<Args>(args)...);
+        log_message_(lvl, make_exception_ref(ex), f, m, std::forward<Args>(args)...);
     }
 
     /** @brief Rejects a single argument that is not a string. Put typed values in fields. */
@@ -3984,31 +4026,31 @@ public:
     template <typename... Args>                                                                                        \
     void name(message_t<Args...> m, Args &&...args) const                                                              \
     {                                                                                                                  \
-        log_message_(lvl, nullptr, empty_call_fields(), m, std::forward<Args>(args)...);                               \
+        log_message_(lvl, {}, empty_call_fields(), m, std::forward<Args>(args)...);                                    \
     }                                                                                                                  \
     void name(const call_fields &f, site where = site()) const                                                         \
     {                                                                                                                  \
-        log_fields_(lvl, nullptr, f, where);                                                                           \
+        log_fields_(lvl, {}, f, where);                                                                                \
     }                                                                                                                  \
     template <typename... Args>                                                                                        \
     void name(const call_fields &f, message_t<Args...> m, Args &&...args) const                                        \
     {                                                                                                                  \
-        log_message_(lvl, nullptr, f, m, std::forward<Args>(args)...);                                                 \
+        log_message_(lvl, {}, f, m, std::forward<Args>(args)...);                                                      \
     }                                                                                                                  \
     template <typename E, if_exception<E> = 0>                                                                         \
     void name(const E &ex, const call_fields &f = empty_call_fields(), site where = site()) const                      \
     {                                                                                                                  \
-        log_fields_(lvl, &ex, f, where);                                                                               \
+        log_fields_(lvl, make_exception_ref(ex), f, where);                                                            \
     }                                                                                                                  \
     template <typename E, if_exception<E> = 0, typename... Args>                                                       \
     void name(const E &ex, message_t<Args...> m, Args &&...args) const                                                 \
     {                                                                                                                  \
-        log_message_(lvl, &ex, empty_call_fields(), m, std::forward<Args>(args)...);                                   \
+        log_message_(lvl, make_exception_ref(ex), empty_call_fields(), m, std::forward<Args>(args)...);                \
     }                                                                                                                  \
     template <typename E, if_exception<E> = 0, typename... Args>                                                       \
     void name(const E &ex, const call_fields &f, message_t<Args...> m, Args &&...args) const                           \
     {                                                                                                                  \
-        log_message_(lvl, &ex, f, m, std::forward<Args>(args)...);                                                     \
+        log_message_(lvl, make_exception_ref(ex), f, m, std::forward<Args>(args)...);                                  \
     }                                                                                                                  \
     template <typename T, std::enable_if_t<is_rejected_message_v<T>, int> = 0>                                         \
     void name(const T &) const = delete;
@@ -4030,7 +4072,7 @@ private:
     [[nodiscard]] const Derived &self_() const noexcept { return static_cast<const Derived &>(*this); }
 
     /** @brief Writes a line with fields only. */
-    void log_fields_(level lvl, const std::exception *ex, const call_fields &f, site where) const
+    void log_fields_(level lvl, exception_ref ex, const call_fields &f, site where) const
     {
         self_().dispatch_(lvl, ex, f, where, KIND_FIELDS, [](spdlog::memory_buf_t & /*out*/) {});
     }
@@ -4038,7 +4080,7 @@ private:
     /** @brief Writes fields and a message: a plain one as it is, a format string with its arguments. */
     template <typename... Args>
     void log_message_(
-        level lvl, const std::exception *ex, const call_fields &f, const basic_message<Args...> &m, Args &&...args
+        level lvl, exception_ref ex, const call_fields &f, const basic_message<Args...> &m, Args &&...args
     ) const
     {
         self_().dispatch_(lvl, ex, f, m.where(), KIND_MESSAGE, [&](spdlog::memory_buf_t &out) {
@@ -4081,16 +4123,19 @@ private:
  * logger.info({"plan", [&] { return explain(q); }}, "planned");  // a lazy value
  * @endcode
  *
- * Each level also has three call forms that take a std::exception first, followed by optional fields, by a message, or
- * by fields and a message. They write the exception under json_options::error_key, as an object with its type name and
- * message, and its nested causes under json_options::error_cause_key. It is the only field with that key. If there are
- * other fields with the key, bound or of the call, it takes the position of the first of them and they are all left
- * out. Otherwise it comes after the bound fields and before the new fields of the call. The exception is written only
- * when the line is, so a call at a disabled level computes nothing.
+ * Each level also has three call forms that take an exception first, a std::exception or a std::exception_ptr,
+ * followed by optional fields, by a message, or by fields and a message. They write the exception under
+ * json_options::error_key, as an object with its type name and message, and its nested causes under
+ * json_options::error_cause_key. A std::exception_ptr to something else is written with the type unknown and no
+ * message, and one that holds nothing is written as null. It is the only field with that key. If there are other fields
+ * with the key, bound or of the call, it takes the position of the first of them and they are all left out. Otherwise
+ * it comes after the bound fields and before the new fields of the call. The exception is written only when the line
+ * is, so a call at a disabled level computes nothing.
  *
  * @code
  * try { connect(); }
  * catch (const std::exception &ex) { logger.error(ex, {"host", host}, "connect failed"); }
+ * catch (...) { logger.error(std::current_exception(), {"host", host}, "connect failed"); }
  * @endcode
  *
  * A braced list is kept as references and serialized only when the line is written, so a call at a disabled level
@@ -4359,7 +4404,7 @@ private:
     template <typename WriteMessage>
     void dispatch_(
         level lvl,
-        const std::exception *ex,
+        detail::exception_ref ex,
         const detail::call_fields &f,
         detail::site where,
         char kind,
@@ -4481,7 +4526,7 @@ private:
     template <typename WriteMessage>
     void emit_(
         level lvl,
-        const std::exception *ex,
+        detail::exception_ref ex,
         const detail::call_fields &props,
         detail::site where,
         char kind,
@@ -4493,10 +4538,10 @@ private:
             detail::write_payload(out, ctx.token, kind, [&](spdlog::memory_buf_t &fields_out) {
                 // The exception is held by reference and written here, when the line is, so a disabled level computes
                 // nothing and an exception from writing it reaches the error handler.
-                const detail::call_fields::ref exception{{}, ex, &detail::write_exception_field};
+                const detail::call_fields::ref exception{{}, &ex, &detail::write_exception_field};
                 detail::call_fields::write_state state;
-                append_props_(fields_out, props, ex != nullptr ? &exception : nullptr, state);
-                return (state.marked ? detail::FLAG_MARKERS : 0U) | (ex != nullptr ? detail::FLAG_EXCEPTION : 0U);
+                append_props_(fields_out, props, ex.present() ? &exception : nullptr, state);
+                return (state.marked ? detail::FLAG_MARKERS : 0U) | (ex.present() ? detail::FLAG_EXCEPTION : 0U);
             });
             write_message(out);
         };
@@ -4538,7 +4583,7 @@ private:
     template <typename WriteMessage>
     void dispatch_(
         level lvl,
-        const std::exception *ex,
+        detail::exception_ref ex,
         const detail::call_fields &f,
         detail::site /*where*/,
         char kind,

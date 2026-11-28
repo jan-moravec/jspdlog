@@ -734,6 +734,133 @@ TEST_CASE("exceptions: a formatter that throws in an exception form goes to the 
     CHECK(errors.size() == 2);
 }
 
+namespace
+{
+
+// The pointer to an exception that a handler would get from std::current_exception.
+template <typename Throw>
+std::exception_ptr caught(const Throw &raise)
+{
+    try
+    {
+        raise();
+    }
+    catch (...)
+    {
+        return std::current_exception();
+    }
+    return {};
+}
+
+// Logs the pointer with each exception call form, also through log(), and checks the lines.
+void check_pointer_forms(const std::exception_ptr &p, const std::string &error)
+{
+    const fixture f;
+    const std::string head = R"({"logger":"t","level":"error",)" + error;
+
+    f.logger.error(p);
+    CHECK(f.last() == head + "}");
+    f.logger.error(p, {"k", 1});
+    CHECK(f.last() == head + R"(,"k":1})");
+    f.logger.error(p, "failed");
+    CHECK(f.last() == head + R"(,"message":"failed"})");
+    f.logger.error(p, "failed {}", 2);
+    CHECK(f.last() == head + R"(,"message":"failed 2"})");
+    f.logger.error(p, {"k", 1}, "failed {}", 3);
+    CHECK(f.last() == head + R"(,"k":1,"message":"failed 3"})");
+    f.logger.log(jspdlog::level::err, p, {"k", 1}, "failed");
+    CHECK(f.last() == head + R"(,"k":1,"message":"failed"})");
+    CHECK(f.sink->lines.size() == 6);
+}
+
+} // namespace
+
+TEST_CASE("exceptions: the call forms take a std::exception_ptr", "[exceptions]")
+{
+    SECTION("a std::exception")
+    {
+        check_pointer_forms(
+            std::make_exception_ptr(std::runtime_error("boom")), error_object("std::runtime_error", "boom")
+        );
+    }
+    SECTION("a nested exception")
+    {
+        const std::exception_ptr p = caught([] {
+            try
+            {
+                throw std::runtime_error("inner");
+            }
+            catch (...)
+            {
+                std::throw_with_nested(std::logic_error("outer"));
+            }
+        });
+        check_pointer_forms(
+            p,
+            R"("error":{"type":"std::logic_error","message":"outer",)"
+            R"("cause":{"type":"std::runtime_error","message":"inner"}})"
+        );
+    }
+    SECTION("something that is not a std::exception")
+    {
+        check_pointer_forms(std::make_exception_ptr(42), R"("error":{"type":"unknown"})");
+    }
+    SECTION("a null pointer")
+    {
+        check_pointer_forms(std::exception_ptr{}, R"("error":null)");
+    }
+}
+
+TEST_CASE("exceptions: std::current_exception() in catch (...)", "[exceptions]")
+{
+    const fixture f;
+    try
+    {
+        throw 42; // NOLINT(bugprone-std-exception-baseclass): an exception that is not a std::exception
+    }
+    catch (...)
+    {
+        f.logger.error(std::current_exception(), {"job", 7}, "job failed");
+    }
+    CHECK(f.last() == R"({"logger":"t","level":"error","error":{"type":"unknown"},"job":7,"message":"job failed"})");
+}
+
+TEST_CASE("exceptions: a std::exception_ptr takes the error key as an exception does", "[exceptions]")
+{
+    auto opts = test_support::deterministic_options();
+    opts.error_key = "failure";
+    opts.error_type_key = "kind";
+    opts.error_message_key = "text";
+    const fixture f("t", opts);
+    f.logger.with({"failure", "bound", "a", 1})
+        .error(std::make_exception_ptr(std::runtime_error("boom")), {"failure", "call", "b", 2});
+    CHECK(
+        f.last() == R"({"logger":"t","level":"error","failure":{"kind":"std::runtime_error","text":"boom"},)"
+                    R"("a":1,"b":2})"
+    );
+    // A pointer that holds nothing still takes the key.
+    f.logger.with({"failure", "bound"}).error(std::exception_ptr{}, {"failure", "call"});
+    CHECK(f.last() == R"({"logger":"t","level":"error","failure":null})");
+}
+
+TEST_CASE("exceptions: a disabled level does not look at a std::exception_ptr", "[exceptions]")
+{
+    fixture f;
+    f.logger.set_level(jspdlog::level::off);
+    const std::exception_ptr p = std::make_exception_ptr(jspdlog_test::counting_error("boom"));
+    jspdlog_test::what_calls = 0;
+    f.logger.error(p);
+    f.logger.error(p, {"k", 1});
+    f.logger.error(p, "failed");
+    f.logger.error(p, {"k", 1}, "failed {}", 1);
+    CHECK(jspdlog_test::what_calls == 0);
+    CHECK(f.sink->lines.empty());
+
+    f.logger.set_level(jspdlog::level::trace);
+    f.logger.error(p);
+    CHECK(jspdlog_test::what_calls == 1);
+}
+
 TEST_CASE("exceptions: an exception message is escaped", "[exceptions]")
 {
     const fixture f;
