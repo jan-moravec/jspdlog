@@ -41,10 +41,11 @@ These decide every feature below.
    headers or another library goes into an optional header next to the core.
 1. **No JSON library dependency.** `raw_json` is the bridge to one.
 
-## 3. Where we are (0.6.1)
+## 3. Where we are (0.7.0)
 
 The header ([include/jspdlog/jspdlog.h](include/jspdlog/jspdlog.h))
-provides `json_logger` (five call shapes per level plus `log(level, ...)`),
+provides `json_logger` (a message, fields or both per level and through
+`log(level, ...)`, each also with an exception first),
 child loggers with `with()`, `adopt`, `attach`, `json_options` (rename or omit header
 fields, message key, call site, UTC, eol), typed `jspdlog::fields` with
 nesting and `raw_json`. Field values also cover optionals, enums, durations,
@@ -95,6 +96,13 @@ registries, and a pushed version tag drafts the GitHub Release.
 spdlog v1's backtrace missed, header timestamps outside what RFC 3339 can
 write, and a crash on macOS when a process forks after unloading a library
 that logged.
+
+Since 0.7.0 only the formatter of a sink applies `json_options`, so one line
+follows one set of them, exceptions included, and `attach` wraps a logger
+whose sinks are set up already. One message type takes format strings and
+runtime strings. A function that logs for its caller passes a `call_site` to
+`at()`, every exception form takes a `std::exception_ptr`, and a
+default-constructed or moved-from `json_logger` writes nothing.
 
 ## 4. Architecture decision: custom `spdlog::formatter` (proposed for 0.2)
 
@@ -269,6 +277,25 @@ possible, so numbers, booleans and nested data stay filterable as such
   job builds against the head of the `v2.x` branch, and the default pin moves
   to the tag when it appears.
 
+### 0.7.0: sink schema and call API (breaking)
+
+- [x] `json_options` are applied by the `json_formatter` of each sink and by
+  nothing else; where the fields need a key from them, the payload holds a key
+  marker. `error_cause_key` names the nested cause.
+- [x] Options that write a key twice throw when a formatter is created.
+- [x] `with()` copies only the bound fields, and `json_logger::attach` wraps a
+  logger without installing a formatter.
+- [x] One message type, `basic_message`, for format strings and runtime
+  strings: seven overloads per level instead of eleven.
+- [x] Public `call_site` and `json_logger::at()`, so a wrapper function logs
+  for its caller.
+- [x] `std::exception_ptr` as the exception of a call.
+- [x] A null `json_logger`: default-constructed or moved-from.
+- [x] The payload is copied into spdlog's buffer in bulk, kept because the
+  benchmark shows a gain on GCC and MSVC. Formatting the message straight into
+  the payload was measured too and left out: no gain beyond the noise, and
+  slower when the message needs escaping.
+
 ### 1.0.0: stable
 
 - API freeze and semantic versioning.
@@ -391,6 +418,9 @@ separate per-version headers aren't needed.
 | 25  | Position of an exception (2026-11-28) | The exception of an exception call takes the position of the first other field with the error key and drops every such field; without one it comes before the new per-call fields. This is defined behavior instead of a debug assertion, and keeps the rule that a bound field is replaced at its position.        |
 | 26  | Duplicate option keys (2026-11-28)    | Creating a formatter throws `std::invalid_argument`. Such options always wrote duplicate keys, which parsers reject or resolve silently, and constructors already throw for a null sink.                                                                                                                            |
 | 27  | `json_logger::attach` (2026-11-28)    | Wraps a logger without installing a formatter, so sinks configured once keep their schema. A sink cannot be asked for its formatter, so per-logger options on a shared sink are not offered.                                                                                                                        |
+| 28  | One message type (2026-11-28)         | One `basic_message` takes format strings with arguments, `fmt::runtime`, and without arguments any string, literals included, which is written as it is. It replaces `basic_format_here` without an alias, and each level has seven overloads instead of eleven. Every call resolves as before.                     |
+| 29  | Call sites (2026-11-28)               | `call_site` is public, default-constructible through a tag, so that `call_site where = {}` works and no string converts to it, and passed on with `json_logger::at()`.                                                                                                                                              |
+| 30  | Null logger (2026-11-28)              | A default-constructed or moved-from `json_logger` writes nothing, so a member can be set later and a moved-from object is safe.                                                                                                                                                                                     |
 
 ## 10. Quality gates (every milestone)
 
