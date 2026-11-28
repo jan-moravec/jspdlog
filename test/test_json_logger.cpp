@@ -70,6 +70,24 @@ TEST_CASE("json_logger: runtime strings are messages, typed values are not", "[j
 #endif
 }
 
+TEST_CASE("json_logger: a literal without arguments is the message as it is", "[json_logger]")
+{
+    fixture f;
+    std::vector<std::string> errors;
+    f.logger.spdlog_logger()->set_error_handler([&errors](const std::string &what) { errors.push_back(what); });
+    f.logger.info("{} and {{}}");
+    CHECK(f.last() == R"({"logger":"t","level":"info","message":"{} and {{}}"})");
+    f.logger.info({"k", 1}, "x {}");
+    CHECK(f.last() == R"({"logger":"t","level":"info","k":1,"message":"x {}"})");
+    f.logger.error(std::runtime_error("boom"), "100% {");
+    CHECK(f.last().find(R"("message":"100% {"})") != std::string::npos);
+    // A const array that is not a literal is the same.
+    const char constant[] = "{{";
+    f.logger.info(constant);
+    CHECK(f.last() == R"({"logger":"t","level":"info","message":"{{"})");
+    CHECK(errors.empty());
+}
+
 TEST_CASE("json_logger: a writable char buffer is a runtime string", "[json_logger]")
 {
     fixture f;
