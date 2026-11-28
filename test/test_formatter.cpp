@@ -488,6 +488,29 @@ TEST_CASE("formatter: a damaged payload with the real token does not break the f
             }
         }
     }
+    SECTION("damaged fields next to the error key keep their order")
+    {
+        // The error key appears, so the fields are walked. The walk cannot finish, and nothing moves.
+        for (const std::string tail : {",", ",x", ",x:1", ",\x01", ",\"a\"", ",\"a\":", ",\"a\":[1"})
+        {
+            std::string fields = ",\x01"
+                                 "E2,\"E\":1";
+            fields.append(tail);
+            std::string expected = R"({"E":2,"E":1)";
+            expected.append(tail).append("}\n");
+            CHECK(format_payload(formatter, payload_of('3', fields)) == expected);
+        }
+    }
+    SECTION("another marker where a key stands")
+    {
+        const std::string fields = ",\x01"
+                                   "T1,\"E\":0,\x01"
+                                   "E2";
+        // MSVC 19.44 mis-stringifies raw strings with backslashes inside Catch2 macros.
+        const std::string expected = R"({"T\"":1,"E":2})"
+                                     "\n";
+        CHECK(format_payload(formatter, payload_of('3', fields)) == expected);
+    }
     SECTION("an exception flag without an exception")
     {
         const std::string fields = R"(,"E":1,"E":2)";
@@ -521,6 +544,69 @@ TEST_CASE("formatter: the exception is the only field under the error key", "[fo
     expected.append(raw, 1).append(",\"E\":9}\n");
     CHECK(line(field_after) == expected);
     CHECK(line(field_before) == expected);
+    // With the key only inside values, the exception stays where it is.
+    std::string nested_only = raw;
+    nested_only.append(error);
+    CHECK(line(nested_only) == expected);
+}
+
+TEST_CASE("formatter: the field scanner reads whole fields and stops at anything else", "[formatter]")
+{
+    jspdlog::detail::field_entry entry;
+    SECTION("what jspdlog writes, raw JSON with white space included")
+    {
+        std::string fields = R"(,"a":1,"b":",}","c": {"d":[1,"]"]} ,)";
+        fields.append(
+            "\x01"
+            "E{}"
+        );
+        std::string_view rest = fields;
+        std::vector<std::string> keys;
+        while (jspdlog::detail::next_field(rest, entry))
+        {
+            keys.emplace_back(entry.key);
+        }
+        CHECK(rest.empty());
+        const std::vector<std::string> expected{
+            R"("a")",
+            R"("b")",
+            R"("c")",
+            "\x01"
+            "E",
+        };
+        CHECK(keys == expected);
+    }
+    SECTION("anything else leaves the text as it was")
+    {
+        for (const std::string_view bad : {
+                 "",
+                 ",",
+                 R"("a":1)",
+                 ",a:1",
+                 ",\x01",
+                 R"(,"a)",
+                 R"(,"a")",
+                 R"(,"a"1)",
+                 R"(,"a":)",
+                 R"(,"a":,)",
+                 R"(,"a":   )",
+                 R"(,"a":"b)",
+                 R"(,"a":"b"c)",
+                 R"(,"a":1})",
+                 R"(,"a":[1)",
+                 R"(,"a":{"b":")",
+             })
+        {
+            std::string_view rest = bad;
+            INFO(std::string{bad});
+            CHECK_FALSE(jspdlog::detail::next_field(rest, entry));
+            CHECK(std::string{rest} == std::string{bad});
+        }
+    }
+    SECTION("only a sink knows the key of the exception")
+    {
+        CHECK(jspdlog::detail::default_exception_key(jspdlog::detail::MARK_ERROR).empty());
+    }
 }
 
 namespace
