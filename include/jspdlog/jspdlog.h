@@ -101,6 +101,10 @@
 #include <optional>
 #include <random>
 #include <ratio>
+#if __has_include(<source_location>) &&                                                                                \
+    (__cplusplus >= 202002L || (defined(_MSVC_LANG) && _MSVC_LANG >= 202002L))
+#include <source_location>
+#endif
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -1153,6 +1157,7 @@ namespace jspdlog
 {
 
 class json_logger;
+class located_logger;
 
 namespace detail
 {
@@ -3438,27 +3443,88 @@ namespace detail
 {
 
 /**
- * @brief A call site, filled in by default arguments at the caller.
- *
- * The builtins are default arguments of a constructor that is not a template. GCC evaluates a builtin in the default
- * argument of a function template where the template is written instead of where it is called, which a constructor
- * default argument avoids.
+ * @brief The first parameter of the call_site constructor. Its constructor is explicit, so no string converts to a
+ * call_site, which would make a braced list of two strings ambiguous between fields and a message.
  */
-struct site
+struct site_tag
 {
-    /** @brief Captures the place where the site is default-constructed, which is the call of a logging function. */
-    explicit constexpr site(
-        const char *f = __builtin_FILE(), int l = __builtin_LINE(), const char *fn = __builtin_FUNCTION()
+    /** @brief The only constructor. */
+    explicit site_tag() = default;
+};
+
+/** @brief The line number of an spdlog::source_loc or a std::source_location, whose types differ, as an int. */
+template <typename Line>
+constexpr int to_line(Line line) noexcept
+{
+    return static_cast<int>(line);
+}
+
+} // namespace detail
+
+/**
+ * @brief The place of a logging call: file, line and function.
+ *
+ * A default-constructed call_site records where it is constructed, so a function that logs for its caller takes one as
+ * a defaulted parameter and passes it on with json_logger::at:
+ *
+ * @code
+ * void audit(const jspdlog::json_logger &log, std::string_view what, jspdlog::call_site where = {})
+ * {
+ *     log.at(where).info({"what", what}, "audit"); // the line of audit's caller
+ * }
+ * @endcode
+ *
+ * The file and function are pointers, not copies: they must outlive the logging call, which string literals and the
+ * compiler's names do. With an asynchronous logger they must live as long as the queued line, which spdlog does not
+ * copy them into.
+ */
+class call_site
+{
+public:
+    // The builtins are default arguments of a constructor that is not a template. GCC evaluates a builtin in the
+    // default argument of a function template where the template is written instead of where it is called, which a
+    // constructor default argument avoids.
+    /** @brief Records the place where it is constructed. Leave every argument at its default. */
+    // Implicit on purpose: a parameter declared as call_site where = {} must work.
+    // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,google-explicit-constructor,misc-explicit-constructor)
+    constexpr call_site(
+        detail::site_tag /*tag*/ = detail::site_tag{},
+        const char *file = __builtin_FILE(),
+        int line = __builtin_LINE(),
+        const char *function = __builtin_FUNCTION()
     ) noexcept
-        : file_(f), line_(l), function_(fn)
+        : file_(file), line_(line), function_(function)
     {
     }
+
+    /**
+     * @brief A call site given explicitly, for example by another logging framework. A null file or a line of 0 stands
+     * for no call site, which a json_formatter leaves out of the line. A null function is written as an empty string.
+     */
+    [[nodiscard]] static constexpr call_site of(const char *file, int line, const char *function) noexcept
+    {
+        return {detail::site_tag{}, file, line, function};
+    }
+
+    /** @brief The call site of an spdlog::source_loc. */
+    [[nodiscard]] static call_site of(const spdlog::source_loc &loc) noexcept
+    {
+        return of(loc.filename, detail::to_line(loc.line), loc.funcname);
+    }
+
+#if defined(__cpp_lib_source_location)
+    /** @brief The call site of a std::source_location, from C++20 on. */
+    [[nodiscard]] static call_site of(const std::source_location &loc) noexcept
+    {
+        return of(loc.file_name(), detail::to_line(loc.line()), loc.function_name());
+    }
+#endif
 
     /** @brief The source file, as the compiler spells it. */
     [[nodiscard]] constexpr const char *file() const noexcept { return file_; }
     /** @brief The line of the call. */
     [[nodiscard]] constexpr int line() const noexcept { return line_; }
-    /** @brief The short name of the calling function, which depends on the compiler. */
+    /** @brief The name of the calling function, which depends on the compiler or on where the call site came from. */
     [[nodiscard]] constexpr const char *function() const noexcept { return function_; }
 
 private:
@@ -3469,6 +3535,12 @@ private:
     /** @brief The name of the calling function. */
     const char *function_;
 };
+
+namespace detail
+{
+
+/** @brief The name the logging internals use for a call_site. */
+using site = call_site;
 
 /** @brief std::type_identity for C++17, used to keep a parameter out of template argument deduction. */
 template <typename T>
@@ -4012,9 +4084,9 @@ private:
  * Each level also has three call forms that take a std::exception first, followed by optional fields, by a message, or
  * by fields and a message. They write the exception under json_options::error_key, as an object with its type name and
  * message, and its nested causes under json_options::error_cause_key. It is the only field with that key. If there are
- * other fields with the key, bound or of the call, it takes the position of the first of them and they are all left out.
- * Otherwise it comes after the bound fields and before the new fields of the call. The exception is written only when
- * the line is, so a call at a disabled level computes nothing.
+ * other fields with the key, bound or of the call, it takes the position of the first of them and they are all left
+ * out. Otherwise it comes after the bound fields and before the new fields of the call. The exception is written only
+ * when the line is, so a call at a disabled level computes nothing.
  *
  * @code
  * try { connect(); }
@@ -4036,7 +4108,8 @@ private:
  * string types first.
  *
  * Every call records its file, line and function, and the formatter writes them when json_options::source_key is set.
- * The function is the short name the compiler gives, which differs between compilers.
+ * The function is the short name the compiler gives, which differs between compilers. A function that logs for its
+ * caller records the caller's place with at.
  *
  * Lines list the header fields, the bound fields of outer and inner loggers, the fields of the call and then the
  * message. A key that appears again, in an inner logger or in a call, replaces the value and stays where it first
@@ -4149,6 +4222,15 @@ public:
     /** @brief The fields bound to this logger by with. */
     [[nodiscard]] const fields &context() const noexcept { return context_->values; }
 
+    /**
+     * @brief The same logger with a fixed call site, for one call: logger.at(where).info(...).
+     *
+     * Every call form works, and where replaces the call site of the expression. The result holds a reference to this
+     * logger, so use it in the same expression. A function that logs for its caller takes a call_site parameter that
+     * defaults to {} and passes it on here.
+     */
+    [[nodiscard]] located_logger at(const call_site &where) const noexcept;
+
     /** @brief The logger name, as given at construction or taken from the adopted spdlog::logger. */
     [[nodiscard]] const std::string &name() const noexcept { return logger_->name(); }
 
@@ -4190,6 +4272,7 @@ public:
 
 private:
     friend class detail::call_api<json_logger>;
+    friend class located_logger;
     friend struct detail::logger_access;
 
     /** @brief What a logger and its copies share. Immutable. */
@@ -4417,14 +4500,14 @@ private:
             });
             write_message(out);
         };
-        // The line type is int in spdlog v1 and unsigned in v2.
+        // The line type is int in spdlog v1 and unsigned in v2. The constructor of v2 reads the file name, so a call
+        // site without one is passed as no source location.
         using line_type = decltype(spdlog::source_loc{}.line);
-        logger_->log(
-            spdlog::source_loc{where.file(), static_cast<line_type>(where.line()), where.function()},
-            lvl,
-            "{}",
-            detail::deferred_payload<decltype(write)>{&write}
-        );
+        const spdlog::source_loc source =
+            where.file() != nullptr
+                ? spdlog::source_loc{where.file(), static_cast<line_type>(where.line()), where.function()}
+                : spdlog::source_loc{};
+        logger_->log(source, lvl, "{}", detail::deferred_payload<decltype(write)>{&write});
     }
 
     /** @brief The spdlog::logger shared by every copy. */
@@ -4432,6 +4515,49 @@ private:
     /** @brief The bound fields and what is derived from them, shared by every copy and never null. */
     std::shared_ptr<const context_data> context_;
 };
+
+/**
+ * @brief A json_logger with a fixed call site, made by json_logger::at.
+ *
+ * It has the call forms of json_logger and nothing else: each writes what the same call on the logger writes, with the
+ * given call site. It refers to the logger, which must outlive it, so use it in the expression that makes it.
+ */
+class located_logger : public detail::call_api<located_logger>
+{
+private:
+    friend class detail::call_api<located_logger>;
+    friend class json_logger;
+
+    /** @brief Refers to a logger. */
+    located_logger(const json_logger &logger, const call_site &where) noexcept
+        : logger_(logger), where_(where)
+    {
+    }
+
+    /** @brief Hands a call to the logger with the fixed call site in place of the one of the expression. */
+    template <typename WriteMessage>
+    void dispatch_(
+        level lvl,
+        const std::exception *ex,
+        const detail::call_fields &f,
+        detail::site /*where*/,
+        char kind,
+        const WriteMessage &write_message
+    ) const
+    {
+        logger_.dispatch_(lvl, ex, f, where_, kind, write_message);
+    }
+
+    /** @brief The logger that writes. */
+    const json_logger &logger_; // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members): used within a statement
+    /** @brief The call site of the lines. */
+    call_site where_;
+};
+
+inline located_logger json_logger::at(const call_site &where) const noexcept
+{
+    return {*this, where};
+}
 
 /** @brief Implementation details. Not part of the public API. */
 namespace detail
