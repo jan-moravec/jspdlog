@@ -12,6 +12,7 @@
 #include <chrono>
 #include <limits>
 #include <regex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -710,6 +711,155 @@ TEST_CASE("formatter: the ends of the clock give a valid line", "[formatter]")
             CHECK(test_support::is_single_json_object(line));
         }
     }
+}
+
+TEST_CASE("formatter: options that would write a key twice are rejected", "[formatter]")
+{
+    jspdlog::json_options o;
+    const auto rejected = [](const jspdlog::json_options &options) {
+        CHECK_THROWS_AS(jspdlog::json_formatter(options), std::invalid_argument);
+    };
+
+    SECTION("two header keys")
+    {
+        o.level_key = "logger";
+        rejected(o);
+    }
+    SECTION("a header key and the message key")
+    {
+        o.message_key = "timestamp";
+        rejected(o);
+    }
+    SECTION("a header key and the error key")
+    {
+        o.error_key = "level";
+        rejected(o);
+    }
+    SECTION("the message key and the error key")
+    {
+        o.error_key = "message";
+        rejected(o);
+    }
+    SECTION("the severity key and the source key")
+    {
+        o.severity_key = "source";
+        o.source_key = "source";
+        rejected(o);
+    }
+    SECTION("a flat call site key and a header key")
+    {
+        o.source_key = "unused";
+        o.source_flat = true;
+        o.source_line_key = "thread";
+        rejected(o);
+    }
+    SECTION("two flat call site keys")
+    {
+        o.source_key = "unused";
+        o.source_flat = true;
+        o.source_function_key = "file";
+        rejected(o);
+    }
+    SECTION("two keys of the call site object")
+    {
+        o.source_key = "source";
+        o.source_function_key = "line";
+        rejected(o);
+    }
+    SECTION("the type and message keys of an exception")
+    {
+        o.error_type_key = "message";
+        rejected(o);
+    }
+    SECTION("the type and cause keys of an exception")
+    {
+        o.error_type_key = "cause";
+        rejected(o);
+    }
+    SECTION("the message and cause keys of an exception")
+    {
+        o.error_cause_key = "message";
+        rejected(o);
+    }
+}
+
+TEST_CASE("formatter: keys in different objects, and keys that are off, may be equal", "[formatter]")
+{
+    jspdlog::json_options o;
+    SECTION("the defaults")
+    {
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+    }
+    SECTION("a header key that is off")
+    {
+        o.level_key = std::nullopt;
+        o.message_key = "level";
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+    }
+    SECTION("the call site object and the line")
+    {
+        o.source_key = "source";
+        o.source_file_key = "level";
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+    }
+    SECTION("the text of source_key is not used in flat mode")
+    {
+        o.source_key = "level";
+        o.source_flat = true;
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+    }
+    SECTION("the call site is off")
+    {
+        o.source_file_key = "line";
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+        o.source_flat = true;
+        o.source_line_key = "level";
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+    }
+    SECTION("the exception object and the line")
+    {
+        o.error_type_key = "level";
+        o.error_cause_key = "logger";
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+    }
+    SECTION("level names and severity numbers")
+    {
+        o.level_names = {{"x", "x", "x", "x", "x", "x", "x"}};
+        o.severity_numbers = {1, 1, 1, 1, 1, 1, 1};
+        CHECK_NOTHROW(jspdlog::json_formatter(o));
+    }
+}
+
+TEST_CASE("formatter: everything that creates a formatter checks the options", "[formatter]")
+{
+    jspdlog::json_options o;
+    o.level_key = "logger";
+    std::string what;
+    try
+    {
+        const jspdlog::json_formatter formatter(o);
+    }
+    catch (const std::invalid_argument &ex)
+    {
+        what = ex.what();
+    }
+    CHECK(what == "jspdlog: json_options key \"logger\" is used twice");
+
+    const auto sink = std::make_shared<test_support::capture_sink>();
+    CHECK_THROWS_AS(jspdlog::json_logger("t", sink, o), std::invalid_argument);
+    CHECK_THROWS_AS(jspdlog::json_logger("t", {sink, sink}, o), std::invalid_argument);
+
+    // A rejected call leaves the formatter that was installed.
+    const auto logger = test_support::make_plain_logger("t", sink);
+    CHECK_THROWS_AS(jspdlog::json_logger::adopt(logger, o), std::invalid_argument);
+    CHECK_THROWS_AS(jspdlog::install_json_formatter(*logger, o), std::invalid_argument);
+    CHECK_THROWS_AS(jspdlog::install_json_formatter(*sink, o), std::invalid_argument);
+    logger->info("x");
+    CHECK(sink->last() == R"({"logger":"t","level":"info","message":"x"})");
+
+    jspdlog::error_report_options report;
+    report.format = o;
+    CHECK_THROWS_AS(jspdlog::make_error_handler("t", report), std::invalid_argument);
 }
 
 #ifdef _MSC_VER // 100 ns ticks reach about 29000 years either side of 1970. Nanosecond clocks end in 2262.

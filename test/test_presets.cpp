@@ -170,6 +170,23 @@ TEST_CASE("presets: otel", "[presets]")
 #endif
 }
 
+TEST_CASE("presets: no preset uses a key twice, with the call site off or on", "[presets]")
+{
+    for (auto options :
+         {jspdlog::json_options{},
+          jspdlog::presets::ecs(),
+          jspdlog::presets::gcp(),
+          jspdlog::presets::datadog(),
+          jspdlog::presets::otel()})
+    {
+        CHECK_NOTHROW(jspdlog::detail::validate(options));
+        options.source_key = "source";
+        CHECK_NOTHROW(jspdlog::detail::validate(options));
+        options.severity_key = "severity_value";
+        CHECK_NOTHROW(jspdlog::detail::validate(options));
+    }
+}
+
 TEST_CASE("presets: the names of the levels", "[presets]")
 {
     // The same level written under each preset's names: trace, debug, info, warn, error, critical.

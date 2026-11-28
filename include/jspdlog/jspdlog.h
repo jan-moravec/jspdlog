@@ -92,6 +92,7 @@
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -289,6 +290,8 @@ struct json_options
     std::string error_type_key = "type";
     /** @brief Key of the exception's message inside its object. Used only by the exception call forms. */
     std::string error_message_key = "message";
+    /** @brief Key of the nested cause inside an exception object, itself an exception object. */
+    std::string error_cause_key = "cause";
 
     /**
      * @brief How the timestamp is written. An RFC 3339 string cannot hold a year outside 0000 to 9999, so such a
@@ -308,6 +311,70 @@ struct json_options
      */
     std::optional<std::string> eol;
 };
+
+/** @brief Implementation details. Not part of the public API. */
+namespace detail
+{
+
+/** @brief Reports two options that give the same key: throws std::invalid_argument, or aborts without exceptions. */
+[[noreturn]] inline void duplicate_option_key(const std::string &key)
+{
+#if JSPDLOG_HAS_EXCEPTIONS
+    throw std::invalid_argument("jspdlog: json_options key \"" + key + "\" is used twice");
+#else
+    static_cast<void>(key);
+    std::abort();
+#endif
+}
+
+/** @brief Rejects two equal keys among those that end up in one JSON object. A null entry is a key that is off. */
+inline void require_distinct(std::initializer_list<const std::string *> keys)
+{
+    for (const auto *key = keys.begin(); key != keys.end(); ++key)
+    {
+        for (const auto *other = keys.begin(); other != key; ++other)
+        {
+            if (*key != nullptr && *other != nullptr && **key == **other)
+            {
+                duplicate_option_key(**key);
+            }
+        }
+    }
+}
+
+/**
+ * @brief Rejects options that would write a key twice: among the keys of the line, inside the call site object and
+ * inside an exception object.
+ *
+ * Keys are compared as given, before escaping. Level names, severity numbers and the line terminator may be anything.
+ */
+inline void validate(const json_options &o)
+{
+    const auto enabled = [](const std::optional<std::string> &key) { return key ? &*key : nullptr; };
+    const bool flat = o.source_key && o.source_flat;
+    const bool object = o.source_key && !o.source_flat;
+    require_distinct({
+        enabled(o.timestamp_key),
+        enabled(o.logger_key),
+        enabled(o.level_key),
+        enabled(o.severity_key),
+        enabled(o.process_key),
+        enabled(o.thread_key),
+        object ? &*o.source_key : nullptr,
+        flat ? &o.source_file_key : nullptr,
+        flat ? &o.source_line_key : nullptr,
+        flat ? &o.source_function_key : nullptr,
+        &o.message_key,
+        &o.error_key,
+    });
+    if (object)
+    {
+        require_distinct({&o.source_file_key, &o.source_line_key, &o.source_function_key});
+    }
+    require_distinct({&o.error_type_key, &o.error_message_key, &o.error_cause_key});
+}
+
+} // namespace detail
 
 /**
  * @brief A JSON value that is already serialized, written to the line unchanged.
@@ -991,7 +1058,11 @@ inline bool break_down(long long second, bool local, broken_down &out)
 class json_formatter final : public spdlog::formatter
 {
 public:
-    /** @brief Creates a formatter for the given options. */
+    /**
+     * @brief Creates a formatter for the given options. Throws std::invalid_argument when they would write a key twice:
+     * among the header, source, message and error keys, among the call site object's keys, or among the exception
+     * object's keys.
+     */
     explicit json_formatter(json_options options = {})
         : json_formatter(std::move(options), detail::process_token())
     {
@@ -1104,6 +1175,7 @@ private:
           eol_(opts_.eol.value_or(spdlog::details::os::default_eol)),
           message_key_(quote_key_(opts_.message_key))
     {
+        detail::validate(opts_);
         const auto prepare = [](const std::optional<std::string> &key) {
             return key ? quote_key_(*key) : std::string{};
         };

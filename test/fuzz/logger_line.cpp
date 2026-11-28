@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <set>
+#include <stdexcept>
 
 namespace
 {
@@ -135,9 +136,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     const auto eol_choice = static_cast<std::uint8_t>(r.byte() % 3U);
     const std::string name = r.string(16);
 
-    // Two equal keys would write a duplicate key, which is the caller's problem, so make them distinct as written: two
-    // different invalid keys can be replaced by the same text.
-    std::set<std::string> used;
+    // The formatter rejects two equal keys, and two different invalid keys can be written as the same text, which the
+    // check does not see. So make the keys of the line distinct as written.
+    std::set<std::string> used{options.error_key};
     if (options.source_flat)
     {
         used.insert(options.source_file_key);
@@ -162,6 +163,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     const header_key thread = next_key((flags & 0x10U) != 0);
     const header_key source = next_key((flags & 0x20U) != 0);
     const header_key message_key = next_key(true);
+    options.error_cause_key = r.string(8);
     const bool utc = (flags & 0x40U) != 0;
     const std::string_view eol = eol_for(eol_choice);
     const bool timed = (flags & 0x80U) != 0;
@@ -182,6 +184,15 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     options.time_type = utc ? spdlog::pattern_time_type::utc : spdlog::pattern_time_type::local;
     options.eol = std::string{eol};
     options.severity_key.reset(); // a preset's severity field is not one of the fuzzed keys
+    // The keys that are not made distinct above, such as those of an exception, can still be rejected.
+    try
+    {
+        jspdlog::detail::validate(options);
+    }
+    catch (const std::invalid_argument &)
+    {
+        return 0;
+    }
     if (timed && timestamp.enabled)
     {
         check_time(options, timestamp.key, eol, seconds);

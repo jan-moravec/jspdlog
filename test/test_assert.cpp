@@ -176,21 +176,6 @@ TEST_CASE("assert: a per-call field with the error key of an exception call is r
     CHECK(failures().empty());
 }
 
-TEST_CASE("assert: an error key that equals a header or message key is reported", "[assert]")
-{
-    failures().clear();
-    auto opts = test_support::deterministic_options();
-    opts.error_key = "message";
-    const fixture f("t", opts);
-    const std::runtime_error ex("boom");
-
-    f.logger.info({"error", 1}); // without an exception the error key is not written
-    CHECK(failures().empty());
-    f.logger.error(ex);
-    REQUIRE(failures().size() == 1);
-    CHECK(failures().front() == "jspdlog: a field key equals a header, source or message key");
-}
-
 TEST_CASE("assert: flat call site keys are reserved instead of the source key", "[assert]")
 {
     failures().clear();
