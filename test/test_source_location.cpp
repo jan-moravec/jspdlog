@@ -106,6 +106,13 @@ TEST_CASE("source location: call sites given explicitly", "[source]")
         f.logger.at(jspdlog::call_site::of("a.cpp", 5, nullptr)).info("x");
         CHECK(f.last().find(R"("src":{"file":"a.cpp","line":5,"function":""})") != std::string::npos);
     }
+    SECTION("a line of 0 or less writes no call site")
+    {
+        f.logger.at(jspdlog::call_site::of("a.cpp", 0, "fn")).info("x");
+        CHECK(f.last() == R"({"logger":"t","level":"info","message":"x"})");
+        f.logger.at(jspdlog::call_site::of("a.cpp", -1, "fn")).info("x");
+        CHECK(f.last() == R"({"logger":"t","level":"info","message":"x"})");
+    }
 #ifdef __cpp_lib_source_location
     SECTION("from a std::source_location")
     {

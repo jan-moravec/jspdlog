@@ -3498,8 +3498,9 @@ public:
     }
 
     /**
-     * @brief A call site given explicitly, for example by another logging framework. A null file or a line of 0 stands
-     * for no call site, which a json_formatter leaves out of the line. A null function is written as an empty string.
+     * @brief A call site given explicitly, for example by another logging framework. A null file or a line of 0 or less
+     * stands for no call site, which a json_formatter leaves out of the line. A null function is written as an empty
+     * string.
      */
     [[nodiscard]] static constexpr call_site of(const char *file, int line, const char *function) noexcept
     {
@@ -3512,7 +3513,7 @@ public:
         return of(loc.filename, detail::to_line(loc.line), loc.funcname);
     }
 
-#if defined(__cpp_lib_source_location)
+#ifdef __cpp_lib_source_location
     /** @brief The call site of a std::source_location, from C++20 on. */
     [[nodiscard]] static call_site of(const std::source_location &loc) noexcept
     {
@@ -3832,9 +3833,10 @@ private:
 };
 
 /**
- * @brief The exception of an exception call: a reference to a std::exception, or a pointer to a std::exception_ptr,
+ * @brief The exception of an exception call: a pointer to a std::exception, or a pointer to a std::exception_ptr,
  * which may hold nothing. Both are null for a call without an exception.
  */
+// NOLINTBEGIN(misc-non-private-member-variables-in-classes): plain data that lives for one logging call
 struct exception_ref
 {
     /** @brief The std::exception of the call, or null. */
@@ -3845,6 +3847,7 @@ struct exception_ref
     /** @brief Whether the call has an exception argument, even a std::exception_ptr that holds nothing. */
     [[nodiscard]] bool present() const noexcept { return ex != nullptr || ptr != nullptr; }
 };
+// NOLINTEND(misc-non-private-member-variables-in-classes)
 
 /** @brief Refers to the exception argument of a call, which must outlive the call. */
 template <typename E>
@@ -4603,11 +4606,12 @@ private:
             });
             write_message(out);
         };
-        // The line type is int in spdlog v1 and unsigned in v2. The constructor of v2 reads the file name, so a call
-        // site without one is passed as no source location.
+        // The line type is int in spdlog v1 and unsigned in v2. The constructor of v2 reads the file name, and v2 would
+        // turn a negative line into a large one, so a call site without a file or a positive line is passed as no
+        // source location.
         using line_type = decltype(spdlog::source_loc{}.line);
         const spdlog::source_loc source =
-            where.file() != nullptr
+            where.file() != nullptr && where.line() > 0
                 ? spdlog::source_loc{where.file(), static_cast<line_type>(where.line()), where.function()}
                 : spdlog::source_loc{};
         logger_->log(source, lvl, "{}", detail::deferred_payload<decltype(write)>{&write});
