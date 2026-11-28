@@ -4107,7 +4107,8 @@ private:
  *
  * Copies share the underlying spdlog::logger, so its level, sinks and error handler apply to every copy. They also
  * share the bound fields, which are immutable: with returns a child that adds fields to every line it writes, which is
- * how inner code adds context without affecting its caller. Copying a json_logger copies two pointers.
+ * how inner code adds context without affecting its caller. Copying a json_logger copies two pointers. A
+ * default-constructed or moved-from json_logger is a null logger, which writes nothing.
  *
  * The logging calls are const and only read the json_logger, so inner code can take a const reference, and several
  * threads can log through one json_logger, its copies and its children at once. Whether their lines are written safely
@@ -4180,6 +4181,15 @@ private:
 class json_logger : public detail::call_api<json_logger>
 {
 public:
+    /**
+     * @brief A null logger, which writes nothing.
+     *
+     * Every logging call is dropped before its arguments are looked at, should_log is false, log_level is off,
+     * set_level, flush and flush_on do nothing, name and context are empty, with returns another null logger and
+     * spdlog_logger is null. Use it for a member that is set later. A moved-from logger is a null logger too.
+     */
+    json_logger() noexcept = default;
+
     /** @brief Creates a logger writing to one sink. Throws std::invalid_argument if the sink is null or the options
      * would write a key twice. */
     json_logger(std::string name, spdlog::sink_ptr sink, const json_options &options = {})
@@ -4249,15 +4259,15 @@ public:
      * The child shares this logger's spdlog::logger and keeps this logger's bound fields. Where both have a key, the
      * value from f wins and the key keeps its position. This logger is not changed, and the child's fields are
      * immutable, so any number of threads can log through the child, this logger and their copies at once. With an
-     * empty f the child is a copy of this logger and shares its fields.
+     * empty f the child is a copy of this logger and shares its fields. The child of a null logger is a null logger.
      */
     [[nodiscard]] json_logger with(const fields &f) const
     {
-        if (f.empty())
+        if (logger_ == nullptr || f.empty())
         {
             return *this;
         }
-        auto ctx = std::make_shared<context_data>(*context_);
+        auto ctx = std::make_shared<context_data>(ctx_());
         ctx->values.merge(f);
         json_logger child = *this;
         child.context_ = std::move(ctx);
@@ -4265,7 +4275,7 @@ public:
     }
 
     /** @brief The fields bound to this logger by with. */
-    [[nodiscard]] const fields &context() const noexcept { return context_->values; }
+    [[nodiscard]] const fields &context() const noexcept { return ctx_().values; }
 
     /**
      * @brief The same logger with a fixed call site, for one call: logger.at(where).info(...).
@@ -4276,12 +4286,23 @@ public:
      */
     [[nodiscard]] located_logger at(const call_site &where) const noexcept;
 
+    /** @brief Whether the logger writes anywhere, that is, whether it is not a null logger. */
+    explicit operator bool() const noexcept { return logger_ != nullptr; }
+
     /** @brief The logger name, as given at construction or taken from the adopted spdlog::logger. */
-    [[nodiscard]] const std::string &name() const noexcept { return logger_->name(); }
+    [[nodiscard]] const std::string &name() const noexcept
+    {
+        static const std::string NONE;
+        return logger_ != nullptr ? logger_->name() : NONE;
+    }
 
     /** @brief The level below which calls are dropped. Shared by every copy. */
     [[nodiscard]] level log_level() const noexcept
     {
+        if (logger_ == nullptr)
+        {
+            return level::off;
+        }
 #if JSPDLOG_SPDLOG_V2
         return logger_->log_level();
 #else
@@ -4290,24 +4311,44 @@ public:
     }
 
     /** @brief Sets the level below which calls are dropped, for every copy. */
-    void set_level(level lvl) { logger_->set_level(lvl); }
+    void set_level(level lvl)
+    {
+        if (logger_ != nullptr)
+        {
+            logger_->set_level(lvl);
+        }
+    }
     /**
      * @brief Whether a call at this level would be written. Use it to skip building expensive fields or arguments.
      *
      * With spdlog v1's backtrace enabled, a call at a level that should_log rejects is still stored for dump_backtrace;
      * guard with should_log only what the backtrace may miss.
      */
-    [[nodiscard]] bool should_log(level lvl) const noexcept { return logger_->should_log(lvl); }
+    [[nodiscard]] bool should_log(level lvl) const noexcept { return logger_ != nullptr && logger_->should_log(lvl); }
     /**
      * @brief Flushes every sink. On an asynchronous logger it only queues the request behind the waiting lines and
      * returns at once.
      */
-    void flush() { logger_->flush(); }
+    void flush()
+    {
+        if (logger_ != nullptr)
+        {
+            logger_->flush();
+        }
+    }
+
     /** @brief Flushes automatically after every line at this level or above. */
-    void flush_on(level lvl) { logger_->flush_on(lvl); }
+    void flush_on(level lvl)
+    {
+        if (logger_ != nullptr)
+        {
+            logger_->flush_on(lvl);
+        }
+    }
 
     /**
-     * @brief The underlying spdlog::logger, for settings jspdlog does not wrap, such as the error handler.
+     * @brief The underlying spdlog::logger, for settings jspdlog does not wrap, such as the error handler. Null for a
+     * null logger.
      *
      * Logging through it directly is safe: the message is escaped into the message field. Setting a pattern or
      * formatter on it or on its sinks replaces the json_formatter, and the lines then show the payload protocol. Call
@@ -4346,6 +4387,13 @@ private:
         : json_logger(std::move(logger), attach_tag{})
     {
         logger_->set_formatter(std::unique_ptr<spdlog::formatter>(new json_formatter(options, context_->token)));
+    }
+
+    /** @brief The context, or an empty one for a null logger. Immutable, so sharing it is safe. */
+    [[nodiscard]] const context_data &ctx_() const noexcept
+    {
+        static const context_data NONE{};
+        return context_ != nullptr ? *context_ : NONE;
     }
 
     /** @brief Creates the empty context of a root logger. */
@@ -4394,9 +4442,9 @@ private:
     [[nodiscard]] bool processes_(level lvl) const noexcept
     {
 #if JSPDLOG_SPDLOG_V2
-        return logger_->should_log(lvl);
+        return should_log(lvl);
 #else
-        return logger_->should_log(lvl) || logger_->should_backtrace();
+        return logger_ != nullptr && (logger_->should_log(lvl) || logger_->should_backtrace());
 #endif
     }
 
@@ -4435,7 +4483,7 @@ private:
         detail::call_fields::write_state &state
     ) const
     {
-        const context_data &ctx = *context_;
+        const context_data &ctx = ctx_();
         const fields *named = props.named();
         // A marked field that a per-call one replaces still counts: the formatter then only looks for markers in vain.
         state.marked = ctx.values.marked_ || (named != nullptr && named->marked_);
@@ -4533,7 +4581,7 @@ private:
         const WriteMessage &write_message
     ) const
     {
-        const context_data &ctx = *context_;
+        const context_data &ctx = ctx_();
         const auto write = [&](spdlog::memory_buf_t &out) {
             detail::write_payload(out, ctx.token, kind, [&](spdlog::memory_buf_t &fields_out) {
                 // The exception is held by reference and written here, when the line is, so a disabled level computes
@@ -4555,9 +4603,9 @@ private:
         logger_->log(source, lvl, "{}", detail::deferred_payload<decltype(write)>{&write});
     }
 
-    /** @brief The spdlog::logger shared by every copy. */
+    /** @brief The spdlog::logger shared by every copy, or null for a null logger. */
     std::shared_ptr<spdlog::logger> logger_;
-    /** @brief The bound fields and what is derived from them, shared by every copy and never null. */
+    /** @brief The bound fields and what is derived from them, shared by every copy, or null for a null logger. */
     std::shared_ptr<const context_data> context_;
 };
 
