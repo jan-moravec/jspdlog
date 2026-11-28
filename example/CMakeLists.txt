@@ -63,3 +63,7 @@ jspdlog_set_warnings(example_12_factories)
 add_executable(example_13_trace_context 13_trace_context.cpp)
 target_link_libraries(example_13_trace_context PRIVATE jspdlog::jspdlog)
 jspdlog_set_warnings(example_13_trace_context)
+
+add_executable(example_14_exception_ptr 14_exception_ptr.cpp)
+target_link_libraries(example_14_exception_ptr PRIVATE jspdlog::jspdlog)
+jspdlog_set_warnings(example_14_exception_ptr)
