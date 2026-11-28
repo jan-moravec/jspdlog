@@ -172,12 +172,13 @@ TEST_CASE("presets: otel", "[presets]")
 
 TEST_CASE("presets: no preset uses a key twice, with the call site off or on", "[presets]")
 {
-    for (auto options :
-         {jspdlog::json_options{},
-          jspdlog::presets::ecs(),
-          jspdlog::presets::gcp(),
-          jspdlog::presets::datadog(),
-          jspdlog::presets::otel()})
+    for (auto options : {
+             jspdlog::json_options{},
+             jspdlog::presets::ecs(),
+             jspdlog::presets::gcp(),
+             jspdlog::presets::datadog(),
+             jspdlog::presets::otel(),
+         })
     {
         CHECK_NOTHROW(jspdlog::detail::validate(options));
         options.source_key = "source";

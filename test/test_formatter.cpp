@@ -513,8 +513,14 @@ TEST_CASE("formatter: the exception is the only field under the error key", "[fo
     CHECK(line(",\"E\":1,\"E\":2" + error + ",\"E\":3,\"z\":4") == "{\"E\":9,\"z\":4}\n");
     // Only top-level keys count, whatever the values hold, including raw JSON with white space.
     const std::string raw = R"(,"a": [ 1, "]", {"E": 2} ] ,"b":",\"E\":3" ,"c": true )";
-    CHECK(line(raw + error + ",\"E\":0") == "{" + raw.substr(1) + ",\"E\":9}\n");
-    CHECK(line(raw + ",\"E\":0" + error) == "{" + raw.substr(1) + ",\"E\":9}\n");
+    std::string field_after = raw;
+    field_after.append(error).append(R"(,"E":0)");
+    std::string field_before = raw;
+    field_before.append(R"(,"E":0)").append(error);
+    std::string expected = "{";
+    expected.append(raw, 1).append(",\"E\":9}\n");
+    CHECK(line(field_after) == expected);
+    CHECK(line(field_before) == expected);
 }
 
 namespace
