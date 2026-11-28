@@ -20,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -201,6 +202,14 @@ int main(int argc, char **argv)
         });
         run("jspdlog, lazy value + message (2 fields)",
             [&] { logger.info({"user", user, "status", [] { return 200; }}, "request {} handled in {} ms", 42, 7); });
+    }
+
+    // An exception call: the exception is serialized with its type name, and the formatter places it.
+    {
+        const jspdlog::json_logger logger("bench", make_sink(), options_with(true, false));
+        const std::runtime_error ex("connection refused");
+        const std::string host = "db1.example.com";
+        run("jspdlog, exception call + braced list", [&] { logger.error(ex, {"host", host}, "failed"); });
     }
 
     // Where the allocations are: braced lists with short and long keys, and fields objects built per call and bound.

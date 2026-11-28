@@ -76,18 +76,23 @@ TEST_CASE("formatter: payloads that imitate jspdlog are escaped", "[formatter]")
     const auto &token = jspdlog::detail::process_token();
     const std::string t(token.data(), token.size());
     const std::vector<std::string> fakes = {
-        t.substr(0, 31),                                              // token prefix only
-        t + "M",                                                      // header cut short
-        t + R"(Mzzzzzzzz,"a":1"m")",                                  // size not hex
-        t + R"(MFFFFFFFF,"a":1"m")",                                  // size not lowercase hex
-        t + "M00000010,\"a\":1",                                      // size past the end
-        t + "M00000006,\"a\":1",                                      // message kind without a message
-        t + "F00000001,\"a\":1",                                      // F with trailing bytes
-        t + "X00000006,\"a\":1",                                      // unknown kind
-        t + "M00000000x",                                             // message not quoted
-        t + "M00000000\"x",                                           // message without a closing quote
-        t + "F00000004\"a\":",                                        // fields without a leading comma
-        std::string("jspdlog:") + std::string(24, 'A') + "F00000000", // wrong token
+        t.substr(0, 31),                                               // token prefix only
+        t + "M",                                                       // header cut short
+        t + "M0",                                                      // header cut short after the flags
+        t + R"(M0zzzzzzzz,"a":1"m")",                                  // size not hex
+        t + R"(M0FFFFFFFF,"a":1"m")",                                  // size not lowercase hex
+        t + R"(M400000006,"a":1"m")",                                  // flags past the known bits
+        t + R"(Ma00000006,"a":1"m")",                                  // flags past the known bits, as a letter
+        t + R"(MA00000006,"a":1"m")",                                  // flags not lowercase hex
+        t + R"(Mx00000006,"a":1"m")",                                  // flags not hex
+        t + "M000000010,\"a\":1",                                      // size past the end
+        t + "M000000006,\"a\":1",                                      // message kind without a message
+        t + "F000000001,\"a\":1",                                      // F with trailing bytes
+        t + "X000000006,\"a\":1",                                      // unknown kind
+        t + "M000000000x",                                             // message not quoted
+        t + "M000000000\"x",                                           // message without a closing quote
+        t + "F000000004\"a\":",                                        // fields without a leading comma
+        std::string("jspdlog:") + std::string(24, 'A') + "F000000000", // wrong token
     };
     for (const std::string &fake : fakes)
     {
@@ -384,7 +389,7 @@ TEST_CASE("formatter: clone keeps the options and the token", "[formatter]")
     const auto copy = formatter.clone();
     const auto &token = jspdlog::detail::process_token();
     std::string payload(token.data(), token.size());
-    payload += R"(M00000006,"k":1"m")";
+    payload += R"(M000000006,"k":1"m")";
     const spdlog::details::log_msg msg("name", jspdlog::level::info, payload);
     spdlog::memory_buf_t buf;
     copy->format(msg, buf);
@@ -395,8 +400,121 @@ TEST_CASE("formatter: a payload with fields but no message", "[formatter]")
 {
     jspdlog::json_formatter formatter(no_header_options());
     const auto &token = jspdlog::detail::process_token();
-    const std::string payload = std::string(token.data(), token.size()) + "F00000006,\"k\":1";
+    const std::string payload = std::string(token.data(), token.size()) + "F000000006,\"k\":1";
     CHECK(format_payload(formatter, payload) == "{\"k\":1}\n");
+}
+
+namespace
+{
+
+// A payload of this process with the given flags digit and fields, and no message.
+std::string payload_of(char flags, const std::string &fields)
+{
+    static constexpr char HEX_DIGITS[] = "0123456789abcdef";
+    const auto &token = jspdlog::detail::process_token();
+    std::string payload(token.data(), token.size());
+    payload += 'F';
+    payload += flags;
+    for (int shift = 28; shift >= 0; shift -= 4)
+    {
+        payload += HEX_DIGITS[(fields.size() >> static_cast<unsigned>(shift)) & 0xFU];
+    }
+    return payload + fields;
+}
+
+jspdlog::json_options renamed_exception_keys()
+{
+    jspdlog::json_options opts = no_header_options();
+    opts.error_key = "E";
+    opts.error_type_key = "T\"";
+    opts.error_message_key = "M";
+    opts.error_cause_key = "C";
+    return opts;
+}
+
+} // namespace
+
+TEST_CASE("formatter: key markers become the exception keys of the sink", "[formatter]")
+{
+    jspdlog::json_formatter formatter(renamed_exception_keys());
+    const std::string fields = ",\x01"
+                               "E{\x01"
+                               "T1,\x01"
+                               "M2,\x01"
+                               "C{\x01"
+                               "T3}}";
+    // MSVC 19.44 mis-stringifies raw strings with backslashes inside Catch2 macros.
+    const std::string expected = R"({"E":{"T\"":1,"M":2,"C":{"T\"":3}}})"
+                                 "\n";
+    CHECK(format_payload(formatter, payload_of('1', fields)) == expected);
+    CHECK(format_payload(formatter, payload_of('3', fields)) == expected);
+}
+
+TEST_CASE("formatter: markers are not replaced in a payload without the flag", "[formatter]")
+{
+    jspdlog::json_formatter formatter(renamed_exception_keys());
+    const std::string fields = ",\"a\":{\x01"
+                               "T1}";
+    CHECK(format_payload(formatter, payload_of('0', fields)) == "{" + fields.substr(1) + "}\n");
+}
+
+TEST_CASE("formatter: a damaged payload with the real token does not break the formatter", "[formatter]")
+{
+    // Only corrupted memory or a fuzzer gives these. The line need not be valid JSON, but every byte is accounted for.
+    jspdlog::json_formatter formatter(renamed_exception_keys());
+    SECTION("a marker cut short at the end of the fields")
+    {
+        const std::string fields = ",\"a\":1,\x01";
+        for (const char flags : {'1', '2', '3'})
+        {
+            CHECK(format_payload(formatter, payload_of(flags, fields)) == "{\"a\":1,\x01}\n");
+        }
+    }
+    SECTION("an unknown marker letter")
+    {
+        const std::string fields = ",\x01Z1,\x01"
+                                   "E2";
+        CHECK(format_payload(formatter, payload_of('1', fields)) == "{\x01Z1,\"E\":2}\n");
+        CHECK(format_payload(formatter, payload_of('3', fields)) == "{\x01Z1,\"E\":2}\n");
+    }
+    SECTION("fields that end inside a key or a value")
+    {
+        for (const std::string fields :
+             {",", ",\"", ",\"a", ",\"a\"", ",\"a\":", R"(,"a":"b)", R"(,"a":"b\)", R"(,"a":[{"b":1)", ",\x01"})
+        {
+            for (const char flags : {'0', '1', '2', '3'})
+            {
+                CHECK(format_payload(formatter, payload_of(flags, fields)) == "{" + fields.substr(1) + "}\n");
+            }
+        }
+    }
+    SECTION("an exception flag without an exception")
+    {
+        const std::string fields = R"(,"E":1,"E":2)";
+        CHECK(format_payload(formatter, payload_of('3', fields)) == "{\"E\":1,\"E\":2}\n");
+    }
+    SECTION("no fields")
+    {
+        CHECK(format_payload(formatter, payload_of('3', "")) == "{}\n");
+    }
+}
+
+TEST_CASE("formatter: the exception is the only field under the error key", "[formatter]")
+{
+    jspdlog::json_formatter formatter(renamed_exception_keys());
+    const std::string error = ",\x01"
+                              "E9";
+    const auto line = [&](const std::string &fields) { return format_payload(formatter, payload_of('3', fields)); };
+
+    CHECK(line(",\"a\":1" + error + ",\"b\":2") == "{\"a\":1,\"E\":9,\"b\":2}\n");
+    // It moves to the first other field with the key, whether that comes before or after it.
+    CHECK(line(",\"E\":1,\"a\":2" + error) == "{\"E\":9,\"a\":2}\n");
+    CHECK(line(error + ",\"a\":2,\"E\":1,\"b\":3") == "{\"a\":2,\"E\":9,\"b\":3}\n");
+    CHECK(line(",\"E\":1,\"E\":2" + error + ",\"E\":3,\"z\":4") == "{\"E\":9,\"z\":4}\n");
+    // Only top-level keys count, whatever the values hold, including raw JSON with white space.
+    const std::string raw = R"(,"a": [ 1, "]", {"E": 2} ] ,"b":",\"E\":3" ,"c": true )";
+    CHECK(line(raw + error + ",\"E\":0") == "{" + raw.substr(1) + ",\"E\":9}\n");
+    CHECK(line(raw + ",\"E\":0" + error) == "{" + raw.substr(1) + ",\"E\":9}\n");
 }
 
 namespace

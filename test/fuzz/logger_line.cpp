@@ -124,6 +124,43 @@ jspdlog::json_options base_options(std::uint8_t choice)
     }
 }
 
+// Logs an exception with a nested cause and checks that its members are named as the options say.
+void check_exception(const fuzz::harness &h, const jspdlog::json_options &options, std::string_view eol, bool utf8)
+{
+    h.sink->lines.clear();
+    try
+    {
+        try
+        {
+            throw std::runtime_error("inner");
+        }
+        catch (...)
+        {
+            std::throw_with_nested(std::runtime_error("outer"));
+        }
+    }
+    catch (const std::runtime_error &ex)
+    {
+        h.logger.error(ex);
+    }
+    FUZZ_CHECK(h.sink->lines.size() == 1);
+    const std::string &line = h.sink->lines.front();
+    if (!utf8)
+    {
+        fuzz::check_shape(line, eol);
+        return;
+    }
+    const ojson parsed = fuzz::parse_line(line, eol);
+    const ojson &error = parsed.at(fuzz::written_text(options.error_key));
+    const std::string type = fuzz::written_text(options.error_type_key);
+    const std::string message = fuzz::written_text(options.error_message_key);
+    const std::string cause = fuzz::written_text(options.error_cause_key);
+    FUZZ_CHECK((fuzz::keys_of(error) == std::vector<std::string>{type, message, cause}));
+    FUZZ_CHECK(error.at(message) == ojson("outer"));
+    FUZZ_CHECK((fuzz::keys_of(error.at(cause)) == std::vector<std::string>{type, message}));
+    FUZZ_CHECK(error.at(cause).at(message) == ojson("inner"));
+}
+
 } // namespace
 
 // NOLINTNEXTLINE(readability-identifier-naming): libFuzzer requires this name
@@ -213,6 +250,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     if (!utf8)
     {
         fuzz::check_shape(line, eol);
+        check_exception(h, options, eol, false);
         return 0;
     }
 
@@ -288,5 +326,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
         FUZZ_CHECK(src.at(line_key).is_number_integer());
     }
     FUZZ_CHECK(parsed.at(fuzz::written_text(message_key.key)) == ojson(fuzz::written_text(message)));
+    check_exception(h, options, eol, fuzz::parseable(options.error_cause_key));
     return 0;
 }

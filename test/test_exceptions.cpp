@@ -8,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <exception>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -433,15 +434,71 @@ TEST_CASE("exceptions: a bound field with the error key is replaced at its posit
     CHECK(f.last() == R"({"logger":"t","level":"error","a":1,"error":"none","message":"x"})");
 }
 
-#ifdef NDEBUG
-TEST_CASE("exceptions: a per-call field with the error key replaces the exception in its place", "[exceptions]")
+TEST_CASE("exceptions: the exception replaces a per-call field with the error key", "[exceptions]")
 {
     const fixture f;
     const std::runtime_error ex("boom");
+    const std::string error = error_object("std::runtime_error", "boom");
+    const std::string only = std::string(R"({"logger":"t","level":"error",)") + error + R"(,"message":"x"})";
     f.logger.error(ex, {"error", 1}, "x");
-    CHECK(f.last() == R"({"logger":"t","level":"error","error":1,"message":"x"})");
+    CHECK(f.last() == only);
+    f.logger.error(ex, fields{"error", 1}, "x");
+    CHECK(f.last() == only);
+
+    // The exception takes the position of that field.
+    const std::string between =
+        std::string(R"({"logger":"t","level":"error","a":1,)") + error + R"(,"b":3,"message":"x"})";
+    f.logger.error(ex, {"a", 1, "error", 2, "b", 3}, "x");
+    CHECK(f.last() == between);
+    f.logger.error(ex, fields{"a", 1, "error", 2, "b", 3}, "x");
+    CHECK(f.last() == between);
+    f.logger.with({"z", 0}).error(ex, {"a", 1, "error", 2, "b", 3}, "x");
+    CHECK(
+        f.last() == std::string(R"({"logger":"t","level":"error","z":0,"a":1,)") + error + R"(,"b":3,"message":"x"})"
+    );
+}
+
+TEST_CASE("exceptions: bound fields with the error key from nested with() calls give one exception", "[exceptions]")
+{
+    const fixture f;
+    const std::runtime_error ex("boom");
+    const auto child = f.logger.with({"error", "outer", "a", 1}).with({"b", 2, "error", "inner"});
+    const std::string expected = std::string(R"({"logger":"t","level":"error",)") +
+                                 error_object("std::runtime_error", "boom") + R"(,"a":1,"b":2,"c":3,"message":"x"})";
+    child.error(ex, {"c", 3}, "x");
+    CHECK(f.last() == expected);
+    child.error(ex, {"error", "call", "c", 3}, "x");
+    CHECK(f.last() == expected);
+}
+
+#if JSPDLOG_UTF8_POLICY == JSPDLOG_UTF8_REPLACE // the only policy that writes different keys as the same text
+TEST_CASE("exceptions: every field that is written under the error key is replaced", "[exceptions]")
+{
+    // Two different keys that are not UTF-8 are written as the same text.
+    auto opts = test_support::deterministic_options();
+    opts.error_key = "\xEF\xBF\xBD";
+    const fixture f("t", opts);
+    const std::runtime_error ex("boom");
+    f.logger.with({"\x80", 1}).error(ex, {"a", 2, "\x81", 3}, "x");
+    const std::string expected = std::string("{\"logger\":\"t\",\"level\":\"error\",\"\xEF\xBF\xBD\":") +
+                                 R"({"type":"std::runtime_error","message":"boom"},"a":2,"message":"x"})";
+    CHECK(f.last() == expected);
 }
 #endif
+
+TEST_CASE("exceptions: other values do not confuse the placement of the exception", "[exceptions]")
+{
+    const fixture f;
+    const std::runtime_error ex(R"(},"error":[)");
+    const std::vector<std::string> nested{"]", R"(,"error":1)"};
+    f.logger.error(
+        ex, {"raw", jspdlog::raw_json{R"( {"error": [1, "}"]} )"}, "list", nested, "error", ex, "n", -1.5}, "x"
+    );
+    const std::string expected =
+        R"({"logger":"t","level":"error","raw": {"error": [1, "}"]} ,"list":["]",",\"error\":1"],)"
+        R"("error":{"type":"std::runtime_error","message":"},\"error\":["},"n":-1.5,"message":"x"})";
+    CHECK(f.last() == expected);
+}
 
 TEST_CASE("exceptions: a null std::exception_ptr is null and a current exception is written", "[exceptions]")
 {
@@ -489,6 +546,7 @@ TEST_CASE("exceptions: the keys come from the options", "[exceptions]")
     opts.error_key = "exception";
     opts.error_type_key = "kind";
     opts.error_message_key = "text";
+    opts.error_cause_key = "why";
     const fixture f("t", opts);
     const std::runtime_error ex("boom");
     f.logger.error(ex, {"k", 1});
@@ -496,13 +554,171 @@ TEST_CASE("exceptions: the keys come from the options", "[exceptions]")
         f.last() == R"({"logger":"t","level":"error","exception":{"kind":"std::runtime_error","text":"boom"},"k":1})"
     );
 
-    // A child sees the same keys, and the value-type form keeps the default ones.
+    // A child sees the same keys.
     f.logger.with({"a", 1}).error(ex);
     CHECK(
         f.last() == R"({"logger":"t","level":"error","a":1,"exception":{"kind":"std::runtime_error","text":"boom"}})"
     );
+    // So does an exception that is a field value, however it gets into the line.
+    const std::string object = R"({"kind":"std::runtime_error","text":"boom"})";
+    const std::string value = R"({"logger":"t","level":"info","e":)" + object + "}";
     f.logger.info({"e", ex});
-    CHECK(f.last() == R"({"logger":"t","level":"info","e":{"type":"std::runtime_error","message":"boom"}})");
+    CHECK(f.last() == value);
+    f.logger.info(fields{"e", ex});
+    CHECK(f.last() == value);
+    f.logger.with({"e", ex}).info(fields{});
+    CHECK(f.last() == value);
+    f.logger.info({"e", [&] { return std::make_exception_ptr(ex); }});
+    CHECK(f.last() == value);
+    f.logger.info({"e", [&] { return fields{"inner", ex}; }});
+    CHECK(f.last() == R"({"logger":"t","level":"info","e":{"inner":)" + object + "}}");
+    f.logger.info({"e", std::vector<std::optional<std::runtime_error>>{ex, std::nullopt}});
+    CHECK(f.last() == R"({"logger":"t","level":"info","e":[)" + object + ",null]}");
+    try
+    {
+        throw 42; // NOLINT(bugprone-std-exception-baseclass): an exception that is not a std::exception
+    }
+    catch (...)
+    {
+        f.logger.info({"e", std::current_exception()});
+    }
+    CHECK(f.last() == R"({"logger":"t","level":"info","e":{"kind":"unknown"}})");
+}
+
+TEST_CASE("exceptions: the cause key is renamed at every depth", "[exceptions]")
+{
+    auto opts = test_support::deterministic_options();
+    opts.error_cause_key = "caused_by";
+    const fixture f("t", opts);
+    try
+    {
+        try
+        {
+            try
+            {
+                throw 42; // NOLINT(bugprone-std-exception-baseclass): a cause that is not a std::exception
+            }
+            catch (...)
+            {
+                std::throw_with_nested(std::runtime_error("middle"));
+            }
+        }
+        catch (...)
+        {
+            std::throw_with_nested(std::logic_error("outer"));
+        }
+    }
+// clang 23 on Windows crashes in std::rethrow_if_nested for chains of two or more causes, see above.
+#if !(defined(_WIN32) && defined(__clang__))
+    catch (const std::exception &ex)
+    {
+        const std::string object =
+            R"({"type":"std::logic_error","message":"outer","caused_by":{"type":"std::runtime_error",)"
+            R"("message":"middle","caused_by":{"type":"unknown"}}})";
+        f.logger.error(ex);
+        CHECK(f.last() == R"({"logger":"t","level":"error","error":)" + object + "}");
+        f.logger.error({"e", ex});
+        CHECK(f.last() == R"({"logger":"t","level":"error","e":)" + object + "}");
+        const fields holder{"e", ex};
+        CHECK(
+            holder.to_json() ==
+            R"({"e":{"type":"std::logic_error","message":"outer","cause":{"type":"std::runtime_error",)"
+            R"("message":"middle","cause":{"type":"unknown"}}}})"
+        );
+    }
+#else
+    catch (const std::exception &)
+    {
+    }
+#endif
+}
+
+namespace
+{
+
+// A type whose serializer writes an exception it holds.
+struct failure_report
+{
+    std::runtime_error error;
+};
+
+void jspdlog_serialize(jspdlog::json_writer &w, const failure_report &r)
+{
+    w.begin_object();
+    w.member("failure", r.error);
+    w.end_object();
+}
+
+// A type whose serializer builds text with a writer of its own and passes it on as raw JSON.
+struct prebuilt_report
+{
+    std::runtime_error error;
+};
+
+void jspdlog_serialize(jspdlog::json_writer &w, const prebuilt_report &r)
+{
+    std::string text;
+    jspdlog::json_writer own(text);
+    own.value(r.error);
+    w.raw(text);
+}
+
+} // namespace
+
+TEST_CASE("exceptions: nested fields and serializers use the keys of the sink", "[exceptions]")
+{
+    auto opts = test_support::deterministic_options();
+    opts.error_type_key = "kind";
+    const fixture f("t", opts);
+    const std::runtime_error ex("boom");
+    const std::string object = R"({"kind":"std::runtime_error","message":"boom"})";
+
+    const fields inner{"e", ex};
+    const fields middle{"inner", inner};
+    const fields outer{"middle", middle};
+    const std::string nested = R"({"middle":{"inner":{"e":)" + object + "}}}";
+    f.logger.info({"outer", outer});
+    CHECK(f.last() == R"({"logger":"t","level":"info","outer":)" + nested + "}");
+    f.logger.info(fields{"outer", outer});
+    CHECK(f.last() == R"({"logger":"t","level":"info","outer":)" + nested + "}");
+    // Merged and bound fields keep the markers.
+    fields merged{"a", 1};
+    merged.merge(inner);
+    f.logger.with(merged).info("x");
+    CHECK(f.last() == R"({"logger":"t","level":"info","a":1,"e":)" + object + R"(,"message":"x"})");
+
+    f.logger.info({"r", failure_report{ex}});
+    CHECK(f.last() == R"({"logger":"t","level":"info","r":{"failure":)" + object + "}}");
+
+    // Text that a serializer makes with its own writer goes who knows where, so it has the default keys.
+    f.logger.info({"r", prebuilt_report{ex}});
+    CHECK(f.last() == R"({"logger":"t","level":"info","r":{"type":"std::runtime_error","message":"boom"}})");
+}
+
+TEST_CASE("exceptions: a writer of your own and to_json write the default keys", "[exceptions]")
+{
+    const std::runtime_error ex("boom");
+    const std::string object = R"({"type":"std::runtime_error","message":"boom"})";
+
+    std::string text;
+    jspdlog::json_writer w(text);
+    w.value(ex);
+    CHECK(text == object);
+
+    const fields inner{"e", ex};
+    CHECK(inner.to_json() == R"({"e":)" + object + "}");
+    const fields outer{"inner", inner, "n", 1};
+    CHECK(outer.to_json() == R"({"inner":{"e":)" + object + R"(},"n":1})");
+
+    std::string nested;
+    jspdlog::json_writer n(nested);
+    n.value(outer);
+    CHECK(nested == outer.to_json());
+    CHECK(nested.find('\x01') == std::string::npos);
+
+    fields cleared = inner;
+    cleared.clear();
+    CHECK(cleared.to_json() == "{}");
 }
 
 TEST_CASE("exceptions: a formatter that throws in an exception form goes to the error handler", "[exceptions]")
