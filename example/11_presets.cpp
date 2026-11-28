@@ -33,7 +33,7 @@ void log_failure(const jspdlog::json_logger &logger)
     }
     catch (const std::exception &ex)
     {
-        // The exception goes first and is written under the key of the schema, with its causes.
+        // The exception is written under the key of the schema, with its causes, after the bound fields.
         logger.error(ex, {"host", "db1"}, "connect failed");
     }
 }

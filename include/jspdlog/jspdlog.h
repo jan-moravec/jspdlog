@@ -2371,12 +2371,13 @@ public:
         {
             return;
         }
+        // Set first: a merge that throws part way keeps the fields it has added, which may hold key markers.
+        marked_ = marked_ || other.marked_;
         for (const entry &e : other.entries_)
         {
             const std::string_view text{other.text_.data() + e.begin, e.size};
             put_text_(other.key_of_(e), e.key_in_text, text);
         }
-        marked_ = marked_ || other.marked_;
     }
 
     /** @brief Returns the merge of both sets. Where both have a key, the value from rhs wins. */
