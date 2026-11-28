@@ -140,14 +140,14 @@ only; dependencies, tests and examples are filtered out.
 jspdlog promises that every line is one valid JSON object, whatever the input. The fuzz targets in
 [test/fuzz](test/fuzz) test that with inputs nobody writes by hand. There are six libFuzzer targets:
 
-| Target            | What it checks                                                                                                                                  |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `escape`          | The escaped string decodes to the input with each maximal invalid UTF-8 subpart replaced, for every input.                                      |
-| `fields`          | Operations on `fields`, `with()` and per-call fields against a short reference model; a braced list gives the line of the same `fields` object. |
-| `logger_line`     | Fuzzed logger name, header keys, time type, line terminator and message: one object per line. The message is also parsed as a `traceparent`.    |
-| `foreign_payload` | Payloads logged straight on the `spdlog::logger`, with prefixes of the payload token: no injection.                                             |
-| `numbers`         | Every integer width, `float`, `double` and `long double` round-trip; NaN and infinity are `null`.                                               |
-| `value_types`     | Nested optionals, variants, ranges, maps, durations and time points against an independent model.                                               |
+| Target            | What it checks                                                                                                                                                                               |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `escape`          | The escaped string decodes to the input with each maximal invalid UTF-8 subpart replaced, for every input.                                                                                   |
+| `fields`          | Operations on `fields`, `with()`, per-call fields and exception calls against a short reference model; exception keys are renamed; a braced list gives the line of the same `fields` object. |
+| `logger_line`     | Fuzzed logger name, header keys, cause key, time type, line terminator and message: one object per line. The message is also parsed as a `traceparent`.                                      |
+| `foreign_payload` | Payloads logged straight on the `spdlog::logger`, with prefixes of the payload token: no injection, and no out-of-bounds read for a damaged payload.                                         |
+| `numbers`         | Every integer width, `float`, `double` and `long double` round-trip; NaN and infinity are `null`.                                                                                            |
+| `value_types`     | Nested optionals, variants, ranges, maps, durations and time points against an independent model.                                                                                            |
 
 ### Run a target
 

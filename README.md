@@ -194,7 +194,8 @@ const auto file = jspdlog::make_rotating_file_logger("app", "app.log", 10 * 1024
 
 Each takes `json_options` as its last argument and returns an ordinary `json_logger`. The sinks are spdlog's
 thread-safe `stdout_sink_mt`, `stderr_sink_mt` and `rotating_file_sink_mt`, without colors, which a JSON line has no
-use for. Nothing is registered with spdlog.
+use for. Nothing is registered with spdlog. Like the constructors, every factory throws `std::invalid_argument` for
+options that would [write a key twice](#configuring-the-line).
 
 `make_async_logger` takes the sinks and gives the logger a worker thread of its own: an spdlog thread pool of one
 thread with v1, an `async_sink` with v2. There is no global thread pool, and `spdlog::shutdown()` does not affect it.
@@ -255,8 +256,10 @@ logger.info({"user_id", 42, "admin", false, "ratio", 0.25, "name", "ada"}, "logi
 - Wide characters and pointers other than `const char*` don't compile. More types are covered under
   [Value types](#value-types).
 - A key equal to a header key (`timestamp`, `level`, ...), to the source key or to `message` produces a duplicate key.
-  Avoid them. Debug builds check this through `JSPDLOG_ASSERT`, which defaults to `assert`; define it before including
-  jspdlog to use your own handler. Release builds do not check.
+  Avoid them. Debug builds check this through `JSPDLOG_ASSERT` when a line is written, against the keys of each sink
+  that writes it, so `with()` itself reports nothing. `JSPDLOG_ASSERT` defaults to `assert`; define it before including
+  jspdlog to use your own handler. Release builds with the default do not check. A handler of yours that evaluates its
+  condition in every build pays a walk over the fields of every line, for each sink.
 - A braced list passed to a logging call is serialized only when the line is written. A `fields` object is
   serialized when it is built. A braced list holds at most 16 pairs; build a `fields` object for more.
 - A key that appears twice in one braced list takes the last value at the first position, as in a `fields` object.
@@ -420,8 +423,14 @@ catch (const std::exception &ex)
 A `catch (...)` handler has `std::current_exception()`, which is written the same way: `{"error", std::current_exception()}`.
 A null pointer is `null`, and an exception that is not a `std::exception` is `{"type":"unknown"}`.
 
+Every exception object in a line has the keys of the [sink](#options-belong-to-sinks) that writes it: `error_type_key`
+(default `type`), `error_message_key` (`message`) and `error_cause_key` (`cause`). That holds for the exception of a
+call, for one that is a field value, also deep inside containers, `fields` objects and bound context, and for one that
+your serializer writes into the writer it is given. Text with no sink has the default keys: `fields::to_json()` and a
+`json_writer` that you create yourself.
+
 Every level and `log(level, ...)` also take the exception as the first argument, with the same endings as the other
-forms. The exception is then written first among the fields of the call, under `json_options::error_key`:
+forms. The exception then goes under `json_options::error_key` (default `error`):
 
 ```cpp
 logger.error(ex);                                  // no message
@@ -431,10 +440,14 @@ JSPDLOG_ERROR(logger, ex, {"host", host}, "connect failed");
 ```
 
 The exception is held by reference and written only when the line is, so a call at a disabled level computes nothing,
-not even the type name. `error_key` (default `error`), `error_type_key` (`type`) and `error_message_key` (`message`)
-rename the parts for these call forms; the value form always writes `type` and `message`. A bound field with the error
-key is replaced by the exception at its position. A per-call field with the error key is a mistake: debug builds report
-it through `JSPDLOG_ASSERT`, and release builds write the field's value in the exception's place.
+not even the type name. It is the only field under the error key. If there are other fields with that key, bound or of
+the call, the exception takes the position of the first of them, and they are all left out. Otherwise it is written
+before the new fields of the call, after the bound ones.
+
+```cpp
+logger.with({"a", 1, "error", "none", "b", 2}).error(ex, "x");  // "a":1,"error":{...},"b":2
+logger.error(ex, {"host", host, "error", 42}, "x");             // "host":"db1","error":{...}
+```
 
 The type name is the dynamic type, demangled, and the same on GCC, Clang and MSVC for standard exceptions and your own
 types in a named namespace: `std::runtime_error`, `std::system_error`, `shop::payment_error`. For the type that
@@ -533,6 +546,30 @@ The header fields always come in the order timestamp, logger, level, severity, p
 followed by the fields and then the message. With all of them removed, a line holds only the fields and the message, or
 `{}`.
 
+**Keys.** These options name things in a line. They all belong to the [sink](#options-belong-to-sinks) that writes it.
+
+| Options                                                     | Default                        | Names                                                 |
+| ----------------------------------------------------------- | ------------------------------ | ----------------------------------------------------- |
+| `timestamp_key`, `logger_key`, `level_key`                  | `timestamp`, `logger`, `level` | header fields; `std::nullopt` leaves one out          |
+| `severity_key`                                              | off                            | the numeric severity                                  |
+| `process_key`, `thread_key`                                 | `process`, `thread`            | header fields; `std::nullopt` leaves one out          |
+| `source_key`                                                | off                            | the call site object                                  |
+| `source_file_key`, `source_line_key`, `source_function_key` | `file`, `line`, `function`     | its members, or fields of the line with `source_flat` |
+| `message_key`                                               | `message`                      | the message                                           |
+| `error_key`                                                 | `error`                        | the exception of an [exception call](#exceptions)     |
+| `error_type_key`, `error_message_key`, `error_cause_key`    | `type`, `message`, `cause`     | the members of every exception object                 |
+
+No two keys of one JSON object may be equal. Creating a formatter checks that, so the `json_logger` constructors,
+`adopt`, `install_json_formatter`, the factories and `make_error_handler` all throw `std::invalid_argument`, such as
+`jspdlog: json_options key "logger" is used twice`. Without exceptions they abort. Checked are:
+
+- the keys of the line: the enabled header keys, `source_key` (or the three call site keys with `source_flat`) when the
+  call site is on, `message_key` and `error_key`;
+- the three call site keys, when they are members of the call site object;
+- `error_type_key`, `error_message_key` and `error_cause_key`.
+
+Level names, severity numbers and `eol` may be anything. Keys are compared as given, before escaping.
+
 **Level names and severity.** `level_names` replaces the seven names, from trace to off. Without it the names are
 those of spdlog, including names set with `SPDLOG_LEVEL_NAMES`. `severity_key` adds a number after the level, by
 default the OpenTelemetry severity number of the level: trace 1, debug 5, info 9, warn 13, error 17, fatal 21. Change
@@ -598,8 +635,8 @@ Things to know about each:
   `critical` critical. `timestamp` as epoch milliseconds is a format its date remapper recognizes. `logger.thread_name` is a
   string attribute, and jspdlog has the numeric thread id only, so it writes the number; remove the key with
   `thread_key = std::nullopt` if your pipeline is strict about the type. The documentation names `error.kind`; the
-  message stays `message` inside the object, so the line has `error.message` too. Only the exception call forms use
-  `kind`: an exception passed as a value, `{"error", ex}`, always has `type` and `message`.
+  message stays `message` inside the object, so the line has `error.message` too. Every exception object has `kind`,
+  also one that is a field value.
 - **OpenTelemetry.** The keys are the names of the log data model (`SeverityText`, `SeverityNumber`, `Body`) in
   snake case. They are not a convention that the collector's `filelog` receiver applies by itself: configure its
   `json_parser` to move `timestamp` and `severity_text` into place. `code.file.path` is meant to be a path, and jspdlog
@@ -752,10 +789,11 @@ each sink's json_formatter       {"timestamp":...,"logger":"app","level":"info",
 
 When you create a `json_logger` (or `adopt()` one), jspdlog installs a `json_formatter` on every sink of the
 `spdlog::logger`. The formatter renders the whole line from spdlog's message: the header fields, the call site when
-`source_key` is set, the fields and the message. Two facts follow:
+`source_key` is set, the fields and the message. Where the fields need a key from the options, as inside an exception
+object, the payload holds a marker that the formatter replaces. Two facts follow:
 
 1. **The formatter lives on the sink, not on the logger.** Everything that shares a sink shares its formatter, and so
-   its options.
+   its options (see [Options belong to sinks](#options-belong-to-sinks)).
 1. **Every payload becomes valid JSON.** The payload of a `json_logger` call starts with a random token that is
    created once per process. The formatter splits such a payload into fields and message. Any other payload, whether
    from `spdlog_logger()->info(...)`, from `SPDLOG_INFO`, from third-party code or from spdlog itself, is escaped into
@@ -776,6 +814,30 @@ jspdlog::install_json_formatter(*extra_sink, options);
 `install_json_formatter` takes a `spdlog::logger&` or a `spdlog::sinks::sink&` and the same `json_options` as a
 `json_logger`. Example: [07_third_party.cpp](example/07_third_party.cpp).
 
+### Options belong to sinks
+
+`json_options` describe the output of a sink, and only the sink's `json_formatter` applies them. A line follows one set
+of options, header keys and exception keys alike, whoever logged it. The `json_logger` constructors and `adopt()` take
+options only to install them on the logger's sinks, replacing the formatter that was there.
+
+To give each sink its own schema, set the sinks up once and wrap the loggers with `json_logger::attach`, which installs
+nothing:
+
+```cpp
+auto file = std::make_shared<spdlog::sinks::basic_file_sink_mt>("app.ecs.json");
+auto console = std::make_shared<spdlog::sinks::stdout_sink_mt>();
+jspdlog::install_json_formatter(*file, jspdlog::presets::ecs());
+jspdlog::install_json_formatter(*console, jspdlog::presets::gcp());
+
+auto db = jspdlog::json_logger::attach(std::make_shared<spdlog::logger>("db", spdlog::sinks_init_list{file, console}));
+auto http =
+    jspdlog::json_logger::attach(std::make_shared<spdlog::logger>("http", spdlog::sinks_init_list{file, console}));
+// Each sink writes its own schema for both loggers, exceptions included.
+```
+
+A sink of an attached logger that has no `json_formatter` writes jspdlog's payload text, as after `set_pattern()`. A
+logger created with options afterwards replaces the formatters of its sinks.
+
 ### At a glance
 
 #### Safe
@@ -784,6 +846,7 @@ jspdlog::install_json_formatter(*extra_sink, options);
 - levels, `flush_on()`, `flush()` and the error handler
 - async through `async_sink` (v2) or `adopt()` (v1); the payload, with its token, is copied to the worker
 - several json_loggers sharing a sink, several wrappers of one `spdlog::logger`, and `spdlog::logger::clone()`
+- `json_logger::attach` on sinks that have a `json_formatter`
 - logging through `spdlog_logger()`, `SPDLOG_LOGGER_INFO` and similar macros: the message is escaped
 - `dup_filter_sink`'s "Skipped N duplicate messages.." line: a valid line
 - v1 `enable_backtrace()` and `dump_backtrace()`: calls below the level are stored and dumped as JSON lines
@@ -793,6 +856,7 @@ jspdlog::install_json_formatter(*extra_sink, options);
 
 - sinks that write the raw message instead of the formatted line
 - sinks added after the json_logger was created, and sinks shared with a plain spdlog logger
+- `json_logger::attach` on a sink that has no `json_formatter`
 - the default error handler, which writes plain text to stderr; `make_error_handler` writes JSON
 - the lifetime of the spdlog v1 async thread pool
 - `SPDLOG_LEVEL_NAMES`, which changes the `level` values
@@ -806,7 +870,7 @@ jspdlog::install_json_formatter(*extra_sink, options);
 
 - **Shared sinks.** Two json_loggers can share a sink: each line carries the name of the logger that wrote it. The sink
   has one formatter, though, so the `json_options` of the logger created last apply to both. Use one set of options
-  per sink.
+  per sink, or configure the sink once and [attach](#options-belong-to-sinks) the loggers.
 
 - **Sinks shared with a plain spdlog logger.** Call `install_json_formatter` on the plain logger (or the sink) after
   the json_logger was created, and both write valid lines with the same options.
@@ -933,13 +997,15 @@ using level = /* spdlog::level (v2) or spdlog::level::level_enum (v1) */;
 
 class json_logger {
 public:
-    // Throw std::invalid_argument on a null sink.
+    // Throw std::invalid_argument on a null sink, and on options that write a key twice.
     json_logger(std::string name, spdlog::sink_ptr sink, const json_options &options = {});
     json_logger(std::string name, spdlog::sinks_init_list sinks, const json_options &options = {});
     template <typename It> json_logger(std::string name, It first, It last, const json_options &options = {});
 
-    // Wraps an existing logger and installs a json_formatter on its sinks. Throws on a null logger.
+    // Wraps an existing logger and installs a json_formatter on its sinks. Throws like the constructors.
     static json_logger adopt(std::shared_ptr<spdlog::logger> logger, const json_options &options = {});
+    // Wraps a logger whose sinks already have a json_formatter, without touching them. Throws on a null logger.
+    static json_logger attach(std::shared_ptr<spdlog::logger> logger);
 
     // trace, debug, info, warn, error, critical: five forms each, all const. log(level, ...) takes the same forms.
     // Each also takes the call site as a trailing default argument, which you never write.
@@ -972,7 +1038,7 @@ public:
     const std::shared_ptr<spdlog::logger> &spdlog_logger() const noexcept;
 };
 
-struct json_options {
+struct json_options {  // applied by the json_formatter of a sink
     std::optional<std::string> timestamp_key = "timestamp";  // nullopt removes the field
     std::optional<std::string> logger_key = "logger";
     std::optional<std::string> level_key = "level";
@@ -990,6 +1056,7 @@ struct json_options {
     std::string error_key = "error";        // where the exception of an exception call goes
     std::string error_type_key = "type";
     std::string error_message_key = "message";
+    std::string error_cause_key = "cause";  // these three name the members of every exception object
     timestamp_format timestamp_style = timestamp_format::rfc3339_millis;  // or _micros, _nanos, epoch_millis
     spdlog::pattern_time_type time_type = spdlog::pattern_time_type::local;
     std::optional<std::string> eol;  // nullopt: spdlog's default
@@ -1033,7 +1100,7 @@ public:
     std::size_t size() const;
     bool contains(std::string_view key) const;
     void clear();
-    std::string to_json() const;  // {"key":value,...} in insertion order
+    std::string to_json() const;  // {"key":value,...} in insertion order; exceptions have the default keys
 };
 
 struct raw_json { std::string value; };
@@ -1081,7 +1148,7 @@ template <typename T, typename Enable = void> struct serializer {};
 // Renders every spdlog message as one JSON object. One instance per sink.
 class json_formatter final : public spdlog::formatter {
 public:
-    explicit json_formatter(json_options options = {});
+    explicit json_formatter(json_options options = {});  // throws std::invalid_argument on a key used twice
     void format(const spdlog::details::log_msg &msg, spdlog::memory_buf_t &dest) override;
     std::unique_ptr<spdlog::formatter> clone() const override;
 };
@@ -1117,17 +1184,20 @@ surprising output:
 
 - sinks that write the raw message instead of the formatted line, and `set_pattern()` or `set_formatter()` on a sink
   that replaces the formatter (see [Working with spdlog](#working-with-spdlog));
-- field keys equal to a header key or the message key (duplicate keys);
+- field keys equal to a header key, the source key or the message key of a sink, which are duplicate keys. Release
+  builds do not check this; debug builds report it through `JSPDLOG_ASSERT` when the line is written;
 - bytes that are not valid UTF-8 under `JSPDLOG_UTF8_PASS`, which are copied unchanged, and in `raw_json`, which is
   never checked (see [Text encoding](#text-encoding));
-- two different invalid keys of one object that are replaced by the same text, which then appear twice;
+- two different invalid keys of one object that are replaced by the same text, which then appear twice. That includes
+  two `json_options` keys, which are compared before they are replaced;
 - a serializer that writes more or less than one value, or leaves an object or array open: release builds do not check;
 - a discarded nlohmann/json value nested inside another one, logged through `jspdlog/nlohmann.h`;
 - time points and header timestamps outside the years 0000 to 9999, which are `null`, and maps, which are written in
   iteration order;
 - a `long double` beyond the range of `double`: it is a valid JSON number, but many parsers cannot read it;
-- a `json_logger` and a formatter installed from another module on one sink, where each module has its own copy of
-  the header, such as Windows DLLs: the line stays valid JSON, but the fields appear inside the message.
+- a `json_logger` and a formatter installed from another module on one sink, which includes a logger attached in
+  another module, where each module has its own copy of the header, such as Windows DLLs: the line stays valid JSON,
+  but the fields appear inside the message.
 
 The message is a single formatted string, and the call site is written only when `source_key` is set and the message
 has one: `json_logger` calls always record it, and for other loggers spdlog's macros and `logger->log(source_loc, ...)`
