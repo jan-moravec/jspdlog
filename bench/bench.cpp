@@ -335,8 +335,9 @@ int main(int argc, char **argv)
         run("jspdlog, per-call time_point", [&] { logger.info({"at", now}, "done"); });
     }
 
-    // Text: 64-byte messages that are ASCII, valid UTF-8 with 2-byte characters, and Latin-1 text that is not UTF-8.
-    // The UTF-8 policy of the build decides what the last one costs.
+    // Text: 64-byte messages that are ASCII, valid UTF-8 with 2-byte characters, and Latin-1 text that is not UTF-8,
+    // and a 512-byte one, which is longer than the inline part of spdlog's buffer. The UTF-8 policy of the build
+    // decides what the Latin-1 one costs.
     {
         const jspdlog::json_logger logger("bench", make_sink(), options_with(true, false));
         const std::string ascii(64, 'a');
@@ -351,6 +352,8 @@ int main(int argc, char **argv)
         run("message 64 B ASCII", [&] { logger.info(ascii); });
         run("message 64 B with 2-byte UTF-8", [&] { logger.info(two_byte); });
         run("message 64 B Latin-1 bytes (invalid UTF-8)", [&] { logger.info(latin1); });
+        const std::string long_ascii(512, 'a');
+        run("message 512 B ASCII", [&] { logger.info(long_ascii); });
     }
 
     // The timestamp styles, with the message only.

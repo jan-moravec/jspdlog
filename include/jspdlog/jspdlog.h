@@ -1143,13 +1143,13 @@ struct fmt::formatter<jspdlog::detail::deferred_payload<Write>>
     constexpr auto parse(fmt::format_parse_context &ctx) -> decltype(ctx.begin()) { return ctx.begin(); }
 #endif
 
-    /** @brief Runs the write function and copies its output. */
+    /** @brief Runs the write function and copies its output, in bulk where the library's output allows it. */
     template <typename Context>
     auto format(const jspdlog::detail::deferred_payload<Write> &payload, Context &ctx) const -> decltype(ctx.out())
     {
         spdlog::memory_buf_t buf;
         (*payload.write)(buf);
-        return std::copy(buf.begin(), buf.end(), ctx.out());
+        return spdlog::fmt_lib::format_to(ctx.out(), "{}", spdlog::fmt_lib::string_view{buf.data(), buf.size()});
     }
 };
 
